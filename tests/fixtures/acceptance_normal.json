@@ -1,0 +1,45 @@
+{
+  "batch": {
+    "batch_id": "B-NORMAL-001",
+    "project": "P-DEFAULT",
+    "model": "JH-550W",
+    "status": "completed",
+    "lot_size": 10,
+    "created_at": "2026-06-01T08:00:00Z"
+  },
+  "rules": {
+    "project_id": "P-DEFAULT",
+    "model": "JH-550W",
+    "version_no": 1,
+    "nameplate_power": 550.0,
+    "power_tolerance": 0.03,
+    "parameter_standards": {
+      "temp": {"std_value": 25.0, "tolerance": 0.10, "enabled": true},
+      "isc":  {"std_value": 10.5, "tolerance": 0.05, "enabled": true},
+      "voc":  {"std_value": 48.0, "tolerance": 0.05, "enabled": true},
+      "vm":   {"std_value": 40.0, "tolerance": 0.05, "enabled": true},
+      "im":   {"std_value": 13.0, "tolerance": 0.05, "enabled": true},
+      "ff":   {"std_value": 0.80, "tolerance": 0.02, "enabled": true}
+    },
+    "current_bands": [
+      {"lower": 12.0, "upper": 14.0, "grade": "A"},
+      {"lower": 14.0, "upper": 15.5, "grade": "B"}
+    ],
+    "sample_plan": {"inspection_type": "iv", "inspection_level": "normal", "aql": 1.0},
+    "idempotency_key": "P-DEFAULT+JH-550W+1"
+  },
+  "inspections": [
+    {"sn": "SN-N-001", "project": "P-DEFAULT", "grade": "A", "captured_date": "2026-06-01", "pmax": 550.0, "temp": 25.0, "isc": 10.5, "voc": 48.0, "vm": 40.0, "im": 13.0, "ff": 0.80, "appearance_result": "pass"},
+    {"sn": "SN-N-002", "project": "P-DEFAULT", "grade": "A", "captured_date": "2026-06-01", "pmax": 548.0, "temp": 25.0, "isc": 10.5, "voc": 48.0, "vm": 40.0, "im": 13.0, "ff": 0.80, "appearance_result": "pass"},
+    {"sn": "SN-N-003", "project": "P-DEFAULT", "grade": "A", "captured_date": "2026-06-01", "pmax": 552.0, "temp": 25.0, "isc": 10.5, "voc": 48.0, "vm": 40.0, "im": 13.0, "ff": 0.80, "appearance_result": "pass"},
+    {"sn": "SN-N-004", "project": "P-DEFAULT", "grade": "A", "captured_date": "2026-06-01", "pmax": 550.0, "temp": 25.0, "isc": 10.5, "voc": 48.0, "vm": 40.0, "im": 13.5, "ff": 0.80, "appearance_result": "pass"},
+    {"sn": "SN-N-005", "project": "P-DEFAULT", "grade": "A", "captured_date": "2026-06-01", "pmax": 549.0, "temp": 25.0, "isc": 10.5, "voc": 48.0, "vm": 40.0, "im": 12.5, "ff": 0.80, "appearance_result": "pass"},
+    {"sn": "SN-N-006", "project": "P-DEFAULT", "grade": "A", "captured_date": "2026-06-01", "pmax": 551.0, "temp": 25.0, "isc": 10.5, "voc": 48.0, "vm": 40.0, "im": 13.0, "ff": 0.81, "appearance_result": "pass"},
+    {"sn": "SN-N-007", "project": "P-DEFAULT", "grade": "A", "captured_date": "2026-06-01", "pmax": 550.0, "temp": 25.0, "isc": 10.5, "voc": 48.0, "vm": 40.0, "im": 13.0, "ff": 0.80, "appearance_result": "pass"},
+    {"sn": "SN-N-008", "project": "P-DEFAULT", "grade": "A", "captured_date": "2026-06-01", "pmax": 547.5, "temp": 25.0, "isc": 10.5, "voc": 48.0, "vm": 40.0, "im": 13.0, "ff": 0.80, "appearance_result": "pass"},
+    {"sn": "SN-N-009", "project": "P-DEFAULT", "grade": "A", "captured_date": "2026-06-01", "pmax": 553.0, "temp": 25.0, "isc": 10.5, "voc": 48.0, "vm": 40.0, "im": 13.0, "ff": 0.80, "appearance_result": "pass"},
+    {"sn": "SN-N-010", "project": "P-DEFAULT", "grade": "A", "captured_date": "2026-06-01", "pmax": 550.0, "temp": 25.0, "isc": 10.5, "voc": 48.0, "vm": 40.0, "im": 13.0, "ff": 0.80, "appearance_result": "pass"}
+  ],
+  "incidents": [],
+  "reinspections": []
+}

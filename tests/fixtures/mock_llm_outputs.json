@@ -1,0 +1,25 @@
+{
+  "comment": "Fixed model outputs for MockLLMClient (总 spec §9.1, O-2 assumption: no historical data, attribution verified via mock).",
+  "attribution": {
+    "incident_id": "INC-001",
+    "trigger_type": "current_band_oob",
+    "root_cause": "cell mismatch -> Impp drift above grade-A band",
+    "confidence": 0.87,
+    "structured_output": {
+      "root_cause_code": "CELL_MISMATCH",
+      "recommended_action": "re-test 3-cell string, replace lead cell"
+    }
+  },
+  "extraction": {
+    "source_sn": "SN-I-OODB",
+    "extracted_params": {
+      "pmax": 550.0,
+      "im": 16.5,
+      "voc": 48.0,
+      "isc": 10.5,
+      "ff": 0.80
+    },
+    "appearance_findings": ["bypass-diode hot spot at cell 4"],
+    "confidence": 0.81
+  }
+}

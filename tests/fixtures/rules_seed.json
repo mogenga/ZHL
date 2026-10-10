@@ -1,0 +1,46 @@
+{
+  "rules": [
+    {
+      "project_id": "P-DEFAULT",
+      "model": "JH-550W",
+      "version_no": 1,
+      "nameplate_power": 550.0,
+      "power_tolerance": 0.03,
+      "parameter_standards": {
+        "temp": {"std_value": 25.0, "tolerance": 0.10, "enabled": true},
+        "isc":  {"std_value": 10.5, "tolerance": 0.05, "enabled": true},
+        "voc":  {"std_value": 48.0, "tolerance": 0.05, "enabled": true},
+        "vm":   {"std_value": 40.0, "tolerance": 0.05, "enabled": true},
+        "im":   {"std_value": 13.0, "tolerance": 0.05, "enabled": true},
+        "ff":   {"std_value": 0.80, "tolerance": 0.02, "enabled": true}
+      },
+      "current_bands": [
+        {"lower": 12.0, "upper": 14.0, "grade": "A"},
+        {"lower": 14.0, "upper": 15.5, "grade": "B"}
+      ],
+      "sample_plan": {"inspection_type": "iv", "inspection_level": "normal", "aql": 1.0},
+      "idempotency_key": "P-DEFAULT+JH-550W+1"
+    },
+    {
+      "project_id": "P-TEST",
+      "model": "JH-550W",
+      "version_no": 2,
+      "nameplate_power": 550.0,
+      "power_tolerance": 0.03,
+      "parameter_standards": {
+        "temp": {"std_value": 25.0, "tolerance": 0.10, "enabled": true},
+        "isc":  {"std_value": 10.5, "tolerance": 0.05, "enabled": true},
+        "voc":  {"std_value": 48.0, "tolerance": 0.05, "enabled": true},
+        "vm":   {"std_value": 40.0, "tolerance": 0.05, "enabled": true},
+        "im":   {"std_value": 13.0, "tolerance": 0.05, "enabled": true},
+        "ff":   {"std_value": 0.80, "tolerance": 0.02, "enabled": true}
+      },
+      "current_bands": [
+        {"lower": 12.0, "upper": 14.0, "grade": "A"},
+        {"lower": 14.0, "upper": 15.5, "grade": "B"}
+      ],
+      "sample_plan": {"inspection_type": "iv", "inspection_level": "normal", "aql": 1.0},
+      "idempotency_key": "P-TEST+JH-550W+2"
+    }
+  ]
+}
