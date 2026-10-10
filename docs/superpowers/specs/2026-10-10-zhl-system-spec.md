@@ -119,18 +119,47 @@ new → isolated → assigned → pending_recheck → closed
 | DB | PostgreSQL 15+ | 声明式约束 + JSONB + 行级锁 |
 | ORM | SQLAlchemy 2.0 | 显式事务边界 |
 | 校验 | Pydantic v2 | JSON Schema 约束 |
-| 编排 | AGH Skill/Plugin | 五段主链调度 |
+| 编排 | LangGraph（Python） | 五段主链 Workflow 编排、状态管理、节点执行、Human-in-the-loop |
+| 持久化 | LangGraph Checkpointer（PostgreSQL） | 断点恢复、故障续跑、时间旅行回看 |
 | 测试 | pytest + httpx (async) | 分层测试 |
 
 ### 3.2 依赖方向（唯一固定约束）
 
 ```
-接入层 (FastAPI) → 编排层 (Skill) → 能力层 (Plugin) → domain (纯函数)
-                                         ↓
-                                    数据层 (SQLAlchemy + Postgres)
+接入层 (FastAPI) → 编排层 (LangGraph 图 + 节点) → 能力层 (Plugin) → domain (纯函数)
+                                                          ↓
+                                                     数据层 (SQLAlchemy + Postgres)
+                                                          ↓
+                                                     Checkpointer (LangGraph 状态持久化)
 ```
 
-**domain 层不依赖 infra 层。** 判定/断言/状态机是纯函数，可脱离 DB 与模型独立测试。
+**domain 层不依赖 infra 层。** 判定/断言/状态机是纯函数，不读库、不取时间、不调模型、不 import LangGraph，可脱离数据库与模型独立测试。Skill 与 Plugin 只做编排与 IO；LangGraph 节点是 Skill/Plugin 的封装壳，不直接写业务判断。
+
+### 3.2.1 LangGraph 工作流设计
+
+LangGraph 作为编排层实际执行框架，替代原「AGH Skill/Plugin」抽象。核心映射：
+
+| 架构概念 | LangGraph 对应 | 说明 |
+| --- | --- | --- |
+| 五段主链 | 一张主图（`main_chain_graph`） | 段间转移由 LangGraph 边 + 条件路由表达 |
+| 段内步骤 | `add_node` | 每个 Skill/Plugin 调用封装为一个节点 |
+| 批次状态 | 自定义 `BatchWorkflowState`（TypedDict） | 含 `batch_id`、当前状态、检验记录、异常、证据引用、人工反馈字段 |
+| 人工确认（低置信） | `interrupt()` | 检查点挂起，等 `Command(resume=...)` 恢复；对应 §9.7 人工确认 API |
+| 归因假设采纳 | `interrupt()` | 质量工程师三选一（采纳/驳回/修改）后恢复 |
+| 放行断言 | 断言节点（纯函数，domain 层） | 断言失败直接路由到拒绝分支，不 interrupt |
+| 故障恢复 | Checkpointer + 断点重放 | 节点失败时从最后成功检查点续跑，已成功节点不重放 |
+| 轨迹留痕 | 检查点历史 + `get_state_history` | 任务轨迹即 LangGraph 检查点序列，满足架构 §7.2 可复演 |
+
+**两张 LangGraph 图**：
+
+1. `main_chain_graph`：五段主链 + 状态转移，覆盖 待入场 → 已归档 全路径
+2. `incident_subgraph`：异常子图（归因 → CAPA → 复检 → 断言），作为主图「已隔离」分支的子图挂载
+
+**约束**：
+- 节点必须是确定性封装：同一状态输入 + 同一模型输出 → 同一图状态输出。模型随机性通过固定 seed（抽样）与可回放测试（固定模型输出）控制
+- 人工 interrupt 点仅三处：低置信字段确认、归因假设采纳、放行前最终批准（对应人工三职责）
+- 断言失败、SN 冲突、规则缺失**不 interrupt**，直接路由到隔离/拒绝分支（确定性路径）
+- Checkpointer 用 PostgreSQL 后端（`langgraph-checkpoint-postgres`），`thread_id = batch_id`，支持时间旅行回看
 
 ### 3.3 目录结构（示意，可微调）
 
@@ -138,16 +167,17 @@ new → isolated → assigned → pending_recheck → closed
 zhl/
 ├── app/
 │   ├── api/          # FastAPI 路由
-│   ├── skills/       # AGH Skill（编排）
+│   ├── workflow/     # LangGraph 图与节点（main_chain_graph / incident_subgraph）
+│   ├── skills/       # Skill（编排语义，被 workflow 节点封装）
 │   ├── plugins/      # Plugin（能力层）
 │   ├── domain/       # 纯函数（判定/断言/状态机）
-│   ├── infra/        # SQLAlchemy 模型 + 仓库
+│   ├── infra/        # SQLAlchemy 模型 + 仓库 + Checkpointer 配置
 │   ├── governance/   # 证据/轨迹/报告
 │   └── static/       # 内置页面
 ├── tests/
 │   ├── domain/
 │   ├── plugins/
-│   ├── skills/
+│   ├── workflow/     # LangGraph 图回放测试 + interrupt/resume 断言
 │   └── e2e/
 ├── docs/
 ├── dev-notes/
@@ -309,7 +339,7 @@ Phase 0 (串行，共享契约) ──→ Phase A ∥ Phase B (并行) ──→
 
 P0 使用**可插拔 LLM 客户端**，通过 `LLMClient` Protocol 定义 `chat(prompt, schema) -> dict`。默认实现调用 OpenAI-compatible API（环境变量 `ZHL_LLM_API_KEY` + `ZHL_LLM_BASE_URL` + `ZHL_LLM_MODEL` 配置）。测试与演示时使用 `MockLLMClient` 返回固定 JSON 输出（测试夹具提供）。**不绑定具体供应商**，便于切换。
 
-### 9.2 AGH Skill/Plugin 契约
+### 9.2 LangGraph 节点契约
 
 架构文档的 `Plugin` Protocol 保持原样：
 
@@ -322,7 +352,7 @@ class Plugin(Protocol):
 
 `TaskContext` 携带 `task_id`, `evidence_writer`, `operator`。**Plugin 不自行写库**，通过 `ctx.evidence_writer` 写入。Skill 层做编排，调用 Plugin 完成确定性操作。
 
-P0 阶段 Skill/Plugin 的「AGH 语义」简化为：Skill 是 Python 类（`BaseSkill` 子类），Plugin 是 Python 类（实现 `Plugin` Protocol），由 FastAPI 路由直接调用。若后续接入 AGH 运行时，仅替换调度层，不影响 domain 与 Plugin 契约。
+P0 阶段 Skill/Plugin 被 LangGraph 节点封装：每个节点是一个纯函数（或 `add_node` 注册的 callable），接收 `BatchWorkflowState`，返回状态更新字典。节点内部调用 Skill/Plugin，不直接写业务判断。LangGraph `interrupt()` 对应人工确认点，`Command(resume=...)` 恢复执行。Checkpointer 用 PostgreSQL 后端（`langgraph-checkpoint-postgres`），`thread_id = batch_id`。
 
 ### 9.3 规则版本管理
 

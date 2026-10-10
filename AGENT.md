@@ -58,7 +58,8 @@
 - FastAPI（路由、依赖注入、生命周期、异常处理）
 - SQLAlchemy 2.0（Session、ORM 映射、事务、关系、迁移）
 - Pydantic v2（模型、验证器、序列化、JSON Schema）
-- LangChain / LangGraph（若有 Agent 编排接入）
+- LangGraph（StateGraph、interrupt/resume、Checkpointer、thread_id 语义、子图挂载、`get_state_history`、故障重放）
+- LangChain（若有 Agent 编排接入）
 - Langfuse / 观测平台（若引入追踪）
 - PostgreSQL 特有语法（JSONB、EXCLUDE、行级锁、触发器）
 - pytest / httpx（测试与异步 HTTP 客户端）
@@ -90,13 +91,15 @@
 ### 3.2 分层依赖
 
 ```
-接入层 (FastAPI) → 编排层 (Skill) → 能力层 (Plugin) → domain (纯函数)
-                                         ↓
-                                    数据层 (SQLAlchemy + Postgres)
+接入层 (FastAPI) → 编排层 (LangGraph 图 + 节点) → 能力层 (Plugin) → domain (纯函数)
+                                                         ↓
+                                                    数据层 (SQLAlchemy + Postgres)
+                                                         ↓
+                                                    Checkpointer (LangGraph 状态持久化)
 ```
 
-- **domain 层不依赖 infra 层**。判定/断言/状态机纯函数，不 import `sqlalchemy`、不 import `app.infra.*`
-- Skill/Plugin 只做编排与 IO，不直接写业务判断
+- **domain 层不依赖 infra 层，也不 import LangGraph**。判定/断言/状态机纯函数，不 import `sqlalchemy`、不 import `app.infra.*`、不 import `langgraph`
+- LangGraph 节点只做编排与 IO，是 Skill/Plugin 的封装壳，不直接写业务判断
 - 跨层调用通过 Protocol 接口，不直接依赖具体实现
 
 ### 3.3 测试要求
@@ -208,12 +211,15 @@ ReinspectionResult(reinspection_id, incident_id, sn, passed, evidence_ids)
 - 查询结果必须在 dev-notes 留痕
 - 不凭记忆写代码
 
-### 7.2 AGH Skill/Plugin 框架
+### 7.2 LangGraph 工作流
 
-- Skill：Python 类，继承 `BaseSkill`，编排 Plugin 调用
-- Plugin：Python 类，实现 `Plugin` Protocol，完成确定性操作
-- 两者都不直接写库，通过 `TaskContext.evidence_writer` 写入
-- 若后续接入 AGH 运行时，仅替换调度层，不改 domain/Plugin 契约
+- 节点：LangGraph `add_node` 封装的 callable，接收 `BatchWorkflowState`，返回状态更新字典
+- 人工 interrupt：仅三处（低置信字段确认、归因假设采纳、放行前最终批准）
+- 确定性路径（断言失败 / SN 冲突 / 规则缺失）：直接路由，不 interrupt
+- Checkpointer：PostgreSQL 后端（`langgraph-checkpoint-postgres`），`thread_id = batch_id`
+- 故障续跑：节点失败时从最后成功检查点续跑，已成功节点不重放
+- 轨迹留痕：`get_state_history` 即任务轨迹，满足架构 §7.2 可复演
+- 不直接写库：节点通过 `TaskContext.evidence_writer` 写入证据，与 Plugin 契约一致
 
 ### 7.3 代码评审
 

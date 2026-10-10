@@ -40,9 +40,27 @@
 - **拒绝与纠偏**：无
 - **翻车与返工**：subagent_fork 120s 超时，换 spawn 成功
 
-## 2026-10-10 00:25 · zhl-agent · 计划评审通过
+## 2026-10-10 00:30 · zhl-agent · 用户追加修改
 
-- **关键原话**：用户未提出异议，spec + AGENT.md + 模块拆分全部定稿
-- **关键产出**：spec（含 §9）、AGENT.md、模块拆分（Phase 0 / A / B）
-- **拒绝与纠偏**：无
+- **关键原话**：用户要求"增加 Agent 开发技术栈：LangGraph 负责 Agent Workflow 编排、状态管理、节点执行和 Human-in-the-loop"
+- **关键产出**：
+  - spec §3.1 技术选型增加 LangGraph + LangGraph Checkpointer 两行
+  - spec §3.2 依赖方向加入 LangGraph 图/节点 + Checkpointer 层级
+  - spec §3.2.1 新增 LangGraph 工作流设计小节（main_chain_graph / incident_subgraph、interrupt 点、约束）
+  - spec §3.3 目录结构新增 `app/workflow/` + `tests/workflow/`
+  - spec §9.2 改名为「LangGraph 节点契约」，说明节点封装 + interrupt/resume + Checkpointer
+  - AGENT.md §2.1 库清单加 LangGraph（StateGraph / interrupt / Checkpointer / thread_id / 子图 / get_state_history / 故障重放）
+  - AGENT.md §3.2 分层依赖加 LangGraph 层级与「domain 不 import LangGraph」约束
+  - AGENT.md §7.2 改名为「LangGraph 工作流」，列人工 interrupt 三处 + 确定性路由 + Checkpointer + 轨迹
+- **拒绝与纠偏**：无。原 spec §9.2 的「AGH 简化语义」被 LangGraph 节点契约替代
+- **翻车与返工**：edit 调用有 3 次 oldText not found（字符细节差异），重读后修正
+
+---
+
+## 2026-10-10 00:35 · zhl-agent · dev-notes 目录规范
+
+- **关键原话**：用户要求"登记新的 dev-notes"
+- **关键产出**：`dev-notes/README.md`（目录说明 + 命名规则 + 文件结构 + 禁止事项）
+- **拒绝与纠偏**：无。人类开发者按 README 自建各自文件，与 zhl-agent.md 隔离
 - **翻车与返工**：无
+
