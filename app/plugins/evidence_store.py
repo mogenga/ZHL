@@ -1,16 +1,19 @@
-"""EvidenceStore Protocol + FileEvidenceStore skeleton (P0 spec §5.4 / D10 / D11).
+"""EvidenceStore Protocol + FileEvidenceStore (P0 spec §5.4 / D10 / D11,
+PA plan Task 4 DB branch).
 
-Phase 0 delivers the Protocol and the *file + hash* half of
-``FileEvidenceStore``: ``save`` computes SHA-256, writes the bytes under
-``root/evidence_type/...`` (总 spec §9.5 layout), and records metadata
-in-memory. DB writes are explicitly deferred to Phase A, so the skeleton is
-constructible with ``db=None`` and is testable on a temp dir with no clock
-reads — a caller-injected ``now`` (defaulting to a fixed value) keeps
-``generated_at`` deterministic so tests can pin it.
+Phase 0 delivered the *file + hash* half: ``save`` computes SHA-256, writes
+the bytes under ``root`` (evidence-type subdirectory layout, 总 spec §9.5),
+and records metadata in memory. Phase A adds the DB half: when constructed
+with a live SQLAlchemy ``Session``, ``save`` also INSERTs the matching
+row into the ``evidence`` table (append-only — no UPDATE / DELETE, PA spec
+§5.8). ``db=None`` keeps the P0 skeleton behavior exactly (file + in-memory
+refs, no DB), so P0 tests stay green unmodified.
 
 Purity boundary: this module lives in ``app/plugins`` and MAY reference the
-SQLAlchemy ``Session`` type for forward-compat, but Phase-0 logic never
-opens a DB. No model / LangGraph / random-internal-imports.
+SQLAlchemy ``Session`` / ``Evidence`` model types, but it never opens a DB
+itself — the Session is injected by the caller, which owns the transaction
+(AGENT.md §4.3: one call == one transaction boundary; the workflow node
+commits after the evidence row lands).
 """
 
 from __future__ import annotations
@@ -18,8 +21,14 @@ from __future__ import annotations
 import hashlib
 import uuid
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol, runtime_checkable
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.infra.models import Evidence as EvidenceModel
 
 #: D10: the default evidence root (overridable via ZHL_EVIDENCE_ROOT at Phase A).
 DEFAULT_EVIDENCE_ROOT = "data/evidence"
@@ -62,6 +71,7 @@ class EvidenceStore(Protocol):
         content: bytes | None = None,
         path: str | None = None,
         meta: dict | None = None,
+        now: datetime | None = None,
     ) -> EvidenceRef: ...
 
     def get(self, evidence_id: str) -> EvidencePayload: ...
@@ -107,6 +117,7 @@ class FileEvidenceStore:
         content: bytes | None = None,
         path: str | None = None,
         meta: dict | None = None,
+        now: datetime | None = None,
     ) -> EvidenceRef:
         if content is None and path is None:
             raise ValueError("save requires content or path")
@@ -147,8 +158,46 @@ class FileEvidenceStore:
             file_path=rel,
             meta=meta,
         )
-        # DB write (evidence table insert) is deferred to Phase A.
+        # PA Task 4: DB half (append-only) when a live session was injected.
+        if self._db is not None:
+            self._insert_evidence_row(ref, now=now)
         return ref
+
+    def _insert_evidence_row(self, ref: EvidenceRef, now: datetime | None = None) -> None:
+        """INSERT the evidence row (check-then-insert ⇒ idempotent, append-only).
+
+        ``make_evidence_id`` is deterministic on ``object_ref``, so a re-save
+        of the same logical object reuses the same PK: when the row already
+        exists the insert is skipped entirely (ON CONFLICT DO NOTHING
+        semantics, DDL-agnostic so it works on SQLite too). The row is never
+        UPDATEd or DELETEd here (PA spec §5.8).
+
+        The row stores the file pointer (``content_hash`` + ``file_path``)
+        plus identity fields; the bytes themselves stay on disk, not in the
+        JSONB ``content`` column (which is reserved for structured content).
+        """
+        db: Session = self._db
+        generated_at = now or datetime.now(UTC)
+        existing = db.scalars(
+            select(EvidenceModel.evidence_id).where(
+                EvidenceModel.evidence_id == uuid.UUID(ref.evidence_id)
+            )
+        ).first()
+        if existing is not None:
+            return
+        db.add(
+            EvidenceModel(
+                evidence_id=uuid.UUID(ref.evidence_id),
+                evidence_type=ref.evidence_type,
+                object_ref=ref.object_ref,
+                content_hash=ref.content_hash,
+                file_path=ref.file_path,
+                content=None,
+                generated_at=generated_at,
+                generated_by="system",
+            )
+        )
+        db.flush()
 
     def get(self, evidence_id: str) -> EvidencePayload:
         if evidence_id not in self._by_id:
