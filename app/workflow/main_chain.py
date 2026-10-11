@@ -44,7 +44,7 @@ from langgraph.types import interrupt
 
 from app.domain.state_machine import transition
 from app.domain.types import IsoRow
-from app.infra.models import DeliveryBatch, QualityRuleVersion
+from app.infra.models import AgentTaskTrace, DeliveryBatch, QualityRuleVersion
 from app.plugins.sampling import run_sampling
 from app.skills.extract import extract_inspection_data
 from app.skills.judge import judge_batch
@@ -228,7 +228,7 @@ def build_main_chain_graph(
         session.flush()
         return {
             "decision": result,
-            "evidence_ids": [str(e) for e in (state.get("evidence_ids") or [])] + [""],
+            "evidence_ids": [str(e) for e in (state.get("evidence_ids") or [])],
         }
 
     def sample_node(state: BatchWorkflowState) -> dict:
@@ -277,8 +277,6 @@ def build_main_chain_graph(
             tr = transition(current, "isolated", {"any_fail": True}, kind="batch")
 
         # Persist the new batch status (if it changed) + one agent_task_trace row (B2).
-        from app.infra.models import AgentTaskTrace, DeliveryBatch
-
         batch = session.get(DeliveryBatch, uuid.UUID(state["batch_id"]))
         if batch is not None:
             batch.status = target

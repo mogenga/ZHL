@@ -19,6 +19,7 @@ import uuid
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException
+from langgraph.types import Command
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -26,6 +27,19 @@ from sqlalchemy.orm import Session
 from app.infra.models import DeliveryBatch, ModuleInspection
 from app.infra.repositories import CrossBatchSnConflict
 from app.workflow.main_chain import build_main_chain_graph
+
+
+def _get_batch_by_id(s: Session, batch_id: str, label: str) -> DeliveryBatch:
+    """Load a batch by UUID path param; malformed → 404 (B3), not 500."""
+    try:
+        batch_uuid = uuid.UUID(batch_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail={label: batch_id}) from None
+    batch = s.get(DeliveryBatch, batch_uuid)
+    if batch is None:
+        raise HTTPException(status_code=404, detail={label: batch_id})
+    return batch
+
 
 #: Field whitelist shared with the repository layer (D7 override surface).
 _CONFIRMABLE = frozenset({"pmax", "temp", "isc", "voc", "vm", "im", "ff", "appearance_result"})
@@ -94,9 +108,7 @@ def build_router(get_deps: object) -> APIRouter:
         ``task_id`` = ``str(batch_id)`` (Q2).
         """
         s: Session = d.session
-        batch = s.get(DeliveryBatch, uuid.UUID(body.batch_id))
-        if batch is None:
-            raise HTTPException(status_code=404, detail={"batch_id": body.batch_id})
+        batch = _get_batch_by_id(s, body.batch_id, "batch_id")
 
         graph = _graph_for(d, batch)
         cfg = {"configurable": {"thread_id": body.batch_id}}
@@ -133,9 +145,21 @@ def build_router(get_deps: object) -> APIRouter:
         # The judge node's A4 guard therefore always sees a confirmed DB
         # state (§2.3: graph nodes never write DB state).
         if pending and float(state.get("confidence") or 0.0) >= 0.8:
-            for row in s.scalars(
+            confirmed_rows = s.scalars(
                 select(ModuleInspection).where(ModuleInspection.batch_id == batch.batch_id)
-            ).all():
+            ).all()
+            # Defensive guard (§2.3): the graph's intake node just flushed the
+            # rows in this same session/transaction, so the select above is
+            # expected to see exactly the batch's rows. If it sees fewer, the
+            # confirmation write below would be a silent no-op that still
+            # resumes the graph — exactly the "DB state never written, graph
+            # keeps running" failure §2.3 is meant to prevent. Fail loudly
+            # instead of proceeding on an unconfirmed DB state.
+            expected = len(body.inspections)
+            assert (
+                len(confirmed_rows) == expected
+            ), f"auto-confirm: expected {expected} inspection rows, found {len(confirmed_rows)}"
+            for row in confirmed_rows:
                 row.intake_status = "confirmed"
                 for key, value in (body.fields or {}).items():
                     if key in _CONFIRMABLE:
@@ -147,8 +171,6 @@ def build_router(get_deps: object) -> APIRouter:
                 meta={"action": "confirm", "auto": True, "confidence": state.get("confidence")},
             )
             s.commit()
-            from langgraph.types import Command
-
             for _chunk in graph.stream(
                 Command(resume={"action": "confirm", "fields": body.fields}), config=cfg
             ):
@@ -172,9 +194,7 @@ def build_router(get_deps: object) -> APIRouter:
     ) -> dict:
         """§5.6: persist the whole-batch confirmation, then resume the graph."""
         s: Session = d.session
-        batch = s.get(DeliveryBatch, uuid.UUID(task_id))
-        if batch is None:
-            raise HTTPException(status_code=404, detail={"task_id": task_id})
+        batch = _get_batch_by_id(s, task_id, "task_id")
 
         # §5.6 / Q3: whole-batch intake_status + human_confirmation evidence
         # BEFORE the resume (graph nodes must not write DB state, spec §2.3).
@@ -194,8 +214,6 @@ def build_router(get_deps: object) -> APIRouter:
             meta={"action": body.action, "fields": body.fields},
         )
         s.commit()
-
-        from langgraph.types import Command
 
         graph = _graph_for(d, batch)
         cfg = {"configurable": {"thread_id": task_id}}

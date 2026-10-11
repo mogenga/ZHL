@@ -86,6 +86,57 @@ def test_db_none_fallback(tmp_path: Path) -> None:
     assert target.read_bytes() == b"no-db"
 
 
+def test_distinct_evidence_types_same_object_get_distinct_rows(session, tmp_path: Path) -> None:
+    """C1 fix (Phase A code review): the ``evidence`` table's PK is
+    ``evidence_id`` only. If ``make_evidence_id`` keyed on ``object_ref``
+    alone, every evidence type saved for the same batch would mint the same
+    ID and the check-then-insert in ``_insert_evidence_row`` would silently
+    skip every type after the first — the whole batch's audit trail would
+    collapse to one row in production DBs (the P0/API tests never caught
+    this because they use a stub evidence store that mints fresh UUIDs).
+
+    This test uses the real ``FileEvidenceStore`` + a live SQLite session and
+    saves all five evidence types the main-chain graph / API routes write for
+    one batch; each must land as its own row."""
+    store = FileEvidenceStore(root=tmp_path, db=session)
+    ref_obj = {"kind": "batch", "id": "BATCH-1"}
+    refs = [
+        store.save(etype, ref_obj, content=f"content-{etype}".encode())
+        for etype in (
+            "source_file",
+            "extraction_result",
+            "decision_snapshot",
+            "task_trace",
+            "human_confirmation",
+        )
+    ]
+    session.flush()
+    assert len({r.evidence_id for r in refs}) == 5, "evidence_id must differ across etypes"
+    rows = session.scalars(select(Evidence)).all()
+    assert len(rows) == 5, f"expected 5 rows (one per evidence type), got {len(rows)}"
+    assert {row.evidence_type for row in rows} == {
+        "source_file",
+        "extraction_result",
+        "decision_snapshot",
+        "task_trace",
+        "human_confirmation",
+    }
+
+
+def test_resave_same_type_and_object_is_idempotent(session, tmp_path: Path) -> None:
+    """Same etype + same object_ref re-saved must still be idempotent
+    (append-only, check-then-insert) even after the C1 fix — the fix keys
+    the ID on (etype, object_ref), not on a counter, so a genuine duplicate
+    save (same type, same object) still collapses to one row."""
+    store = FileEvidenceStore(root=tmp_path, db=session)
+    ref1 = store.save("source_file", {"kind": "batch", "id": "BATCH-2"}, content=b"v1")
+    ref2 = store.save("source_file", {"kind": "batch", "id": "BATCH-2"}, content=b"v1")
+    session.flush()
+    assert ref1.evidence_id == ref2.evidence_id
+    rows = session.scalars(select(Evidence)).all()
+    assert len(rows) == 1, f"expected 1 row (idempotent re-save), got {len(rows)}"
+
+
 def _to_uuid(hex_str: str):
     import uuid
 

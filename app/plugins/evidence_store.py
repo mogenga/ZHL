@@ -79,14 +79,22 @@ class EvidenceStore(Protocol):
     def list_by_object(self, object_ref: dict) -> list[EvidenceRef]: ...
 
 
-def make_evidence_id(object_ref: dict) -> str:
+def make_evidence_id(object_ref: dict, etype: str | None = None) -> str:
     """Derive a stable, reproducible evidence ID from the object reference.
 
     A deterministic ID (hash of the serialized ref + type) lets a re-save of
     the same logical object reuse the same identity instead of minting a
     fresh random UUID each time — important for idempotent re-runs.
+
+    ``etype`` is part of the key: two different evidence types for the same
+    object (e.g. ``source_file`` vs ``decision_snapshot`` for one batch) must
+    get distinct IDs so the DB ``evidence`` table's append-only, one-row-per-
+    (etype, object_ref) contract holds. ``FileEvidenceStore.save`` always
+    passes the real ``etype``; a bare ``make_evidence_id(ref)`` call (P0
+    skeleton tests) omits it and gets the ``"default"`` branch, preserving the
+    old behavior for those callers.
     """
-    key = f"{object_ref.get('kind','')}/{object_ref.get('id','')}"
+    key = f"{etype or 'default'}/{object_ref.get('kind', '')}/{object_ref.get('id', '')}"
     return uuid.UUID(hashlib.sha1(key.encode()).hexdigest()[:32]).hex[:36]
 
 
@@ -121,7 +129,7 @@ class FileEvidenceStore:
     ) -> EvidenceRef:
         if content is None and path is None:
             raise ValueError("save requires content or path")
-        evidence_id = make_evidence_id(object_ref)
+        evidence_id = make_evidence_id(object_ref, etype)
         meta = dict(meta or {})
 
         # Resolve the bytes to hash: inline content, or read an existing file.
@@ -166,11 +174,14 @@ class FileEvidenceStore:
     def _insert_evidence_row(self, ref: EvidenceRef, now: datetime | None = None) -> None:
         """INSERT the evidence row (check-then-insert ⇒ idempotent, append-only).
 
-        ``make_evidence_id`` is deterministic on ``object_ref``, so a re-save
-        of the same logical object reuses the same PK: when the row already
-        exists the insert is skipped entirely (ON CONFLICT DO NOTHING
+        ``make_evidence_id`` is deterministic on ``(etype, object_ref)``, so a
+        re-save of the same logical object reuses the same PK: when the row
+        already exists the insert is skipped entirely (ON CONFLICT DO NOTHING
         semantics, DDL-agnostic so it works on SQLite too). The row is never
-        UPDATEd or DELETEd here (PA spec §5.8).
+        UPDATEd or DELETEd here (PA spec §5.8). Distinct evidence types for
+        the same object get distinct IDs (``etype`` is part of the key), so
+        each type's DB row lands independently rather than being silently
+        swallowed by an earlier type's insert.
 
         The row stores the file pointer (``content_hash`` + ``file_path``)
         plus identity fields; the bytes themselves stay on disk, not in the

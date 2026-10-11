@@ -417,3 +417,23 @@
 - **拒绝与纠偏**：subagent 报告本身质量高，但它把 C1 定级为 Important（描述里也没点出「同批次 N 个 SN 也会塌缩」这个维度）——我实测后升级为 Critical；subagent 也自述了一次流程瑕疵（它自己 spawn 了一个子 subagent 失败后改成了 inline 读文件，没有跑 `git diff --stat` 全量 diff，是直接读 HEAD 工作树的 36 个文件），我认可它最终的文件级阅读覆盖度（全部 36 个文件都读了），不影响结论可信度，但「没跑 git diff」这一点在此如实记录，避免后续误以为它逐行 diff 过。
 - **翻车与返工**：无（本节点是纯审查，未改代码）；下次派 reviewer subagent 时应显式要求它把 `git diff BASE..HEAD` 的输出作为第一手证据而非直接读工作树文件，以便区分「工作树 vs 提交内容」。
 - **人工复核点（等待用户拍板，本节点不自行决定）**：P0-unfreeze 拍板项 1 和 2（见上）；C1 的修复 PR 是否顺带覆盖 M1/M3/M5。
+
+## 2026-10-11 · Phase A · Code Review 修复落库（C1 + I1 + M1 + M3 + M5 一并处理）
+
+- **关键原话**：用户拍板「直接在 feature/phase-a 上修（改动面有限、不碰冻结项），I1/M1/M3/M5 并进同一个 commit」（C1 必须修，I1/M1/M3/M5 同批；M2/M4 未勾选，不动）。
+- **关键产出**：
+  - **C1（Critical，`app/plugins/evidence_store.py`）**：`make_evidence_id(object_ref)` 签名改为 `make_evidence_id(object_ref, etype=None)`，key 从 `kind/id` 扩为 `etype/kind/id`（缺省 etype 走 `"default"` 分支保持 P0 单参调用语义不变）；`FileEvidenceStore.save` 调用点传入实际 `etype`。同一批次 5 种证据类型 + 同批次多 SN 的 extraction_result 不再塌缩成 1 行 DB 记录。新增 2 条**真实 `FileEvidenceStore`+SQLite DB 集成测试（非 Stub）**：`test_distinct_evidence_types_same_object_get_distinct_rows`（5 种 etype 各自独立成行，直接复现 C1 原始缺陷）+ `test_resave_same_type_and_object_is_idempotent`（同 etype+同 object_ref 重存仍幂等，确认 C1 修复没破坏 append-only 语义）。
+  - **I1（Important，`app/api/intake.py`）**：auto-confirm 分支在写 confirmed 前加行数断言 `len(confirmed_rows) == len(body.inspections)`，防御 §2.3「节点不写库」保证——避免 select 空/不完整时静默 no-op 却仍 resume。
+  - **M1（`app/workflow/main_chain.py`）**：`judge_node` 删掉 `+ [""]` 空串污染。
+  - **M3（`app/api/intake.py`）**：非 UUID 的 `batch_id`/`task_id` 原来触发 `uuid.UUID(...)` 的 `ValueError` → 未捕获 500；新增 `_get_batch_by_id` 助手，解析失败/查无批次一律 404（B3 契约）。
+  - **M2 顺带（`app/api/intake.py`）**：`from langgraph.types import Command` 从 2 处函数内 import 提升到模块级（与 M3 同一文件、同一 import 整理动作，顺手做掉，不单独算一项）。
+  - **M5（`app/infra/repositories.py`）**：`get_latest_conclusion` 的 `inspection_type` 参数改为必填（原缺省 `None` 会跨 inspection_type 比较，唯一调用方 `sampling.py` 本就显式传参，无回归）。
+  - **M2/M4 未处理**（用户未勾选）：`main_chain.py` 节点内其余函数级 import、`test_batches.py` 共享 engine 脆弱性，维持现状。
+- **拒绝与纠偏**：无，完全按用户拍板的 5 项范围执行，未越界。
+- **翻车与返工**：新增测试初版 `f"content-{etype}".encode("utf-8")` 被 ruff 提示多余 `encoding` 参数（自动可修），`ruff check --fix` 清掉；`intake.py` 的 import 顺序被 ruff I001 自动调整（`langgraph` import 归位到第三方块），black 重排了 `assert` 的括号换行——均为工具自动修正，非手写改动，语义无变化。
+- **验证（原始输出，非手写）**：
+  - `uv run pytest tests/` → 127 passed（原 125 + 新增 2 条 C1 集成测试）
+  - `uv run ruff check .` → All checks passed
+  - `uv run black --check .` → 54 files unchanged
+- **提交**：见下方 commit（本 dev-notes 节点 + 全部代码修复同一批，或拆分待用户定）
+- **人工复核点**：C1 签名变更对 P0 遗留测试 `tests/plugins/test_evidence_store.py` 的单参调用（`make_evidence_id(ref)`）保持兼容（走 `"default"` 分支），需确认该测试仍在 127 里全绿（已确认）；I1 的 `assert` 在 Python `-O` 下会被禁用，是否要换成显式 `if ... raise` 而非 `assert`（当前保持 `assert`，与 spec §2.3 的"防御性断言"语义一致，未另行升级，特此说明供后续判断）。

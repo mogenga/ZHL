@@ -262,11 +262,18 @@ class SampleRepository:
         self,
         session: Session,
         batch_id: uuid.UUID,
-        inspection_type: str | None = None,
+        inspection_type: str,
     ) -> SampleConclusion | None:
-        stmt = select(SampleConclusion).where(SampleConclusion.batch_id == batch_id)
-        if inspection_type is not None:
-            stmt = stmt.where(SampleConclusion.inspection_type == inspection_type)
+        """Latest conclusion for ``batch_id`` scoped to one inspection type.
+
+        ``inspection_type`` is required: calling without it (the old
+        default-``None`` behavior) would compare across inspection types and
+        could return a conclusion from the wrong one — no caller relies on
+        that cross-type behavior, so the parameter is not optional."""
+        stmt = select(SampleConclusion).where(
+            SampleConclusion.batch_id == batch_id,
+            SampleConclusion.inspection_type == inspection_type,
+        )
         stmt = stmt.order_by(SampleConclusion.sample_round.desc())
         return session.scalars(stmt).first()
 
