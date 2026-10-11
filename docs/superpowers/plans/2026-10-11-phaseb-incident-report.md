@@ -105,7 +105,7 @@
 - [ ] **Step 1: 写 `migrations/002_add_reinspection_scope.sql`**
 
 内容（按 L2/L3 + D5a）：
-1. `CREATE TYPE scope_type AS ENUM ('minimal','expanded','full_lot');`（与 Phase 0 风格一致：实际用 VARCHAR + CHECK，不用 native enum——对齐 `models.py` 的 `native_enum=False` 约定，DDL 里同样走 `VARCHAR(40) + CHECK (scope_type IN (...))`，与 001 的枚举写法保持一致，写之前先读 `001_init.sql` 确认其枚举实现方式）
+1. `scope_type` 列走 `VARCHAR(40) + CHECK (scope_type IN ('minimal','expanded','full_lot'))`（对齐 `models.py` 的 `native_enum=False` 约定，DDL 里同样不用 native enum，与 001 的枚举写法保持一致，写之前先读 `001_init.sql` 确认其枚举实现方式）
 2. `ALTER TABLE reinspections ADD COLUMN scope_type VARCHAR(40) NOT NULL DEFAULT 'minimal' CHECK (scope_type IN ('minimal','expanded','full_lot'));`
 3. `ALTER TABLE reinspections ADD COLUMN scope_sns JSONB NOT NULL DEFAULT '[]'::jsonb;`
 4. `ALTER TABLE quality_incidents ADD COLUMN capa_verified BOOLEAN NOT NULL DEFAULT FALSE;`
@@ -156,7 +156,7 @@ git commit -m "feat(contract): DDL 002 — reinspection scope columns + capa_ver
 - Consumes: Task 1 的 `scope_sns` 语义；Phase 0 `app.domain.sampling.iso_lookup(inspection_type, level, aql, lot_size, table)`
 - Produces:
   - `check_reinspection_scope_covered(reinspections: list[ReinspectionView], open_incidents: list[IncidentView], iso_table: list[IsoRow]) -> AssertionCheck`（`name="reinspection_scope_covered"`）
-  - `assert_release(batch, sample, incidents, isolated_sns, evidence, capa, reinspection_scopes: list[ReinspectionScopeIn], iso_table: list[IsoRow]) -> AssertionResult`（7 项；`ReinspectionScopeIn(incident_id, scope_sns: tuple[str], lot_size: int, inspection_type, inspection_level, aql)` 为 `types.py` 新增 frozen dataclass）
+  - `assert_release(batch, sample, incidents, isolated_sns, evidence, capa, reinspection_scopes: list[ReinspectionScopeIn], iso_table: list[IsoRow]) -> AssertionResult`（7 项；`ReinspectionScopeIn(incident_id, scope_sns: tuple[str], lot_size: int, inspection_type, inspection_level, aql)` 为 `types.py` 新增 frozen dataclass；上述 `lot_size` / `inspection_type` / `inspection_level` / `aql` 四值不在 `reinspections` / `quality_incidents` 表中，由 Task 8 放行 API 从 `module_inspections` 与 `samples` 关联取，domain 层不读库，只消费调用方传入值）
   - 判定语义：① 每个未关闭异常（status ∉ closed/rejected/scrapped）的 `incident_id` 必须有对应 scope 行，且其 `scope_sns` ⊇ 该异常关联 SN（由调用方传入，domain 不读库）；② `iso_lookup(type, level, aql, lot_size, iso_table)` 必须命中（None → Fail，理由「ISO 表无此组合」）；全过 → passed=True
 
 - [ ] **Step 1: 改 `app/domain/types.py`（最小契约扩展）**
@@ -303,19 +303,24 @@ dev-notes 节点 + `git commit -m "feat(skills): attribution skill + traceabilit
 **Files:**
 - Create: `app/workflow/incident_subgraph.py`
 - Create: `app/api/incidents.py`
+- Modify: `pyproject.toml`（新增 `langgraph` 依赖）
 - Test: `tests/workflow/test_incident_subgraph.py` / `tests/api/test_incidents.py`
 
 **Interfaces:**
-- Consumes: Task 5 `AttributionSkill`；Task 2 状态机/断言；Phase 0 `incident_sn_links` / `QualityIncident` 模型；`langgraph-checkpoint-postgres`（`PostgresSaver`）+ `MemorySaver`（测试）
+- Consumes: Task 5 `AttributionSkill`；Task 2 状态机/断言；Phase 0 `incident_sn_links` / `QualityIncident` 模型；`langgraph`（主包，`StateGraph`/`interrupt`/`Command`）+ `langgraph-checkpoint-postgres`（`PostgresSaver`）+ `MemorySaver`（测试）
 - Produces:
   - `IncidentSubgraphState`（TypedDict）：`incident_id, batch_id, hypotheses, human_decision, reinspection_result, reinspection_payload`
-  - 节点：`generate_hypotheses`（调 Skill，写状态）→ `validate_evidence`（确定性过滤，已在 Skill 内完成，节点做状态搬运 + 写轨迹）→ `human_adopt`（`interrupt()` 三选一，payload 为假设列表）→ `run_reinspection`（从状态取 `reinspection_payload`（复检原始数据由 Task 7 的 API 层写入状态），调 Task 7 的复检 Plugin 封装——本任务先写节点壳 + 用 stub 复检 callable，Task 7 接线）；`route_reinspection_result`：pass → END（异常 `closed` 由 API 层驱动，子图只出结果），fail → `rejected_route` 节点（写状态标记，API 层转 `rejected`）
+  - 节点：`generate_hypotheses`（调 Skill，写状态）→ `validate_evidence`（确定性过滤，已在 Skill 内完成，节点做状态搬运 + 写轨迹）→ `human_adopt`（`interrupt()` 三选一，payload 为假设列表）→ `run_reinspection`（从状态取 `reinspection_payload`；复检能力接口预留，本任务用 stub callable 占位，Task 7 接线替换）；`route_reinspection_result`：pass → END（异常 `closed` 由 API 层驱动，子图只出结果），fail → `rejected_route` 节点（写状态标记，API 层转 `rejected`）
   - `build_incident_subgraph(checkpointer) -> CompiledGraph`；`main_chain` 挂载点常量 `INCIDENT_ENTRY = "incident_subgraph"`（`main_chain_graph` 由集成阶段建，本任务只保证子图可独立编译 + 回放）
   - 异常 API（`app/api/incidents.py`，FastAPI Router）：
     - `POST /api/incidents`：创建（`affected_sns` 非空 + 经 `incident_sn_links` 写关联 + `evidence_ids` 存在性校验 400 + 批次必须 `isolated` 否则 409；异常状态 `new`）
     - `POST /api/incidents/{id}/assign`：`{owner, due_at, containment_action}` → `transition("isolated"→"assigned")`（前置 owner_assigned）+ 批次 `isolated→disposing`（前置 assigned_owner/due_at_set）双转移单事务 + 轨迹
     - `POST /api/incidents/{id}/capa`：`{confirmed_root_cause, corrective_action, verified}`（L3：`verified` 仅当复检记录存在且 result=pass 时可置 True，否则 400；写 `capa_verified` 列）→ 异常 `assigned→pending_recheck` + 批次 `disposing→pending_recheck` 单事务 + 轨迹
     - `GET /api/incidents` / `GET /api/incidents/{id}`
+
+- [ ] **Step 0: 执行 `uv add langgraph`，确认 `uv.lock` 更新，dev-notes 留痕（AGENT.md §2 依赖一律 `uv add`）**
+
+说明：`StateGraph` / `interrupt` / `Command` 均来自 `langgraph` 主包，当前 `uv.lock` 仅有 `langgraph-checkpoint` 系列，主包缺失会直接导致 Task 6 import 失败。`uv add langgraph` 后确认 `uv.lock` 更新，提交（AGENT.md §10 依赖变更随 lock 一并提交）。
 
 - [ ] **Step 1: Context7 先查 LangGraph（StateGraph 子图挂载 / interrupt payload 约束 / PostgresSaver 用法），dev-notes 留痕**
 
@@ -352,7 +357,7 @@ dev-notes 节点 + `git commit -m "feat(workflow+api): incident subgraph (interr
 **Interfaces:**
 - Consumes: Task 1 新列；Task 2 断言；Task 4 `TraceStore` / `ReportRenderer`；Phase 0 `EvidenceStore`
 - Produces:
-  - `POST /api/incidents/{id}/reinspections`：请求体含 `scope_type`/`scope_sns`（缺省 = `minimal` + 异常 `incident_sn_links` 全部 SN，服务端计算）；`expanded`/`full_lot` 必须传 `scope_sns` 且 ⊇ minimal 集（否则 400 列缺口）；扩大时 `params_summary.scope_expansion=true` 写轨迹；独立 `Reinspection` 行（不改 `module_inspections`）；回写 `quality_incidents.verification_id`；result=fail → 异常 `pending_recheck→rejected` + 批次 `pending_recheck→rejected`（状态机）单事务 + 轨迹
+  - `POST /api/incidents/{id}/reinspections`：请求体含 `scope_type`/`scope_sns`（缺省 = `minimal` + 异常 `incident_sn_links` 全部 SN，服务端计算）；`expanded`/`full_lot` 必须传 `scope_sns` 且 ⊇ minimal 集（否则 400 列缺口）；扩大时 `params_summary.scope_expansion=true` 写轨迹；独立 `Reinspection` 行（不改 `module_inspections`）；回写 `quality_incidents.verification_id`；result=fail → 异常 `pending_recheck→rejected` + 批次 `pending_recheck→rejected`（状态机）单事务 + 轨迹；**响应体** `{reinspection_id, incident_id, sn, passed, scope_applied}`，其中 `sn` 由 `inspection_id` 关联 `module_inspections.sn` 查出，非 `reinspections` 表直连字段
   - `GET /api/incidents/{id}/reinspections`
   - `ReportSkill.generate(session, batch_id, report_type) -> Report`：聚合 context（批次 + 判定统计 + 异常 + 复检 + 断言 + 三层留痕引用）→ `ReportRenderer` 渲染 → 写 `reports` 行（version = 该 batch+type 最大 version + 1；幂等：同 type 已有版本且批次未变 → 返回现有最新版不新增，D10）→ 写 `evidence`（`report_snapshot`）→ 写轨迹
   - `POST /api/batches/{id}/report`：`{report_type}`；`rejected` 批次只允许 `incident` 型（409 否则）；`archived` 批次 409（D8）；写报告后**同事务**检查自动归档（D6a）：批次状态 ∈ {released, rejected} 且目标 type 版本 ≥ 1 → `transition(batch, "archived")`（状态机 `("rejected","archived")` / `("released","archived")` 前置为空，Phase 0 已有边）+ 轨迹
@@ -498,7 +503,7 @@ Task 3/4 可与 Task 1/2 并行（无依赖）；Task 6 需 Task 2 + 4 + 5；Tas
 - 一个提交一个逻辑变更；message 说清「为什么改」（AGENT.md §3.4）
 - 每提交前 `uv run ruff check . && uv run black --check . && uv run pytest -x` 全绿
 - `dev-notes/phase-b/` 随对应任务提交（不攒收尾补记）
-- `uv.lock` 随依赖变更提交（本计划不新增依赖——langgraph 系列已在 lock；若 Task 6 发现缺 `langgraph` 主包需 `uv add langgraph` 再 `uv lock`）
+- `uv.lock` 随依赖变更提交（Task 6 Step 0 `uv add langgraph` 后 lock 更新，随该任务提交）
 
 ## 已知遗留（预判，finish 时逐条对账）
 
