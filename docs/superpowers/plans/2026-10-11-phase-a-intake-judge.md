@@ -136,8 +136,8 @@ git commit -m "chore(phase-a): add langgraph dep + package skeletons"
   - `InspectionRepository.get_batch_sns(session, batch_id) -> list[str]`
   - `InspectionRepository.confirm_inspection(session, inspection_id, fields: dict | None) -> ModuleInspection`（写修改后字段值，`intake_status='confirmed'`；原始六项电参数列不可改——D7 只允许 `intake_status` / `human_diff` 语义变更）
   - `InspectionRepository.reject_inspection(session, inspection_id) -> ModuleInspection`
-  - `SampleRepository.freeze_samples(session, batch_id, inspection_type, rule_version_id, sns, seed, selected_at) -> list[Sample]`
-  - `SampleRepository.save_conclusion(session, batch_id, inspection_type, rule_version_id, n, ac, re, result) -> SampleConclusion`
+  - `SampleRepository.freeze_samples(session, batch_id, inspection_type, rule_version_id, sns, seed, selected_at) -> list[Sample]`（签名补充：还需 `iso_row: IsoRow` 或等价的 `IsoResult`，决定抽样量 n/ac/re——已按 Task 6 的 `run_sampling` 插件实际传入补上该参数，见 Ruling T2-1）
+  - `SampleRepository.save_conclusion(session, batch_id, inspection_type, rule_version_id, sample_round, n, ac, re, result) -> SampleConclusion`
   - `SampleRepository.get_latest_conclusion(session, batch_id) -> SampleConclusion | None`
   - `IsoRepository.load_rows(session) -> list[IsoRow]`（读 `iso_sampling_table` 只读配置表）
   - `CrossBatchSnConflict(Exception)` 异常类
@@ -173,6 +173,10 @@ git commit -m "feat(infra): repositories — batch/inspection/sample CRUD + cros
 ```
 
 **人工核验点**：EXCLUDE 兜底逻辑正确（Review Focus #4）；`get_session` 不硬编码凭据。
+
+**Ruling（偏离 plan 原签名的拍板项，已同步补进上方 Interfaces）**：
+- **T2-1** `freeze_samples` 签名补 `iso_row: IsoRow` 参数（原 plan 只列 `seed, selected_at`，但确定性抽样必须知道 n/ac/re；Task 6 的 `run_sampling` 插件先 `iso_lookup` 解析出 `IsoRow`，再传入本方法——这是唯一能同时满足「确定性」+「纯函数分离」的接法，已实测通过）
+- **T2-2** `save_conclusion` 签名补 `sample_round` 参数（原 plan 未列，但 `sample_conclusions` 唯一键含 `sample_round`，不传则默认为 1，与 Task 6「复检轮次」语义冲突；补齐后可正确记录第几轮抽样结论）
 
 ---
 
