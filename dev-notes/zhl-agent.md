@@ -221,3 +221,11 @@
 - 拒绝与纠偏：无，plan Task 5 四步按原样执行
 - 翻车与返工：test 文件 black 重排一次（多行调用换行）
 - 自测：tests/skills/test_extract.py 4/4；全仓 pytest 无回归；ruff 全绿；覆盖率 app/skills/extract.py 100%、app/plugins 94%+、总 92.39% ≥ 90% 门禁
+
+## 2026-10-11 17:40 · Phase A Task 6 完成 · 判定 Skill + 抽样 Plugin
+- 关键原话：完成Phase-a的Task6，遵循superpowers流程与AGENT.md开发规范，遵循docs/superpowers的spec和plan文件
+- 关键产出：app/skills/judge.py（judge_batch 单事务批次判定，A4 未确认SN守卫，B5 per-sn dict，decision_snapshot 证据）；app/plugins/sampling.py（run_sampling：iso_lookup 命中/缺项 gate（D9 无静默默认放行）、确定性冻结、幂等再冻结、抽样结论）；tests/skills/test_judge.py（5 用例）；tests/plugins/test_sampling_plugin.py（3 用例）
+- 验证：uv run pytest tests/ → 100 passed；ruff + black 全绿；覆盖率 TOTAL 93.33%（judge 96% / sampling 95%）
+- 提交：2f22371
+- 翻车与返工：① 初版 test_judge 的测试 6 在全量套里失败——根因是测试 5 对模块级 _NORMAL 夹具做浅拷贝后原地改 pmax，污染了后续所有消费 _NORMAL 的测试（顺序依赖）；深拷贝修复。② SQLite in-memory 默认 pool 每连接一个独立库：commit 后新 session 看不到数据；单测引擎改 StaticPool 单连接。③ AQL 表 n=13 但可冻 SN 仅 10：冻结截断、计划参数保留表值 n=13，测试断言随之修正。④ 幂等再冻结返回 selected 稳定值（重算 domain 选择）而非空表
+- 人工复核点：判 定/抽样的分层边界（Skill 不写状态机，Plugin 不写业务判断）
