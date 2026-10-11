@@ -207,3 +207,10 @@
 - **翻车与返工**：额外补2个自加用例（无标记也抛 KeyError；Protocol isinstance 检查）；ruff F541 修复4处无占位符f-string（测试prompt为纯字面量）
 - **纯度验证**：grep requests/httpx/os.environ/ZHL_LLM 命中仅限 docstring，无网络/env 调用（R4）
 - **自测**：test_llm_client.py 6/6 pass；全仓 pytest 84/84（P0 72 + Task2 6 + 本任务 6）无回归；ruff/black 全绿
+## 2026-10-11 17:15 · Phase A Task 4 完成 · 证据 DB 写入
+
+- 关键原话：完成Phase-a的Task4，遵循superpowers流程与AGENT.md开发规范，遵循docs/superpowers的spec和plan文件
+- 关键产出：app/plugins/evidence_store.py save 补 DB 分支（db 为活 Session 时 check-then-insert evidence 行，append-only 幂等：make_evidence_id 确定性 PK 命中即跳过，不 UPDATE/DELETE；now 注入参数保持 generated_at 可测缺省 datetime.now(UTC)；content JSONB 列存 None，字节留磁盘以 content_hash+file_path 引用）+ tests/plugins/test_evidence_store_db.py 4用例。提交 d66c929
+- 拒绝与纠偏：无，plan Task 4 四步按原样执行
+- 翻车与返工：test 断言初版 .hex[:36] 多余语义，简化为 _to_uuid 直接比较；ruff 清 5 处（unused import / 引号注解 / E501）
+- 自测：test_evidence_store_db.py 4/4；P0 test_evidence_store.py 4/4 无回归；全仓 pytest 88/88；ruff/black 全绿
