@@ -1,0 +1,414 @@
+"""E2E: acceptance sample 3 — incident closure full chain (PB Task 10).
+
+Mock-driven (no Phase A dependency, no live DB): the batch is seeded
+``isolated`` with one out-of-band module, and the whole PB flow is driven
+through the assembled app (Task 9 ``create_app``) with a SQLite session:
+
+    create incident -> assign -> attribution (Mock LLM, PB O-2) ->
+    reinspection (minimal scope, pass) -> CAPA (verified=true) ->
+    pending_release -> release (7 items all pass, incl. item 7) ->
+    released -> report (release type, from terminal state) -> auto-archived.
+
+Each step asserts the three-layer audit trail (trace / evidence / report
+rows exist) and that the state-machine edges the chain uses are legal
+(domain ``transition`` dry-runs, P0 contract).
+
+Also pins the mid-chain blocker: release while CAPA is NOT verified keeps
+the batch in ``pending_release`` and names the gap in item 6 (Review Focus
+#2/#3, the E2E face).
+
+Fixtures: tests/fixtures/acceptance_incident.json (domain data) +
+mock_llm_attribution.json (PB L1a, the attribution mock — its routing key is
+INC-001, the fixture's incident id; the E2E routes the mock on that key and
+aliases the fixture's short evidence ids EV-ATT-001/002/003 onto real seeded
+UUID evidence rows so the D2 evidence gate still pins Review Focus #1/#5).
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+from uuid import UUID
+
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from app.api.main import create_app
+from app.domain.state_machine import transition
+from app.infra.models import (
+    Base,
+    DeliveryBatch,
+    Evidence,
+    IsoSamplingRow,
+    ModuleInspection,
+    QualityIncident,
+    QualityRuleVersion,
+    Report,
+    SampleConclusion,
+)
+from app.plugins.attribution import AttributionSkill
+from app.plugins.llm_client import MockLLMClient
+from app.plugins.trace_store import TraceStore
+from tests.fixtures.loader import load_acceptance
+
+_FIXDIR = Path(__file__).resolve().parents[2] / "tests" / "fixtures"
+_TS = datetime(2026, 6, 1, 10, 0, 0, tzinfo=UTC)
+
+# --- deterministic ids -------------------------------------------------------
+B1 = UUID("ab000000-1111-2222-3333-444444444401")
+RULE = UUID("ab000000-1111-2222-3333-444444444402")
+EV1 = UUID("ab000000-1111-2222-3333-444444444403")
+EV2 = UUID("ab000000-1111-2222-3333-444444444404")
+EV3 = UUID("ab000000-1111-2222-3333-444444444405")
+CONC1 = UUID("ab000000-1111-2222-3333-444444444406")
+_INSP_OK = UUID("ab000000-0000-0000-0000-000000000001")
+_INSP_OODB = UUID("ab000000-0000-0000-0000-000000000002")
+
+
+def _mk_rule(session: Any, sample: dict) -> None:
+    raw = sample["raw"]["rules"]  # the raw dict (rules is a RuleSnapshotIn dataclass)
+    session.add(
+        QualityRuleVersion(
+            rule_version_id=RULE,
+            project_id=raw["project_id"],
+            model=raw["model"],
+            name=raw.get("name", "rv-1"),
+            nameplate_power=raw["nameplate_power"],
+            power_tolerance=raw["power_tolerance"],
+            parameter_standards=raw["parameter_standards"],
+            current_bands=raw["current_bands"],
+            sample_plan=raw["sample_plan"],
+            effective_at=_TS,
+            version_no=raw["version_no"],
+        )
+    )
+
+
+def _seed_batch(session: Any, sample: dict, batch_no: str) -> None:
+    # Deterministic inspection ids derived from the SN (E2E-only; the test
+    # never persists to a shared DB).
+    insp_ids = {
+        "SN-I-OK": UUID("ab000000-0000-0000-0000-000000000001"),
+        "SN-I-OODB": UUID("ab000000-0000-0000-0000-000000000002"),
+    }
+    _mk_rule(session, sample)
+    session.add(
+        DeliveryBatch(
+            batch_id=B1,
+            batch_no=batch_no,
+            project_id=sample["batch"]["project"],
+            model=sample["batch"]["model"],
+            planned_quantity=sample["batch"]["lot_size"],
+            actual_quantity=sample["batch"]["lot_size"],
+            rule_version_id=RULE,
+            status=sample["batch"]["status"],
+        )
+    )
+    for ins in sample["inspections"]:  # ModuleInspectionIn dataclasses
+        session.add(
+            ModuleInspection(
+                inspection_id=insp_ids[ins.sn],
+                batch_id=B1,
+                sn=ins.sn,
+                source_type="IV_CSV",
+                captured_at=_TS,
+                pmax=ins.pmax,
+                temp=ins.temp,
+                isc=ins.isc,
+                voc=ins.voc,
+                vm=ins.vm,
+                im=ins.im,
+                ff=ins.ff,
+                appearance_result=ins.appearance_result,
+                intake_status="confirmed",
+                decision_status="pass",
+            )
+        )
+    # ISO preset row so release item 7's iso_lookup resolves: the release API
+    # builds ReinspectionScopeIn with inspection_level="full" and the first
+    # iso row's AQL, lot = reinspection coverage size.
+    session.add(
+        IsoSamplingRow(
+            inspection_type="iv",
+            inspection_level="full",
+            aql=0.65,
+            lot_size_min=1,
+            lot_size_max=100,
+            n=2,
+            ac=0,
+            re=1,
+        )
+    )
+    # Evidence rows: decision snapshot (item 5) + attribution evidence
+    # (EV-ATT-001/002/003 — the mock fixture's hypothesis evidence ids, so
+    # the D2 gate keeps two of the three hypotheses).
+    # EVIDENCE_TYPE enum (P0 frozen): source_file / extraction_result /
+    # human_confirmation / decision_snapshot / task_trace / report_snapshot.
+    # Attribution findings are model output -> extraction_result.
+    for eid, etype in (
+        (EV1, "decision_snapshot"),
+        (EV2, "extraction_result"),
+        (EV3, "extraction_result"),
+    ):
+        session.add(
+            Evidence(
+                evidence_id=eid,
+                evidence_type=etype,
+                object_ref={"kind": "batch", "id": batch_no},
+                content_hash=f"sha256:e2e-{eid.hex[:8]}",
+                generated_at=_TS,
+                generated_by="seed",
+            )
+        )
+    session.commit()
+
+
+_INS_OK = UUID("ab000000-0000-0000-0000-000000000001")
+_INS_OODB = UUID("ab000000-0000-0000-0000-000000000002")
+
+
+def _client() -> tuple[TestClient, Any, Any]:
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    app = create_app(session_factory=lambda: session)
+    return TestClient(app), session, engine
+
+
+def _edge_legal(kind: str, frm: str, to: str, preconditions: dict | None = None) -> bool:
+    """Domain dry-run: is the (kind, frm -> to) edge in the state machine?
+
+    NB: ``transition`` takes preconditions positionally (frozen P0 API)."""
+    return transition(frm, to, preconditions or {}, kind=kind).accepted
+
+
+class _EvidenceStore:
+    """EvidenceStore for AttributionSkill: resolves evidence ids in the test
+    session. The attribution fixture's hypotheses reference the fixture's
+    own short evidence ids (EV-ATT-001/002/003); the E2E aliases them onto
+    real seeded UUID evidence rows so the D2 gate (Review Focus #5) keeps
+    exactly the hypotheses whose ids all resolve. Unknown ids -> KeyError
+    (the gate drops those hypotheses)."""
+
+    _ALIAS = {"EV-ATT-001": EV2, "EV-ATT-002": EV3, "EV-ATT-003": EV1}
+
+    def __init__(self, session: Any) -> None:
+        self._session = session
+
+    def get(self, evidence_id: str) -> Any:
+        row = self._session.get(Evidence, self._ALIAS.get(evidence_id, evidence_id))
+        if row is None:
+            raise KeyError(evidence_id)
+        return row
+
+
+def test_sample3_incident_closure_full_chain() -> None:
+    sample = load_acceptance("incident")
+    client, session, engine = _client()
+    try:
+        _seed_batch(session, sample, batch_no=sample["batch"]["batch_id"])
+
+        # state-machine edges this chain will use (domain dry-runs, P0
+        # contract — the API re-checks them at runtime).
+        assert _edge_legal(
+            kind="incident", frm="new", to="isolated", preconditions={"sn_linked": True}
+        )
+        assert _edge_legal(
+            kind="incident", frm="isolated", to="assigned", preconditions={"owner_assigned": True}
+        )
+        assert _edge_legal(
+            kind="batch",
+            frm="isolated",
+            to="disposing",
+            preconditions={"assigned_owner": True, "due_at_set": True},
+        )
+        assert _edge_legal(
+            kind="batch",
+            frm="pending_recheck",
+            to="pending_release",
+            preconditions={"recheck_passed": True, "measures_effective": True},
+        )
+        assert _edge_legal(
+            kind="batch",
+            frm="pending_release",
+            to="released",
+            preconditions={"assertions_passed": True, "human_approved": True},
+        )
+        assert _edge_legal(kind="batch", frm="released", to="archived")
+        # API extension: assign_incident implements new->assigned (the P0
+        # path is new->isolated->assigned; the endpoint adopts incidents that
+        # operators treat as assigned-from-creation — Task 6 spec review).
+        assert not _edge_legal(
+            kind="incident", frm="new", to="assigned"
+        ), "P0 table must NOT allow the direct new->assigned edge"
+
+        # 1) create incident (batch is isolated -> 201; SN-I-OODB is linked).
+        r = client.post(
+            "/api/incidents",
+            json={
+                "batch_id": str(B1),
+                "trigger_type": "rule_fail",  # TRIGGER_TYPE enum (data_consistency etc.)
+                "severity": "major",
+                "affected_sns": [sample["incidents"][0]["affected_sns"][0]],
+                "evidence_ids": [str(EV1)],
+            },
+        )
+        assert r.status_code == 201, r.text
+        inc_id = UUID(r.json()["incident_id"])
+        inc = session.get(QualityIncident, inc_id)
+        assert inc.status == "new"
+
+        # 2a) route the incident down the P0 edge new -> isolated (the sn is
+        #     linked by step 1's incident_sn_links, so the precondition holds).
+        inc.status = "isolated"
+        session.commit()
+
+        # 2b) assign (incident isolated -> assigned; batch isolated -> disposing).
+        r = client.post(
+            f"/api/incidents/{inc_id}/assign",
+            json={
+                "owner": "ZHL-QA",
+                "due_at": "2026-06-05T00:00:00+00:00",
+                "containment_action": "isolate SN-I-OODB from lot",
+            },
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "assigned"
+        assert session.get(DeliveryBatch, B1).status == "disposing"
+
+        # 3) attribution via the mock LLM (PB O-2). The prompt routes on the
+        #    incident's UUID; the fixture answers with 3 hypotheses, one of
+        #    which carries no evidence ids -> the D2 gate drops it (Review
+        #    Focus #1), leaving two ranked hypotheses. The DB incident_id is
+        #    a UUID column, so the prompt routing id is supplied via a
+        #    duck-typed incident view (the skill only reads .incident_id /
+        #    .evidence_ids) — no PK mutation, no UUID->str PK rewrite.
+        mock_llm = MockLLMClient(_FIXDIR / "mock_llm_attribution.json")
+
+        class _PromptIncident:
+            incident_id = "INC-001"
+            evidence_ids = [str(EV1), str(EV2), str(EV3)]
+            severity = "major"
+            trigger_type = "rule_fail"
+            # the trace row is filed under the batch the incident belongs to.
+            batch_id = B1
+
+        skill = AttributionSkill(llm=mock_llm, evidence_store=_EvidenceStore(session))
+        hypotheses = skill.run(incident=_PromptIncident(), trace=TraceStore(), session=session)
+        inc.root_cause_hypotheses = hypotheses
+        session.commit()
+        assert len(hypotheses) == 2, f"D2 gate should keep 2 of 3: {hypotheses}"
+        assert [h["rank"] for h in hypotheses] == [1, 2]
+        assert hypotheses[0]["confidence"] > hypotheses[1]["confidence"]
+
+        # 4) reinspection (minimal scope, pass) — writes the Reinspection row
+        #    and the incident's verification_id.
+        r = client.post(
+            f"/api/incidents/{inc_id}/reinspections",
+            json={
+                "inspection_id": str(_INS_OODB),
+                "pmax": 550.0,
+                "temp": 25.0,
+                "isc": 10.5,
+                "voc": 48.0,
+                "vm": 40.0,
+                "im": 13.0,
+                "ff": 0.80,
+                "result": "pass",
+                "executor": "ZHL-QA",
+                "executed_at": "2026-06-02T00:00:00+00:00",
+                "scope_type": "minimal",
+            },
+        )
+        assert r.status_code == 201, r.text
+        assert r.json()["passed"] is True
+
+        # 5) CAPA (verified=true; L3 requires the pass reinspection).
+        r = client.post(
+            f"/api/incidents/{inc_id}/capa",
+            json={
+                "confirmed_root_cause": "cell mismatch -> Impp drift",
+                "corrective_action": "replace lead cell",
+                "verified": True,
+            },
+        )
+        assert r.status_code == 200, r.text
+        assert session.get(DeliveryBatch, B1).status == "pending_recheck"
+
+        # 6) batch -> pending_release (recheck-passed edge, dry-run already
+        #    asserted; the CAPA step moved it to pending_recheck).
+        batch = session.get(DeliveryBatch, B1)
+        assert _edge_legal(
+            kind="batch",
+            frm=batch.status,
+            to="pending_release",
+            preconditions={"recheck_passed": True, "measures_effective": True},
+        )
+        batch.status = "pending_release"
+        session.commit()
+
+        # 7) the batch needs a passing sample conclusion for release item 2.
+        session.add(
+            SampleConclusion(
+                conclusion_id=CONC1,
+                batch_id=B1,
+                inspection_type="iv",
+                rule_version_id=RULE,
+                sample_round=1,
+                n=2,
+                ac=0,
+                re=1,
+                result="pass",
+                evidence_id=EV1,
+            )
+        )
+        session.commit()
+
+        # 8) release blocker first: un-verify the CAPA -> the batch STAYS
+        #    pending_release and item 6 names the gap (Review Focus #2/#3).
+        inc = session.get(QualityIncident, inc_id)
+        inc.capa_verified = False
+        session.commit()
+        r = client.post(f"/api/batches/{B1}/release", json={"approved_by": "ZHL-ENG"})
+        assert r.status_code == 200, r.text
+        assert r.json()["passed"] is False
+        failing = [c for c in r.json()["checks"] if not c["passed"]]
+        assert any(c["name"] == "all_capa_verified" for c in failing)
+        assert session.get(DeliveryBatch, B1).status == "pending_release"
+        assert session.get(DeliveryBatch, B1).release_decision == "undecided"
+
+        # 9) engineer verifies the CAPA; the retry passes all 7 items
+        #    (item 7: reinspection coverage = required set from incident
+        #    sn links; iso_lookup resolves via the seeded preset row).
+        inc.capa_verified = True
+        session.commit()
+        r = client.post(f"/api/batches/{B1}/release", json={"approved_by": "ZHL-ENG"})
+        assert r.status_code == 200, r.text
+        assert r.json()["passed"] is True, r.json()
+        assert all(c["passed"] for c in r.json()["checks"])
+        assert session.get(DeliveryBatch, B1).status == "released"
+
+        # 10) report (release type, from terminal state) -> auto-archived.
+        r = client.post(f"/api/batches/{B1}/report", json={"report_type": "release"})
+        assert r.status_code == 201, r.text
+        assert session.get(DeliveryBatch, B1).status == "archived"
+
+        # three-layer audit trail (D1): trace / evidence / report rows.
+        traces = TraceStore().list_for_batch(session, B1)
+        skill_names = {t.skill_name for t in traces}
+        assert "attribution" in skill_names
+        assert "release" in skill_names
+        assert "report_api" in skill_names
+        assert (
+            session.query(Evidence).filter(Evidence.evidence_type == "human_confirmation").count()
+            >= 1
+        )
+        assert session.query(Report).filter(Report.batch_id == B1).count() >= 1
+    finally:
+        session.close()
+        engine.dispose()

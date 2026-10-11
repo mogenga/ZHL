@@ -23,7 +23,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app.api.main import create_app
+from app.api.main import create_app, create_app_with_trace
 from app.infra.models import (
     Base,
     DeliveryBatch,
@@ -224,3 +224,73 @@ def test_create_incident_on_non_archived_succeeds(api_client: Any) -> None:
     # which is the correct business-logic response (not the D8 archived guard).
     if r.status_code == 409:
         assert r.json()["detail"]["error"] == "batch_not_isolated"
+
+
+# --- PB Task 10 additions: trace read endpoint + static pages mount ---------
+
+
+def test_trace_endpoint_returns_batch_trace_rows(api_client: Any) -> None:
+    """create_app_with_trace exposes GET /api/batches/{id}/traces.
+
+    The smoke fixture never writes a trace row, so the response is an empty
+    list (200) — pinning the route exists and is wired to TraceStore without
+    a 500. The E2E tests (tests/e2e/) exercise the populated path."""
+    from fastapi.testclient import TestClient
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    from app.infra.models import Base, DeliveryBatch, QualityRuleVersion
+
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    rule_id = UUID("ab900000-1111-2222-3333-444444444499")
+    batch_id = UUID("ab900000-1111-2222-3333-4444444444aa")
+    session.add(
+        QualityRuleVersion(
+            rule_version_id=rule_id,
+            project_id="P-1",
+            model="JH-550W",
+            name="rv",
+            nameplate_power=550.0,
+            power_tolerance=0.5,
+            parameter_standards={},
+            current_bands={},
+            sample_plan={},
+            effective_at=_TS,
+            version_no=1,
+        )
+    )
+    session.add(
+        DeliveryBatch(
+            batch_id=batch_id,
+            batch_no="B-TRACE-01",
+            project_id="P-1",
+            model="JH-550W",
+            planned_quantity=1,
+            rule_version_id=rule_id,
+            status="pending_release",
+        )
+    )
+    session.commit()
+    app = create_app_with_trace(session_factory=lambda: session)
+    client = TestClient(app)
+    r = client.get(f"/api/batches/{batch_id}/traces")
+    assert r.status_code == 200, r.text
+    assert r.json() == [], "no trace rows yet for a freshly-seeded batch"
+    session.close()
+    engine.dispose()
+
+
+def test_static_pages_mounted_and_served(api_client: Any) -> None:
+    """The 4 Task-10 static pages are served under /static/.
+
+    Pin the mount + each page's presence so a missing file is a test failure,
+    not a silent 404 in the browser."""
+    for page in ("incident.html", "assertion.html", "report.html", "trace.html"):
+        r = api_client.get(f"/static/{page}")
+        assert r.status_code == 200, f"{page} not served: {r.status_code} {r.text[:120]}"
+        assert "<html" in r.text.lower()
