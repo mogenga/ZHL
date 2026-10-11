@@ -302,3 +302,66 @@
   1. 这是对 P0 冻结文件的修改 (按裁决 3 走 PR): diff 仅 2 行 + 2 个守卫测试, 无行为变化 (仍是 Python 侧默认值, SQLite/PG 插入行为不变, 只是 naive → aware UTC)
   2. 合并后 516 条 DeprecationWarning 归零
   3. 分支基于 feature/phase-a, 建议合并路径: 先并 feature/phase-a 到 main, 再并本 PR; 或本 PR 直接基于 main 重基
+
+## 2026-10-11 17:00 · Phase A FINISH · 数据入场 + 规则判定 全阶段收口（dev-notes finish 节点，AGENT.md §1.4 四要素）
+
+### 一、交付物清单（9 个 task 的产出路径 + 提交 hash）
+
+| Task | 提交 | 产出路径 |
+| --- | --- | --- |
+| 脚手架 + 依赖 | f6e9670 | pyproject.toml（langgraph/langgraph-checkpoint-postgres），app/api、app/workflow、app/skills 包骨架 |
+| 仓库层 | 832f215, a3c68b0 | app/infra/repositories.py（CrossBatchSnConflict 兑底、draft 批次、确定性抽样） |
+| MockLLMClient | e93754d, c3f7d3b | app/plugins/llm_client.py（R4：无 LLM 环境变量，fixture 驱动可回放） |
+| 证据 DB 写入 | d66c929, df3b210 | app/plugins/evidence_store.py（append-only evidence 表 INSERT） |
+| 抽取 Skill | 146e89b, 93f5392 | app/skills/extract.py + tests/skills/test_extract.py |
+| 判定 Skill + 抽样 Plugin | 2f22371, 0efe9fd | app/skills/judge.py, app/plugins/sampling.py + 测试 |
+| LangGraph 主线图 | 3d52c85 | app/workflow/{main_chain,state,checkpointer}.py + 图回放测试（InMemory/PG checkpointer） |
+| API 路由 | 1e81460, a8c0a37, b45e595 | app/main.py（工厂）+ app/api/{batches,intake}.py（用户裁决 1 拆 router）+ tests/api/ |
+| 验收样例 + 收口 | b45e595, 08a2606 | tests/api/test_e2e_acceptance.py（spec §6.1 Phase A 侧 4 样例）+ 全量验证 |
+
+### 二、真实测试结果与覆盖率（原始输出，非手写）
+
+命令 1：uv run pytest tests/ -v（完整输出存档 _closeout_pytest_v.txt）
+    ============================= test session starts =============================
+    collected 125 items
+    ... tests\api\test_batches.py ...... [  4%] ... tests\workflow\test_main_chain.py ....... [100%]
+    ============================= 125 passed in 2.15s =============================
+
+命令 2：uv run pytest tests/ --cov=app/skills --cov=app/plugins --cov=app/workflow --cov-report=term（_closeout_cov.txt）
+    app\plugins\evidence_store.py  78   5   94%
+    app\plugins\llm_client.py      23   0  100%
+    app\plugins\sampling.py        42   1   98%
+    app\skills\extract.py          12   0  100%
+    app\skills\judge.py            54   2   96%
+    app\workflow\checkpointer.py   15   2   87%
+    app\workflow\main_chain.py    122   5   96%
+    TOTAL                          362  15   96%   Required 90.0% reached. Total: 95.86%
+    125 passed in 7.28s
+
+命令 3：uv run ruff check . → All checks passed!；uv run black --check . → 54 files would be left unchanged.（_closeout_ruff.txt / _closeout_black.txt）
+
+命令 4：uv run pytest tests/api/test_e2e_acceptance.py -v → 5 passed in 0.94s（§6.1 Phase A 四样例可复现）
+
+命令 5（P0 冻结核对）：
+    git diff phase0-frozen -- app/domain/ migrations/ tests/fixtures/ → 输出为空（_closeout_p0diff.txt）
+    git diff phase0-frozen -- app/infra/models.py → 仅 2 行（import 行 + 默认值行，_closeout_modelsdiff.txt）
+
+### 三、已知遗留（Phase B / P1 项）
+1. **sn_uniqueness 未入 ORM**：DDL（001_init.sql）EXCLUDE USING int4range(sn_num) 约束完整，但 SQLite 无法映射 PG int8range，故 ORM 层无对应对象；跨批次 SN 冲突由 app/infra/repositories.py 的 CrossBatchSnConflict Python 兑底（Task 2），Postgres 部署时 DDL 约束生效、Python 兑底仍保留作双保险。
+2. **ORM 的 sn_num 依赖触发器填充**：sn_num 由 001_init.sql 的 BEFORE INSERT 触发器计算；直插 SQL（绕过 ORM）时若未触发器环境须显式赋值，否则 DDL NOT NULL 约束失败。
+3. **LLMClient 仅 Mock 实现**：MockLLMClient 读 tests/fixtures（R4 无环境变量）；真实 LLM 抽取（OpenAI-compatible）推 P1（总 spec §9.1，ZHL_LLM_* 仅 P1 需要）。
+4. **Incident subgraph 留给 Phase B**：Phase A 仅在 main_chain_graph 预留 isolated 分支挂载点（R1）；归因 / 复检 / 报告（主链第 3–5 段）属 Phase B（R6）。
+5. **⚠️ 偏离 D20：app/infra/models.py 的 2 行 utcnow→now(UTC)**：该文件为 Phase 0 冻结项，按原规应走 PR + review。因 Phase A 尚未合入 main，该改动暂随 feature/phase-a 分支（fix 分支已 fast-forward 合入，commit 08a2606），合入 main 时一并 review。行为无变化（Python 侧默认值 naive-UTC → aware-UTC，SQLite/PG 插入行为不变），消除 516 条 DeprecationWarning。
+
+### 四、演示命令（PA spec §5.11，从零可复现）
+    # 1. 起 PG 容器（本机无 compose 插件走 start-pg.ps1；PGPASSWORD 传递不落文件）
+    $env:PGPASSWORD = "postgres"; .\scripts\start-pg.ps1
+    # 2. 全量测试（含图回放 + API 集成 + 验收样例）
+    uv run pytest tests/ -v
+    # 3. API 演示（内存 Checkpointer，不依赖 PG 也可跑）
+    uv run uvicorn app.main:app --port 8000
+    curl -X POST localhost:8000/api/batches -H "Content-Type: application/json" -d "{""batch_no"":""B-001"",""project_id"":""PRJ-1"",""model"":""JH-550W"",""rule_version_id"":""..."",""planned_quantity"":10}"
+    curl -X POST localhost:8000/api/intake -H "Content-Type: application/json" -d "{""batch_id"":""...""}"
+    curl -X POST localhost:8000/api/batches/{id}/judge
+    # 验收样例（无需 PG，SQLite 注入）
+    uv run pytest tests/api/test_e2e_acceptance.py -v
