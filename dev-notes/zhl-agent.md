@@ -178,3 +178,24 @@
 - **关键产出**：spec `docs/superpowers/specs/2026-10-11-phase-a-intake-judge-design.md` 定稿（Q1 API↔图触发模型 / Q2 task_id=thread_id=str(batch_id) / Q3 多组件 confidence=min 聚合整批一次确认，全部落入 §5.2/§5.4/§5.6/§9）；plan `docs/superpowers/plans/2026-10-11-phase-a-intake-judge.md`（9 个任务：依赖+脚手架 / 仓库层 / LLM 客户端 / 证据落库 / 抽取 Skill / 判定 Skill+抽样 Plugin / LangGraph 图+状态+Checkpointer+图回放 / API 路由+app.main / 验收演示收口；含 Global Constraints + Review Focus 5 项 + 任务依赖表；每任务完成后停止等待人工核验）
 - **拒绝与纠偏**：无。Q1/Q2/Q3 均采纳建议默认并经用户「确认」；B1–B5 拍板项一并复核无异议
 - **翻车与返工**：无
+
+## 2026-10-11 15:50 · Phase A Task 1 完成 · 依赖 + 包骨架
+
+- **关键原话**：「完成Phase-a的Task1，调用superpowers skill，遵循流程，开发完成后等待人工核验」「始终遵循AGENT.md的开发规范」「遵循~\docs\superpowers文件夹的spec文件和plan文件」
+- **关键产出**：uv add langgraph（langgraph>=1.2.14 进 pyproject + uv.lock，langgraph-checkpoint-postgres>=3.1 P0 已有无需重复 add）+ 6 个 __init__.py 包骨架（pp/api/、pp/workflow/、pp/skills/ + 	ests/api/、	ests/workflow/、	ests/skills/）。提交 6e9670
+- **拒绝与纠偏**：无。plan Task 1 四步全部按原样执行
+- **翻车与返工**：uv 不在 PATH，定位到 $env:USERPROFILE\.local\bin\uv.exe，后续一律 & "C:\Users\21448\.local\bin\uv.exe" 调用；uv.lock diff 较大（149+/153-）已核对：新增 langgraph 及其依赖链（langchain-core / langgraph-sdk 等），fastapi/pydantic/sqlalchemy 版本未推高（0.143.0 / 2.14.0 / 2.1.4 与 P0 lock 一致）
+- **自测**：uv run python -c "from langgraph.graph import StateGraph; from langgraph.checkpoint.memory import InMemorySaver; from langgraph.types import interrupt, Command; print('ok')" → ok；uv run pytest -q → 72/72 pass（P0 无回归）；uv run ruff check . 全绿；uv run black --check . 31 files unchanged
+
+## 2026-10-11 16:09 · Phase A Task 2 完成 · 仓库层 app/infra/repositories.py
+
+- **关键原话**：「完成Phase-a的Task2，调用superpowers skill，遵循流程，开发完成后等待人工核验」「始终遵循AGENT.md的开发规范」「遵循~\docs\superpowers文件夹的spec文件和plan文件」
+- **关键产出**：pp/infra/repositories.py（BatchRepository / InspectionRepository（含 EXCLUDE 应用层兜底 CrossBatchSnConflict）/ SampleRepository（freeze_samples 确定性抽样 + save_conclusion + get_latest_conclusion）/ get_session() 连接串读 ZHL_DATABASE_URL 回落 .env，与 alembic/env.py 同法，无硬编码凭据）+ 	ests/infra/test_repositories.py（SQLite 内存库 + JH-550W 规则种子，6 用例：draft 批次 / 同批次 SN 唯一 / 跨批次同 SN 兜底（Review Focus #4）/ confirm 改值 / freeze 确定性重放 / conclusion 唯一键）。提交 832f215 + c0d989a
+- **Ruling（偏离 plan 原签名，已补进 plan Task 2 章节并单提交 c0d989a）**：
+  - T2-1：freeze_samples 补 iso_row: IsoRow 参数（plan 原签名只有 seed/selected_at，缺抽样量 n/ac/re，无法驱动 domain.freeze_sample）
+  - T2-2：save_conclusion 补 sample_round 参数（唯一键 uq_conclusion_unique 含 sample_round，不传默认 1，与「复检多轮」语义冲突）
+- **拒绝与纠偏**：无。plan Task 2 五步按原样执行，仅签名缺口按 Ruling 补齐
+- **翻车与返工**：
+  - freeze_samples 首版去重逻辑查 InspectionRepository.get_batch_sns（本批次已有 inspection 的 SN），导致第二次调用把刚插入的 Sample 又当成已存在、全部跳过、返回空列表 → 改为查 Sample 表自身已持久化行去重，测试断言也改为查 Sample 表总数（10 条，重放不重复）
+  - 测试断言初版写成「两次调用的 created 列表一致」，但语义上第二次调用本就是 0 条新增（去重生效），改为查持久化总量验证确定性
+- **自测**：tests/infra/test_repositories.py 6/6 pass；全仓 pytest 无回归；ruff check 全绿（--fix 后）；black 全绿；P0 冻结项（app/domain、infra/models、migrations、fixtures）零 diff
