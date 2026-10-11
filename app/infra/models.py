@@ -23,6 +23,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -43,6 +44,10 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 # ---------------------------------------------------------------------------
 
 JSONB_T = JSONB().with_variant(JSON(), "sqlite")
+
+# PB L2: reinspection scope-type value domain (minimal / expanded / full_lot).
+# Cross-DB safe: VARCHAR + CHECK in DDL (002), native_enum=False in models.
+SCOPE_TYPE = ("minimal", "expanded", "full_lot")
 
 
 def _uuid_pk() -> Mapped[uuid.UUID]:
@@ -279,6 +284,10 @@ class QualityIncident(Base):
     verification_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("reinspections.reinspection_id")
     )
+    # PB L3: explicit engineer-declared CAPA-verified flag (reinspection pass alone
+    # does NOT imply verified — measures-effectiveness is an independent human
+    # judgement). `assert_release`'s `check_all_capa_verified` reads this.
+    capa_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     status: Mapped[str] = mapped_column(
         SAEnum(*INCIDENT_STATUS, native_enum=False, create_type=False, length=40),
         nullable=False,
@@ -318,6 +327,15 @@ class Reinspection(Base):
     executor: Mapped[str] = mapped_column(String, nullable=False)
     executed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     evidence_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("evidence.evidence_id"))
+    # PB L2: reinspection scope — explicit, assertion-validated (PB spec D5/D5a).
+    # scope_type: which scope (minimal / expanded / full_lot); scope_sns: JSONB array
+    # of SNs actually covered by this reinspection (default = minimal, the incident's SN set).
+    scope_type: Mapped[str] = mapped_column(
+        SAEnum(*SCOPE_TYPE, native_enum=False, create_type=False, length=40),
+        nullable=False,
+        default="minimal",
+    )
+    scope_sns: Mapped[list] = mapped_column(JSONB_T, nullable=False, default=list)
     created_at: Mapped[datetime | None] = _ts()
     updated_at: Mapped[datetime | None] = _ts()
 
