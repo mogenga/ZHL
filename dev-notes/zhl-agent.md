@@ -163,3 +163,18 @@
   - 实测：重启 zhl-pg 绑定 15432:5432、pg_isready 就绪、001_init.sql exit 0、uv run alembic current（15432）连通容器库；本地 PG18（5432）无需再停，两者共存
 - **拒绝与纠偏**：端口选 15432（避开 5433/5439 等常见邻近端口与防火墙保留段），本地 PG18 服务保持不动
 - **翻车与返工**：compose.yaml 第 9 行注释残留 localhost:5432，首轮漏改，补改后复查通过
+
+## 2026-10-11 15:00 · zhl-agent · Phase A brainstorm + spec 初稿
+
+- **关键原话**：用户要求「针对Phase-A进行开发，调用superpowers skill，遵循流程，先运行brainstorming，编写该Phase的spec文档，待人工复核后进行下一流程」
+- **关键产出**：`docs/superpowers/specs/2026-10-11-phase-a-intake-judge-design.md`（Phase A 设计文档，含 6 节点 LangGraph 图、API 路由、Plugin 实现、证据落库、测试规格、完成标准；用户拍板 R1–R6 六项决策：LangGraph 图做主线段 / thread_id=batch_id + PG Checkpointer / 节点确定性封装 / MockLLMClient 读固定 JSON 夹具无 LLM 环境变量 / 批次创建放 Phase A / Phase A 不做 3–5 段）
+- **拒绝与纠偏**：无（brainstorm 阶段用户拍板，spec 按拍板项落稿）
+- **翻车与返工**：subagent_fork 超时（120s），改 subagent_spawn 后台；spawn 后 child 迟迟 running 不返回，cancel 失败后改由 builder 自己读 spec 做 check，识别出 Q1（API ↔ 图触发模型）/ Q2（task_id 语义）/ Q3（多组件 confidence 聚合）三项需用户拍板
+- **自测**：spec 文档 11 节结构完整；P0 冻结项（app/domain / infra/models / migrations / tests/fixtures）未被修改；subagent 已取消
+
+## 2026-10-11 15:40 · zhl-agent · Phase A spec 人工复核通过 + 计划产出（writing-plans）
+
+- **关键原话**：用户「确认」（Q1–Q3 + B1–B5 采纳建议默认）→ spec 更新后「通过」（人工复核通过）→ 进入 writing-plans
+- **关键产出**：spec `docs/superpowers/specs/2026-10-11-phase-a-intake-judge-design.md` 定稿（Q1 API↔图触发模型 / Q2 task_id=thread_id=str(batch_id) / Q3 多组件 confidence=min 聚合整批一次确认，全部落入 §5.2/§5.4/§5.6/§9）；plan `docs/superpowers/plans/2026-10-11-phase-a-intake-judge.md`（9 个任务：依赖+脚手架 / 仓库层 / LLM 客户端 / 证据落库 / 抽取 Skill / 判定 Skill+抽样 Plugin / LangGraph 图+状态+Checkpointer+图回放 / API 路由+app.main / 验收演示收口；含 Global Constraints + Review Focus 5 项 + 任务依赖表；每任务完成后停止等待人工核验）
+- **拒绝与纠偏**：无。Q1/Q2/Q3 均采纳建议默认并经用户「确认」；B1–B5 拍板项一并复核无异议
+- **翻车与返工**：无
