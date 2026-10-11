@@ -165,43 +165,47 @@ def assert_release(
     capa: list[CapaView],
     reinspection_scopes: list[ReinspectionScopeIn] = (),
     iso_table: list[IsoRow] = (),
+    required_sns: dict[str, tuple[str, ...]] | None = None,
 ) -> AssertionResult:
     """Run all seven release checks; ``passed`` is the conjunction.
 
     PB D7-7: items 7 (``reinspection_scopes`` + ``iso_table``) default to
     empty so Phase 0 callers that don't yet pass them still work; the Phase B
     release API (Task 8) always supplies both.
+
+    ``required_sns`` (PB Task 8 handoff, closes the self-reference
+    deviation logged in the Task 2 spec review): the *authoritative*
+    per-open-incident required SN set, resolved by the caller from
+    ``incident_sn_links`` (the DB the domain layer must not read). When
+    supplied, item 7 compares each incident's required set against the
+    union of its reinspection rows' ``scope_sns`` — so a reinspection
+    covering only part of the affected set is a Fail naming the missing
+    SNs. When omitted (Phase 0 callers), the legacy self-referential
+    derivation from the scope rows themselves is used, which only
+    detects "no scope row at all" and keeps backward compatibility.
     """
-    # Resolve the required SN set for each open incident. The caller (Phase B
-    # Task 8) passes reinspection_scopes where each row carries the *full*
-    # affected-SN set for its incident as ``scope_sns``. The check therefore:
-    #   1. Every open incident must have at least one scope row (else Fail).
-    #   2. The scope row's ``scope_sns`` must cover the required set; since the
-    #      required set is declared by the same rows, a missing row for an open
-    #      incident is detected by the "no scope row" branch.
-    #   3. ``iso_lookup`` must resolve for each row's ISO combo.
-    #
-    # ``required_by_incident`` is built from the scope rows themselves: for
-    # incidents that have rows, required = union of their scope_sns. For
-    # incidents that have NO rows, required = () (we can't know the required
-    # set without a row), but the "no scope row" check will fail regardless.
     open_incident_ids = [
         i.incident_id for i in incidents if i.status not in ("closed", "rejected", "scrapped")
     ]
-    # Build required_by_incident from scope rows (rows declare the full set).
-    required_by_incident: dict[str, tuple] = {}
-    for row in reinspection_scopes:
-        required_by_incident.setdefault(row.incident_id, ())
-        # Accumulate: the required set for an incident is the union of all
-        # its rows' scope_sns (caller declares the full affected set).
-        existing = set(required_by_incident.get(row.incident_id, ()))
-        existing.update(row.scope_sns)
-        required_by_incident[row.incident_id] = tuple(existing)
-    # For open incidents with no scope row at all, mark required as a
-    # sentinel that the "no scope row" branch will catch.
-    for inc_id in open_incident_ids:
-        if inc_id not in required_by_incident:
-            required_by_incident[inc_id] = ()  # no row → "no scope row" branch fails
+    if required_sns is not None:
+        # Authoritative mode: caller declares the full required set per
+        # open incident (from incident_sn_links). Open incidents absent from
+        # the mapping get an empty required set (nothing declared to cover).
+        required_by_incident: dict[str, tuple] = {
+            inc_id: tuple(required_sns.get(inc_id, ())) for inc_id in open_incident_ids
+        }
+    else:
+        # Legacy self-referential mode (Phase 0 backward compatibility):
+        # build required_by_incident from the scope rows themselves.
+        required_by_incident = {}
+        for row in reinspection_scopes:
+            required_by_incident.setdefault(row.incident_id, ())
+            existing = set(required_by_incident.get(row.incident_id, ()))
+            existing.update(row.scope_sns)
+            required_by_incident[row.incident_id] = tuple(existing)
+        for inc_id in open_incident_ids:
+            if inc_id not in required_by_incident:
+                required_by_incident[inc_id] = ()  # no row → "no scope row" branch fails
 
     checks = (
         check_state(batch),

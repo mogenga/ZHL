@@ -232,3 +232,101 @@ def test_closed_incidents_not_required() -> None:
     r = assert_release(b, s, [closed], iso, ev, cp, [], [_iso_row()])
     by_name = {c.name: c for c in r.checks}
     assert by_name["reinspection_scope_covered"].passed is True
+
+
+def test_required_sns_authoritative_closes_self_reference_gap() -> None:
+    """PB Task 8 handoff: the caller supplies the authoritative required set
+    (from incident_sn_links). A reinspection covering only part of it must
+    now Fail and name the missing SNs — the self-reference the legacy
+    derivation hid."""
+    scope = ReinspectionScopeIn(
+        incident_id="I1",
+        scope_sns=("SN-A",),  # actual reinspection coverage: 1 of 3
+        lot_size=3,
+        inspection_type="module",
+        inspection_level="full",
+        aql=0.65,
+    )
+    iso = [
+        IsoRow(
+            inspection_type="module",
+            inspection_level="full",
+            aql=0.65,
+            lot_size_min=1,
+            lot_size_max=10,
+            n=3,
+            ac=0,
+            re=1,
+        )
+    ]
+    incident = IncidentView(
+        incident_id="I1",
+        batch_id="B",
+        trigger_type="rule_fail",
+        severity="major",
+        status="pending_recheck",
+    )
+    ev = [EvidenceView(evidence_id="E1", evidence_type="decision_snapshot")]
+    result = assert_release(
+        batch=BatchView(batch_id="B", status="pending_release"),
+        sample=SampleView(result="pass"),
+        incidents=[incident],
+        isolated_sns=[],
+        evidence=ev,
+        capa=[],
+        reinspection_scopes=[scope],
+        iso_table=iso,
+        required_sns={"I1": ("SN-A", "SN-B", "SN-C")},  # authoritative from incident_sn_links
+    )
+    item7 = result.checks[6]
+    assert item7.name == "reinspection_scope_covered"
+    assert item7.passed is False
+    # the missing SNs are named in the reason
+    assert "SN-B" in item7.reason and "SN-C" in item7.reason
+    assert result.passed is False
+
+
+def test_required_sns_full_coverage_passes() -> None:
+    """Authoritative required set fully covered by the reinspection row ->
+    item 7 passes."""
+    scope = ReinspectionScopeIn(
+        incident_id="I1",
+        scope_sns=("SN-A", "SN-B", "SN-C"),
+        lot_size=3,
+        inspection_type="module",
+        inspection_level="full",
+        aql=0.65,
+    )
+    iso = [
+        IsoRow(
+            inspection_type="module",
+            inspection_level="full",
+            aql=0.65,
+            lot_size_min=1,
+            lot_size_max=10,
+            n=3,
+            ac=0,
+            re=1,
+        )
+    ]
+    incident = IncidentView(
+        incident_id="I1",
+        batch_id="B",
+        trigger_type="rule_fail",
+        severity="major",
+        status="pending_recheck",
+    )
+    ev = [EvidenceView(evidence_id="E1", evidence_type="decision_snapshot")]
+    result = assert_release(
+        batch=BatchView(batch_id="B", status="pending_release"),
+        sample=SampleView(result="pass"),
+        incidents=[incident],
+        isolated_sns=[],
+        evidence=ev,
+        capa=[],
+        reinspection_scopes=[scope],
+        iso_table=iso,
+        required_sns={"I1": ("SN-A", "SN-B", "SN-C")},
+    )
+    assert result.checks[6].passed is True
+    assert result.passed is True
