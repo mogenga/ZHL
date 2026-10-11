@@ -63,6 +63,7 @@
 - Langfuse / 观测平台（若引入追踪）
 - PostgreSQL 特有语法（JSONB、EXCLUDE、行级锁、触发器）
 - pytest / httpx（测试与异步 HTTP 客户端）
+- uv（Python 环境管理，见 §10）
 
 ### 2.2 查完必须留痕
 
@@ -116,12 +117,30 @@
 ### 3.4 提交规范
 
 - 一个提交一个逻辑变更，message 说清「为什么改」
-- 提交前必须 `ruff check . && black --check . && pytest -x` 通过
+- 提交前必须 `uv run ruff check . && uv run black --check . && uv run pytest -x` 通过（命令一律走 `uv run`，见 §10）
 - 不提交 `data/evidence/`、`.env`、`dev-notes/` 中非当前 Agent 的文件
+- `uv.lock` 随依赖变更一并提交；`.venv/` 不提交（已 gitignore）
 
 ---
 
 ## 4. 数据库规范
+
+### 4.0 运行环境（Docker）
+
+本项目的 PostgreSQL **一律用 Docker 容器运行**（`postgres:15`），不再依赖本机安装 PG 服务。凭据与连接串集中在 `.env`（不提交；模板 `.env.example`），与 `alembic.ini`、`compose.yaml` 保持一致：`postgres:postgres@localhost:15432/zhl`。
+
+| 操作 | 命令 |
+| --- | --- |
+| 启动 + 初始化（有 compose：CI/Linux/Mac） | `docker compose -f compose.yaml up -d`（首启挂载 `migrations/` 自动执行 001_init.sql + verify_001.sql） |
+| 启动 + 初始化（本机无 compose 插件，Windows） | `.\scripts\start-pg.ps1`（拉镜像 + 起容器 + docker cp 执行 DDL + 约束断言） |
+| 停 / 清容器 | `docker stop zhl-pg` / `docker rm -f zhl-pg` |
+| 应用连接 | `ZHL_DATABASE_URL`（.env）；SQLAlchemy / langgraph-checkpoint-postgres 同源 |
+
+**规则**：
+- DDL 验证（001_init.sql / verify_001.sql）在容器内跑：`docker exec -e PGCLIENTENCODING=UTF8 zhl-pg psql -U postgres -d zhl -f /tmp/xxx.sql`（先 `docker cp` 拷入；PowerShell 不支持 stdin 重定向 docker exec）
+- 中文版 psql 默认 GBK，读 UTF-8 DDL 会报错——一律带 `PGCLIENTENCODING=UTF8`（已在 compose.yaml 环境变量与脚本里固化）
+- 演示库固定 `zhl`，勿落到 `postgres` 保留库
+- domain 纯函数单测不依赖 DB（SQLite 内存库自检）；只有 DDL 验证与端到端需要容器
 
 ### 4.1 迁移管理
 
@@ -253,3 +272,47 @@ ReinspectionResult(reinspection_id, incident_id, sn, passed, evidence_ids)
 | 集成 | Phase A + B 全链路 + 四组验收样例 | Phase A + B | 端到端演示命令 + 全量测试 |
 
 **并行边界**：Phase A 和 Phase B 同时开发，各自独立 PR。集成阶段串行。
+
+---
+
+## 10. uv 环境管理规范
+
+本项目用 **uv**（Astral，Rust 实现）管理 Python 环境与依赖，替代裸 `pip`/`python -m venv`。所有 Python 命令一律走 `uv`，确保全团队环境一致、可复现。
+
+### 10.1 环境生命周期
+
+| 操作 | 命令 | 说明 |
+| --- | --- | --- |
+| 初始化 / 同步环境 | `uv sync` | 按 `uv.lock` 创建/更新 `.venv`，装主依赖 + dev group |
+| 锁定依赖 | `uv lock` | `pyproject.toml` 变更后重新生成 `uv.lock` |
+| 加依赖 | `uv add <pkg>`（生产）/ `uv add --dev <pkg>`（dev group） | 自动更新 `pyproject.toml` + `uv.lock` |
+| 移除依赖 | `uv remove <pkg>` | 同上 |
+| 跑任意命令 | `uv run <cmd>` | 在 `.venv` 内执行，自动校验 lock 与同步状态 |
+| 查看依赖树 | `uv tree` | 排查版本冲突 |
+
+**规则**：
+- **新增/删除任何依赖必须走 `uv add` / `uv remove`**，直接编辑 `pyproject.toml` 后须紧跟 `uv lock` 验证可解析
+- **不手动改 `.venv/`**（不用 `uv pip install` 或裸 `pip` 往项目环境装包）
+- `.venv/` 已被 `.gitignore` 排除，**`uv.lock` 必须提交**（环境可复现的唯一保证）
+- dev 依赖统一放 `[dependency-groups] dev`（PEP 735，`[tool.uv] default-groups = ["dev"]` 保证 `uv sync` 默认装入），不再用 `[project.optional-dependencies]`
+
+### 10.2 命令对照（替换所有裸命令）
+
+| 旧（禁止） | 新（规范） |
+| --- | --- |
+| `pytest` / `python -m pytest` | `uv run pytest` |
+| `ruff check .` | `uv run ruff check .` |
+| `black --check .` | `uv run black --check .` |
+| `uvicorn app.main:app` | `uv run uvicorn app.main:app --reload` |
+| `pip install X` | `uv add X`（进 pyproject+lock）；一次性工具用 `uvx <tool>` |
+
+### 10.3 提交前门禁（AGENT.md §3.4 更新）
+
+提交前必须全绿：
+
+```bash
+uv run ruff check . && uv run black --check . && uv run pytest -x
+```
+
+（`uv run` 会先校验 `uv.lock` 与 `.venv` 同步，不同步会自动同步或报错。）
+

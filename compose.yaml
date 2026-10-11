@@ -1,0 +1,35 @@
+# ZHL · PostgreSQL 15 via Docker（P0 演示 / Phase A/B 集成）
+#
+# 本机（Windows Docker Desktop）无 docker compose 插件，可直接用脚本：
+#   .\scripts\start-pg.ps1
+# 有 compose 的环境（CI / Linux / Mac）：
+#   docker compose -f compose.yaml up -d
+#   或 docker compose -f compose.yaml run --rm init-db
+#
+# 凭据与 alembic.ini / 应用连接串对齐：postgres:postgres @ localhost:15432 / 库 zhl。
+# 演示库固定 zhl（勿用 postgres 保留库）。
+
+services:
+  zhl-pg:
+    image: postgres:15
+    container_name: zhl-pg
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: zhl
+      # UTF-8 客户端编码（中文版 psql 默认 GBK 会读 UTF-8 的 001_init.sql 报错，见 dev-notes agnes-20261010）
+      PGCLIENTENCODING: UTF8
+      TZ: UTC
+    ports:
+      - "15432:5432"
+    volumes:
+      - zhl-pg-data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d:ro   # 首启自动执行 001_init.sql + verify_001.sql（按文件名序）
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  zhl-pg-data:

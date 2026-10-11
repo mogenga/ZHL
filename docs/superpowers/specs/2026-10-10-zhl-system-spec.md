@@ -116,7 +116,7 @@ new → isolated → assigned → pending_recheck → closed
 | --- | --- | --- |
 | 语言 | Python 3.11+ | |
 | Web | FastAPI + 内置静态页 | 单进程，零前端构建 |
-| DB | PostgreSQL 15+ | 声明式约束 + JSONB + 行级锁 |
+| DB | PostgreSQL 15（Docker 容器） | 声明式约束 + JSONB + 行级锁；compose.yaml / scripts/start-pg.ps1 管理 |
 | ORM | SQLAlchemy 2.0 | 显式事务边界 |
 | 校验 | Pydantic v2 | JSON Schema 约束 |
 | 编排 | LangGraph（Python） | 五段主链 Workflow 编排、状态管理、节点执行、Human-in-the-loop |
@@ -294,7 +294,7 @@ Phase 0 (串行，共享契约) ──→ Phase A ∥ Phase B (并行) ──→
 | 风险 | 影响 | 缓解 |
 | --- | --- | --- |
 | 并行集成冲突（DB/状态机） | 中 | Phase 0 锁定全部契约，Phase A/B 只读共享模块 |
-| AGH Skill/Plugin 接口不稳定 | 中 | 先实现 domain + Plugin，Skill 编排层可替换 |
+| LangGraph 节点/Checkpointer 契约不稳定 | 中 | 先实现 domain + Plugin，节点编排层可替换；依赖锁在 uv.lock |
 | ISO 抽样表数据准确性 | 低 | 预置固定表，测试夹具覆盖边界 |
 | 归因幻觉 | 高 | 证据存在性校验 + 比例阈值拒绝（架构 §6.2） |
 | 单进程性能瓶颈 | 低 | P0 不优化，批量判定用批量接口 |

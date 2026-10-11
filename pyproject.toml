@@ -7,24 +7,31 @@ name = "zhl"
 version = "0.0.0"
 description = "质慧链光伏检验数字化平台"
 requires-python = ">=3.11"
+# 下界对齐总 spec §3.1 锁定的大版本（SQLAlchemy 2.0 / Pydantic v2 / PG15+ 语义）。
+# 锚定已验证的 lock 版本，防 re-lock / 无 lock 场景解析到破坏兼容性的大版本。
 dependencies = [
-    "fastapi",
-    "sqlalchemy[asyncio]",
-    "alembic",
-    "pydantic",
-    "httpx",
-    "psycopg[binary]",
-    "langgraph-checkpoint-postgres",
+    "fastapi>=0.143",
+    "sqlalchemy[asyncio]>=2.0",   # spec §3.1：DeclarativeBase + mapped_column 为 2.0 专属
+    "alembic>=1.20",
+    "pydantic>=2.0",              # spec §3.1：Pydantic v2 风格 schema
+    "httpx>=0.28",
+    "psycopg[binary]>=3.0",       # psycopg3（区别 psycopg2）；spec 锁定
+    "langgraph-checkpoint-postgres>=3.1",  # spec §3.2.1：PostgreSQL 后端 Checkpointer
 ]
 
-[project.optional-dependencies]
+# PEP 735 dependency groups（uv 原生 dev group；uv sync / uv run 默认包含）
+[dependency-groups]
 dev = [
-    "pytest",
-    "pytest-cov",
-    "ruff",
-    "black",
-    "aiosqlite",
+    "pytest>=9.1",
+    "pytest-cov>=7.1",
+    "ruff>=0.17",
+    "black>=26.10",
+    "aiosqlite>=0.22",
 ]
+
+# uv 项目模式配置：默认环境同步包含 dev group；依赖锁定以 uv.lock 为准
+[tool.uv]
+default-groups = ["dev"]
 
 [tool.setuptools.packages.find]
 include = ["app*"]

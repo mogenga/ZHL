@@ -81,7 +81,7 @@ domain 单测 ≥ 90% 覆盖，纯内存跑（pytest，不依赖 DB 与模型）
 | D3 * | 表结构以架构 §4.1 的 11 表 + `iso_sampling_table` 为准（共 12 张）；`module_inspections` 的 `rule_snapshot` / `decision_evidence` 用 JSONB，关键计算项（pmax/isc/voc/vm/im/ff/appearance_result/decision_status）冗余独立列 | 架构 §4.3 |
 | D16（确认） | 表数口径统一为 12：架构 §4.1 未列 `iso_sampling_table`（只读配置表），Phase 0 补入；完成标准同步按 12 张表述 | 用户确认 |
 | D17（确认） | **EXCLUDE 约束不降级**：SN 跨批次静默覆盖是需求 §2.2 明写核心断点，必须落 DB 层。实现 `btree_gist + sn_uniqueness int8range`（见 D5）；psql 验证若 EXCLUDE 报错，保留 DDL 并加应用层兜底检查（写入 001_init.sql 注释与 `tests/domain` 用例），**不降级为普通 UNIQUE**，交付物不变 | 用户确认 |
-| D18（确认） | 演示范围止于 DDL + 单测：Phase 0 不起 FastAPI、不接 uvicorn（API 属 Phase A/B），演示命令为 `psql -f migrations/001_init.sql && pytest tests/ -v` | 用户确认 |
+| D18（确认） | 演示范围止于 DDL + 单测：Phase 0 不起 FastAPI、不接 uvicorn（API 属 Phase A/B），演示命令为 `psql -f migrations/001_init.sql && uv run pytest tests/ -v` | 用户确认 |
 | D19（确认） | alembic 在 Phase 0 仅完成配置初始化（`alembic.ini` + `alembic/` 目录 + env.py，不生成 revision）；触发器/EXCLUDE/权限语句全部手写进 `001_init.sql`，不走 alembic；Phase A/B 增量 DDL（若有）走 alembic revision | 用户确认 |
 | D20（确认） | 冻结动作：Phase 0 最后一项任务为「评审 + 冻结」——plan 批准后人工评审通过，dev-notes 记「计划评审通过」节点，对 `app/domain/`、`app/infra/models.py`、`migrations/`、`tests/fixtures/` 打 git tag `phase0-frozen`；此后 A/B 改契约必须走 PR + review（AGENT.md §6.1） | 用户确认 |
 | D4 * | `incident_sn_links` 单独建表（FK 双向到 quality_incidents 与 module_inspections，UNIQUE(incident_id, sn)），不用 JSONB 数组 | 架构 §4.2「不用自由文本」 |
@@ -460,9 +460,9 @@ Phase 0 最后一项交付：
 - [ ] `app/infra/models.py` 12 表映射通过 SQLAlchemy 自检（`Base.metadata.create_all` 在 SQLite 内存库不报错，校验 schema 一致性）
 - [ ] `tests/fixtures/` 六类夹具齐全，四组验收样例可被 domain 纯函数直接消费（judge/断言/状态机 跑通预期结果）
 - [ ] `EvidenceStore` Protocol + `FileEvidenceStore.save` 骨架可单测
-- [ ] 全量 `pytest -x` 通过；`ruff check . && black --check .` 通过
+- [ ] 全量 `uv run pytest -x` 通过；`uv run ruff check . && uv run black --check .` 通过
 - [ ] dev-notes `agnes-20261010.md` 完整（每节点四要素）
-- [ ] 演示命令（AGENT.md §5.2，D18 止于 DDL + 单测，不起 uvicorn）：`psql $ZHL_DB -f migrations/001_init.sql && pytest tests/ -v` 可复现（含 DB 初始化 + 规则种子 + ISO 表种子导入脚本）
+- [ ] 演示命令（AGENT.md §5.2，D18 止于 DDL + 单测，不起 uvicorn）：`psql $ZHL_DB -f migrations/001_init.sql && uv run pytest tests/ -v` 可复现（含 DB 初始化 + 规则种子 + ISO 表种子导入脚本）
 - [ ] 冻结动作完成（D20）：git tag `phase0-frozen` 已打，dev-notes 记「计划评审通过」
 
 ## 7. 已确认决策与留待 builder 的项

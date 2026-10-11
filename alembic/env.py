@@ -9,6 +9,7 @@ track incremental DDL for Phase A/B.
 
 from __future__ import annotations
 
+import os
 from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config, pool
@@ -28,6 +29,46 @@ if config.config_file_name is not None:
 from app.infra.models import Base  # type: ignore  # noqa: E402
 
 target_metadata = Base.metadata
+
+
+# Connection URL source: alembic.ini no longer hardcodes the URL (avoids
+# committing plaintext credentials + drift between .env / compose).
+# Prefer ZHL_DATABASE_URL from the environment (.env, see .env.example),
+# fall back to the (now empty) sqlalchemy.url in ini. Keeps alembic in
+# sync with the app / langgraph-checkpoint-postgres connection.
+
+
+def _resolve_database_url() -> str:
+    url = os.environ.get("ZHL_DATABASE_URL")
+    if not url:
+        # Load from project-root .env without a third-party dotenv dep.
+        env_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+        if os.path.isfile(env_file):
+            with open(env_file, encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, _, val = line.partition("=")
+                    if key.strip() == "ZHL_DATABASE_URL" and val.strip():
+                        url = val.strip().strip('"').strip("'")
+                        break
+    if not url:
+        url = config.get_main_option("sqlalchemy.url") or ""
+    url = url.strip()
+    if not url:
+        raise RuntimeError(
+            "No database URL for alembic. Set ZHL_DATABASE_URL in .env "
+            "(see .env.example) before running alembic."
+        )
+    return url
+
+
+def _apply_database_url() -> None:
+    config.set_main_option("sqlalchemy.url", _resolve_database_url())
+
+
+_apply_database_url()
 
 
 def run_migrations_offline() -> None:

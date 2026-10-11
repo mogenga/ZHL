@@ -26,8 +26,9 @@
 - alembic 仅初始化配置，不生成 revision；触发器/EXCLUDE/权限手写进 001_init.sql（D19）
 - domain 单测 ≥ 90% 覆盖率，纯内存跑（AGENT.md §3.3）
 - dev-notes 按 `dev-notes/agnes-20261010.md` 逐节点留痕（AGENT.md §1）
-- 每个任务完成后 `ruff check . && black --check . && pytest -x` 全绿才可提交（AGENT.md §3.4）
+- 每个任务完成后 `uv run ruff check . && uv run black --check . && uv run pytest -x` 全绿才可提交（AGENT.md §3.4 / §10）
 - 演示止于 DDL + 单测，不起 FastAPI/uvicorn（D18）
+- 所有 Python 工具命令（pytest / ruff / black / uvicorn）一律 `uv run` 前缀；依赖管理走 uv（`uv add` / `uv lock` / `uv sync`），`uv.lock` 必须提交（AGENT.md §10）
 
 ## Review Focus
 
@@ -100,8 +101,9 @@
 
 - [ ] **Step 3: 验证**
 
-Run: `python -m pytest -q`（此时无测试，Expected: `no tests ran` 且无 import 错误）
-Run: `ruff check . && black --check .` → 全绿
+Run: `uv sync`（首次建 .venv + 按 uv.lock 同步；确认 lock 与 pyproject 一致）
+Run: `uv run pytest -q`（此时无测试，Expected: `no tests ran` 且无 import 错误）
+Run: `uv run ruff check . && uv run black --check .` → 全绿
 
 - [ ] **Step 4: Commit**
 
@@ -141,7 +143,7 @@ git commit -m "chore: project scaffold — deps, dirs, pytest/ruff/black/alembic
 - [ ] **Step 2: 验证 import 与纯度**
 
 Run: `python -c "from app.domain.types import Decision, ModuleInspectionIn, AssertionResult"` → 无错
-Run: `ruff check app/domain/ && black --check app/domain/` 全绿
+Run: `uv run ruff check app/domain/ && uv run black --check app/domain/` 全绿
 
 - [ ] **Step 3: Commit**
 
@@ -188,7 +190,7 @@ git commit -m "feat(domain): types — dataclasses for judge/release/state-machi
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `pytest tests/domain/test_judge.py -v` → Expected: 全部 FAIL（judge 未实现）
+Run: `uv run pytest tests/domain/test_judge.py -v` → Expected: 全部 FAIL（judge 未实现）
 
 - [ ] **Step 3: 实现 `app/domain/judge.py`**
 
@@ -196,8 +198,8 @@ Run: `pytest tests/domain/test_judge.py -v` → Expected: 全部 FAIL（judge �
 
 - [ ] **Step 4: 跑测试确认全绿**
 
-Run: `pytest tests/domain/test_judge.py -v` → Expected: PASS
-Run: `ruff check . && black --check .` → 全绿
+Run: `uv run pytest tests/domain/test_judge.py -v` → Expected: PASS
+Run: `uv run ruff check . && uv run black --check .` → 全绿
 
 - [ ] **Step 5: Commit**
 
@@ -242,8 +244,8 @@ git commit -m "feat(domain): judge engine — 5-check pure function + boundary t
 
 - [ ] **Step 4: 跑测试确认全绿**
 
-Run: `pytest tests/domain/test_acceptance.py -v` → Expected: PASS
-Run: `pytest tests/domain/ -q` → 全绿
+Run: `uv run pytest tests/domain/test_acceptance.py -v` → Expected: PASS
+Run: `uv run pytest tests/domain/ -q` → 全绿
 
 - [ ] **Step 5: Commit**
 
@@ -332,7 +334,7 @@ git commit -m "feat(db): 001_init.sql — 12 tables + EXCLUDE + triggers + seeds
 
 - [ ] **Step 3: 跑测试确认失败**
 
-Run: `pytest tests/domain/test_state_machine.py tests/domain/test_release.py -v` → Expected: FAIL
+Run: `uv run pytest tests/domain/test_state_machine.py tests/domain/test_release.py -v` → Expected: FAIL
 
 - [ ] **Step 4: 实现 `state_machine.py` + `release.py`**
 
@@ -340,8 +342,8 @@ Run: `pytest tests/domain/test_state_machine.py tests/domain/test_release.py -v`
 
 - [ ] **Step 5: 跑测试确认全绿**
 
-Run: `pytest tests/domain/test_state_machine.py tests/domain/test_release.py -v` → PASS
-Run: `pytest tests/domain/ -q && ruff check . && black --check .` → 全绿
+Run: `uv run pytest tests/domain/test_state_machine.py tests/domain/test_release.py -v` → PASS
+Run: `uv run pytest tests/domain/ -q && uv run ruff check . && uv run black --check .` → 全绿
 
 - [ ] **Step 6: Commit**
 
@@ -378,7 +380,7 @@ git commit -m "feat(domain): state machines + release assertions with 5-conditio
 
 - [ ] **Step 2: 跑确认失败 → 实现 `sampling.py`**
 
-Run: `pytest tests/domain/test_sampling.py -v` → FAIL 后实现，再 → PASS
+Run: `uv run pytest tests/domain/test_sampling.py -v` → FAIL 后实现，再 → PASS
 
 - [ ] **Step 3: 写 `app/plugins/evidence_store.py` 骨架 + 单测**
 
@@ -392,7 +394,7 @@ Run: `pytest tests/domain/test_sampling.py -v` → FAIL 后实现，再 → PASS
 
 - [ ] **Step 5: 跑全量确认全绿**
 
-Run: `pytest tests/ -q && ruff check . && black --check .` → 全绿
+Run: `uv run pytest tests/ -q && uv run ruff check . && uv run black --check .` → 全绿
 Run: 回填 `alembic/env.py` 的 target_metadata 指向 `app.infra.models`（D19，仍不生成 revision）
 
 - [ ] **Step 6: Commit**
@@ -417,13 +419,13 @@ git commit -m "feat: sampling + evidence store + SQLAlchemy models + self-check"
 
 - [ ] **Step 1: 覆盖率验证（domain ≥ 90%）**
 
-Run: `pytest tests/domain/ --cov=app/domain --cov-report=term-missing` → Expected: 总覆盖率 ≥ 90%
+Run: `uv run pytest tests/domain/ --cov=app/domain --cov-report=term-missing` → Expected: 总覆盖率 ≥ 90%
 若不足，补边界/非法路径用例（不得为凑数写无意义测试）
 
 - [ ] **Step 2: 全量验证（P0 spec §6 完成标准逐条）**
 
-Run: `psql $ZHL_DB -f migrations/001_init.sql && pytest tests/ -v` → 全绿（演示命令，D18）
-Run: `ruff check . && black --check .` → 全绿
+Run: `psql $ZHL_DB -f migrations/001_init.sql && uv run pytest tests/ -v` → 全绿（演示命令，D18）
+Run: `uv run ruff check . && uv run black --check .` → 全绿
 
 - [ ] **Step 3: 冻结（D20）**
 
