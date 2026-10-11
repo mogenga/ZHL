@@ -365,3 +365,55 @@
     curl -X POST localhost:8000/api/batches/{id}/judge
     # 验收样例（无需 PG，SQLite 注入）
     uv run pytest tests/api/test_e2e_acceptance.py -v
+
+## 2026-10-11 · Phase A · Code Review 节点（AGENT.md §1.2 第 4 项「code review 结论」）
+
+- **关键原话**：用户「调用 open-code-review skills，对已实现的 PhaseA 进行审查」→ 实际调用的是 `requesting-code-review` skill（open-code-review 非本仓已装 skill，语义等价），按模板派 subagent 做独立 review，范围 `438c067..613ff64`（feature/phase-a 全量 vs main 基线）；review 完成后用户指示「先按 AGENT.md 流程把这份审查结果（含我的核验修正）追加进 dev-notes，再走 P0-unfreeze 拍板」。
+- **关键产出**：
+  - 评审范围：36 files，+5277/−166。subagent 独立读完全部改动文件 + spec/plan 后出具 Strengths / Issues / Recommendations / Assessment 报告。
+  - **Assessment（subagent 原结论）：Ready to merge? With fixes。无 Critical；2 条 Important；5 条 Minor。**
+
+### 我（builder）的核验修正（AGENT.md §1.3「拒绝与纠偏」要求如实记录，不能只转述 subagent）
+
+1. **subagent 的 Important #1（证据 ID 冲突）我重新定级为 Critical，且发现了它漏掉的更严重维度。**
+   - subagent 描述：`make_evidence_id`（`app/plugins/evidence_store.py:89`）只看 `object_ref` 的 `kind/id`，不看 `evidence_type`，同一批次的不同证据类型会得到同一个 `evidence_id`。
+   - 我补漏的维度：`extract_node` 对**同一批次每个 SN** 都传同一个 `object_ref={kind:'batch',id:batch_id}`，意味着该批次 N 个 SN 的 `extraction_result` 也会塌缩成同一个 id（不只是 5 种 etype 互撞，还叠加了 SN 维度）。
+   - **实测确认（非推断）**：我用真实 `FileEvidenceStore`+SQLite 内存库跑了一趟——依次 `save` source_file / extraction_result / decision_snapshot / task_trace / human_confirmation 共 5 次，`evidence_id` 全部相同（`73ece46f…`），DB 最终只落 1 行（`distinct evidence_type in DB: 1`），后续 4 次 insert 因「先查后插命中即跳过」被静默吞掉。
+   - **当前测试为何没发现**：e2e/API 测试全程用 `StubEvidence`（`tests/api/test_batches.py:46`，每次 `save` 都生成新 `uuid4()`），从不走真实 `FileEvidenceStore`+DB 路径，故这条缺陷被测试体系掩盖。
+   - 影响面：`module_inspections.source_file_id`（`migrations/001_init.sql:121`）外键引用 `evidence(evidence_id)`；若 `source_file` 不是该批次第一个被 save 的 etype，这条外键指向的行本身会被别的 etype「抢占」语义。
+2. **Important #2（auto-confirm 未断言 confirmed 行数）复核属实，维持 Important 级别**（触发条件苛刻——同 session 同事务内 `intake_node` 刚 flush 过，select 理应可见，但防御性断言缺失属实），未升级也未降级，照单记录。
+3. 5 条 Minor（`judge_node` 的 `+ [""]`、图节点内函数级 import、非 UUID `task_id`/`batch_id` 触发 500 而非 404、共享 engine 脆弱性、`get_latest_conclusion` 缺省 `inspection_type=None`）逐条看过代码，均属实，级别判断准确，照单采纳。
+
+### 完整 Issues 清单（含我的定级修正）
+
+**Critical（必须修，合入前）：**
+- C1 · `make_evidence_id` 不区分 `evidence_type`（`evidence_store.py:89` + 4 处调用点）→ 同批次 5 种证据类型 + 同批次 N 个 SN 的 extraction_result 全部塌缩成 1 行 DB 记录。修复方向：`make_evidence_id(object_ref, etype)`，key 改为 `f"{etype}/{kind}/{id}"`，同步更新 4 处调用点传入 etype；并补一条**真实 `FileEvidenceStore`+SQLite DB 集成测试**（非 Stub），断言 5 种 etype 各自独立成行。
+
+**Important（应修，可与 C1 同 PR 或紧随其后）：**
+- I1 · `app/api/intake.py:135-158` auto-confirm 前未断言 `select` 出的行数 == `len(rows)`，建议 commit 前加断言（防御 §2.3「节点不写库」保证）。
+
+**Minor（可延后/同 PR 顺手修）：**
+- M1 · `main_chain.py:231` `judge_node` 的 `+ [""]` 空串污染 `evidence_ids` 列表，删掉即可。
+- M2 · `main_chain.py:280,298` 图节点内函数级 `import AgentTaskTrace/DeliveryBatch`、`datetime.now(UTC)`，建议提到模块级。
+- M3 · `intake.py:97,175` 非 UUID 的 `batch_id`/`task_id` 触发 `uuid.UUID(...)` 的 `ValueError` → 未捕获 500，而非 B3 约定的 404。
+- M4 · `tests/api/test_batches.py` 的 `_SHARED_ENGINE`/`_SHARED_RULE_UUID` 模块全局 + `StaticPool` 跨用例 SN 复用脆弱（已在 `test_judge.py:142` 注释文档化）。
+- M5 · `repositories.py:265` `get_latest_conclusion` 缺省 `inspection_type=None` 时会跨 inspection_type 返回，调用方（sampling）总是显式传入，属潜伏项。
+
+### P0-unfreeze 拍板项（AGENT.md §6.1：Phase 0 冻结文件若需调整，必须走 PR + review，不允许直接改）
+
+- **需解冻/调整冻结项：无。** C1 的修复面（`app/plugins/evidence_store.py` + 4 处调用点）**不在 P0 冻结清单**内——P0 冻结的四个对象是 `app/domain/`、`app/infra/models.py`、`migrations/`、`tests/fixtures/`（AGENT.md §6.1），`app/plugins/` 是 Phase A 自己的可改产物（Task 4 本来就是在 `FileEvidenceStore` 骨架上加 DB 半区）。所以 C1 的修复**不需要走 P0-unfreeze PR**，可以作为一个普通的 Phase A 内修复 commit 直接进 `feature/phase-a`，与 08a2606 那类「P0 冻结文件解冻」性质不同，特此澄清避免误走流程。
+- 真正需要拍板的只有两点，请用户裁决：
+  1. **C1 是否现在就在 `feature/phase-a` 上修（推荐），还是另开一条修复分支**？修复涉及 `make_evidence_id` 签名变更（多一个 `etype` 参数）+ 4 处调用点 + 1 条新集成测试，改动面有限、不触碰任何 P0 冻结文件。
+  2. **I1/M1/M3/M5 是否并进同一个修复 commit，还是分批**？M2/M4 可完全不动（纯风格/测试基建），不强制。
+
+### 已同步核验通过（非 subagent 声称、我直接跑的命令）
+
+- `& "$env:USERPROFILE\.local\bin\uv.exe" run pytest tests/ -q` → 125 passed（全量）
+- `uv run ruff check .` → All checks passed
+- `uv run black --check .` → 54 files unchanged
+- `uv run pytest tests/api/test_e2e_acceptance.py -q` → 5 passed
+- 直接构造 `FileEvidenceStore(…, db=session)` + SQLite 内存库复现 C1（见上文「实测确认」段落，非手写结论）
+
+- **拒绝与纠偏**：subagent 报告本身质量高，但它把 C1 定级为 Important（描述里也没点出「同批次 N 个 SN 也会塌缩」这个维度）——我实测后升级为 Critical；subagent 也自述了一次流程瑕疵（它自己 spawn 了一个子 subagent 失败后改成了 inline 读文件，没有跑 `git diff --stat` 全量 diff，是直接读 HEAD 工作树的 36 个文件），我认可它最终的文件级阅读覆盖度（全部 36 个文件都读了），不影响结论可信度，但「没跑 git diff」这一点在此如实记录，避免后续误以为它逐行 diff 过。
+- **翻车与返工**：无（本节点是纯审查，未改代码）；下次派 reviewer subagent 时应显式要求它把 `git diff BASE..HEAD` 的输出作为第一手证据而非直接读工作树文件，以便区分「工作树 vs 提交内容」。
+- **人工复核点（等待用户拍板，本节点不自行决定）**：P0-unfreeze 拍板项 1 和 2（见上）；C1 的修复 PR 是否顺带覆盖 M1/M3/M5。
