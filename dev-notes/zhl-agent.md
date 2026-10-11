@@ -261,3 +261,23 @@
   2. **图契约变化**: human_confirm 始终 interrupt + 路由 auto-resume。语义不变 (0.8 边界仍 auto-confirm, 体验相同), 但 Task 7 测试已改写 —— 请确认接受。
   3. **datetime.utcnow() TODO**: 516 条 DeprecationWarning 全部来自 P0 冻结文件 app/infra/models.py:56 (Phase 0 遗留, 非 Task 8 引入)。Phase A 收口 (Task 10) 开 PR 一行改 datetime.now(timezone.utc), 走 review 合并; Task 8 不动冻结文件。
   4. auto-confirm 路径路由写 confirmed 后 resume —— 与 §5.6 "confirm 端点先写后 resume" 对称; 字段覆盖复用仓库层 _CONFIRMABLE 白名单同源语义。
+## 2026-10-11 15:30 · Phase A Task 9 完成 · 演示 + 全量验证 + 路由拆分 + dev-notes 收口
+- 关键原话：「Task 8 我核验通过，三点裁决如下：1.文件布局按 plan 拆 router。2.图契约变化接受。3.datetime.utcnow() TODO 确认不动冻结文件，Task 10 收口时 PR 修。进 Task 9」
+- 关键产出：
+  - **路由拆分 (裁决 1)**: 按 plan Task 8 Interfaces 把 app/main.py 内联路由拆到 app/api/batches.py (POST /api/batches, GET /api/batches/{id}, POST /api/batches/{id}/judge) + app/api/intake.py (POST /api/intake, POST /api/intake/{task_id}/confirm)。app/main.py 只留 create_app 工厂 + AppDeps + 模块级 app (uvicorn app.main:app), 两个 build_router(get_deps) 挂 include_router。
+  - **验收样例 (spec §6.1 Phase A 侧)**: tests/api/test_e2e_acceptance.py 5 例 (样例一 正常放行 10 全 Pass→pending_release; 样例二 边界 533.5 Pass / 533.4 Fail 走 API; 样例三 Impp 超档→isolated; 样例四 同 SN 跨批次→CrossBatchSnConflict 400 + 仓库层 pytest.raises 双验证)。
+  - **D5/D17 路由守卫**: intake 路由捕获 CrossBatchSnConflict (图 intake_node 内传播) → B3 400 {"detail":{"reason":"cross_batch_sn_conflict","error":...}} (样例四 API 面暴露, 翻车修复)。
+- 验证：
+  - uv run pytest tests/ → 123 passed (118 + 5 新验收样例)
+  - --cov=app/workflow+plugins+skills → TOTAL 95.86% (门线 90% 达标; AGENT.md §3.3 目标 60/70 已超)
+  - ruff check . → All checks passed; black --check . → 53 files unchanged
+  - git diff bebec66 (phase0-frozen) -- app/domain/ app/infra/models.py migrations/ tests/fixtures/ → 空 (P0 冻结项零 diff)
+  - app.main:app import-safe (内存 checkpointer, 无 DB 依赖)
+- 提交：97a05c7 (待提交)
+- 翻车与返工：
+  1. 样例四仓库层测试直接传 ISO 字符串 captured_at 给 InspectionRepository.create_inspections → SQLite DateTime 拒绝, 修为 aware datetime (仓库层不接受字符串, 字符串→datetime 边界转换属 API 层 _parse_iso_utc, 正确)。
+  2. 样例四 API 测试初版断言"批次 A 也 non-releasable", 但 A 用自己的干净 SN 集可正常完成 (冲突只挡共享 SN), 修正断言为 B 停留 pending_intake + 400 含冲突 SN。
+- 人工复核点：
+  1. 路由拆分后 app/main.py 从 422 行缩到 ~150 行 (工厂 + AppDeps), 路由全部在 app/api/。BatchCreate 模型移到 app/api/batches.py, IntakeRequestIn/IntakeConfirmIn 移到 app/api/intake.py。
+  2. CrossBatchSnConflict 400 守卫: detail.reason 固定 "cross_batch_sn_conflict" + detail.error 为异常消息 (含冲突 SN), 符合 B3 结构化 detail。
+  3. dev-notes 收口节点本身在下一 commit。
