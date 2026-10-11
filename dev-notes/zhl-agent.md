@@ -214,3 +214,10 @@
 - 拒绝与纠偏：无，plan Task 4 四步按原样执行
 - 翻车与返工：test 断言初版 .hex[:36] 多余语义，简化为 _to_uuid 直接比较；ruff 清 5 处（unused import / 引号注解 / E501）
 - 自测：test_evidence_store_db.py 4/4；P0 test_evidence_store.py 4/4 无回归；全仓 pytest 88/88；ruff/black 全绿
+## 2026-10-11 17:20 · Phase A Task 5 完成 · 抽取 Skill
+
+- 关键原话：完成Phase-a的Task5，遵循superpowers流程与AGENT.md开发规范，遵循docs/superpowers的spec和plan文件
+- 关键产出：app/skills/extract.py（extract_inspection_data：拼 prompt 嵌 [SOURCE_SN:sn] 标记（Task 3 B1）→ llm.chat（事务外，AGENT.md §4.3）→ evidence.save('extraction_result') → 返回 fields/confidence/appearance_findings，无业务判断）+ tests/skills/test_extract.py（4用例：confidence==0.81 / 确定性重放 / 证据写入 content_hash 一致性 / min 聚合输入侧）。提交 146e89b
+- 拒绝与纠偏：无，plan Task 5 四步按原样执行
+- 翻车与返工：test 文件 black 重排一次（多行调用换行）
+- 自测：tests/skills/test_extract.py 4/4；全仓 pytest 无回归；ruff 全绿；覆盖率 app/skills/extract.py 100%、app/plugins 94%+、总 92.39% ≥ 90% 门禁
