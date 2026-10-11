@@ -199,3 +199,11 @@
   - freeze_samples 首版去重逻辑查 InspectionRepository.get_batch_sns（本批次已有 inspection 的 SN），导致第二次调用把刚插入的 Sample 又当成已存在、全部跳过、返回空列表 → 改为查 Sample 表自身已持久化行去重，测试断言也改为查 Sample 表总数（10 条，重放不重复）
   - 测试断言初版写成「两次调用的 created 列表一致」，但语义上第二次调用本就是 0 条新增（去重生效），改为查持久化总量验证确定性
 - **自测**：tests/infra/test_repositories.py 6/6 pass；全仓 pytest 无回归；ruff check 全绿（--fix 后）；black 全绿；P0 冻结项（app/domain、infra/models、migrations、fixtures）零 diff
+## 2026-10-11 16:58 · Phase A Task 3 完成 · MockLLMClient + LLMClient Protocol
+
+- **关键原话**：完成Phase-a的Task3，遵循superpowers流程，开发完成后等待人工核验；始终遵循AGENT.md开发规范；遵循docs/superpowers的spec和plan文件
+- **关键产出**：app/plugins/llm_client.py（LLMClient Protocol + MockLLMClient：eager加载 tests/fixtures/mock_llm_outputs.json；chat 按 B1 解析 [SOURCE_SN:<sn>] 标记命中 extraction 区块，无标记/无匹配抛 KeyError）+ tests/plugins/test_llm_client.py（6用例）。提交 e93754d
+- **拒绝与纠偏**：无，plan Task 3 四步按原样执行
+- **翻车与返工**：额外补2个自加用例（无标记也抛 KeyError；Protocol isinstance 检查）；ruff F541 修复4处无占位符f-string（测试prompt为纯字面量）
+- **纯度验证**：grep requests/httpx/os.environ/ZHL_LLM 命中仅限 docstring，无网络/env 调用（R4）
+- **自测**：test_llm_client.py 6/6 pass；全仓 pytest 84/84（P0 72 + Task2 6 + 本任务 6）无回归；ruff/black 全绿
