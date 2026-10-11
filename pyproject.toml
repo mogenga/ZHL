@@ -17,6 +17,7 @@ dependencies = [
     "httpx>=0.28",
     "psycopg[binary]>=3.0",       # psycopg3（区别 psycopg2）；spec 锁定
     "langgraph-checkpoint-postgres>=3.1",  # spec §3.2.1：PostgreSQL 后端 Checkpointer
+    "langgraph>=1.2.14",
 ]
 
 # PEP 735 dependency groups（uv 原生 dev group；uv sync / uv run 默认包含）
