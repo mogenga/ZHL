@@ -150,15 +150,24 @@ def build_router(get_deps: object) -> APIRouter:
             ).all()
             # Defensive guard (§2.3): the graph's intake node just flushed the
             # rows in this same session/transaction, so the select above is
-            # expected to see exactly the batch's rows. If it sees fewer, the
-            # confirmation write below would be a silent no-op that still
-            # resumes the graph — exactly the "DB state never written, graph
-            # keeps running" failure §2.3 is meant to prevent. Fail loudly
-            # instead of proceeding on an unconfirmed DB state.
+            # expected to see exactly the batch's rows. If it sees a different
+            # count, the confirmation write below would be a silent no-op that
+            # still resumes the graph — exactly the "DB state never written,
+            # graph keeps running" failure §2.3 is meant to prevent. This is a
+            # correctness invariant (it guards the judge's A4 check), so it
+            # must fail closed even under `python -O` — an explicit `raise`,
+            # not an `assert` (which the optimizer strips out), and a B3
+            # structured 500 consistent with the other B3 error responses here.
             expected = len(body.inspections)
-            assert (
-                len(confirmed_rows) == expected
-            ), f"auto-confirm: expected {expected} inspection rows, found {len(confirmed_rows)}"
+            if len(confirmed_rows) != expected:
+                raise HTTPException(
+                    status_code=500,
+                    detail={
+                        "reason": "auto_confirm_row_count_mismatch",
+                        "expected": expected,
+                        "found": len(confirmed_rows),
+                    },
+                )
             for row in confirmed_rows:
                 row.intake_status = "confirmed"
                 for key, value in (body.fields or {}).items():

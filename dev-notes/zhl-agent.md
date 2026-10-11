@@ -437,3 +437,16 @@
   - `uv run black --check .` → 54 files unchanged
 - **提交**：见下方 commit（本 dev-notes 节点 + 全部代码修复同一批，或拆分待用户定）
 - **人工复核点**：C1 签名变更对 P0 遗留测试 `tests/plugins/test_evidence_store.py` 的单参调用（`make_evidence_id(ref)`）保持兼容（走 `"default"` 分支），需确认该测试仍在 127 里全绿（已确认）；I1 的 `assert` 在 Python `-O` 下会被禁用，是否要换成显式 `if ... raise` 而非 `assert`（当前保持 `assert`，与 spec §2.3 的"防御性断言"语义一致，未另行升级，特此说明供后续判断）。
+
+## 2026-10-11 · Phase A · I1 防御守卫升级为显式 raise（代码 review 遗留判断点 1 闭环）
+
+- **关键原话**：用户复核 dev-notes 两点后指示「I1 用的是 `assert`（Python `-O` 下会被禁用）；当前判断 `assert` 与 spec §2.3 的『防御性断言』语义一致，没有擅自升级成 `raise`，保留给你判断」——我判为**升级成显式 `raise`**。
+- **判断理由（为什么 `assert` 不对）**：这条守卫保护的是**正确性不变量**（§2.3 节点不写库 + judge 的 A4 守卫：绝不能在未确认的 DB 状态上 resume），不是「正常代码不该发生、发生也能继续」的 sanity check。而 Python `-O`（生产常用优化 flag）会**把 `assert` 语句直接编译掉**——一旦守卫消失，它本要防住的那个「DB 未写入但图继续跑」的失败模式会静默复现。所以这条不变量必须 `fail closed` 且**不可被编译器移除**，`assert` 是错的工具。
+- **关键产出**（`app/api/intake.py` auto-confirm 分支）：
+  - `assert len(confirmed_rows) == expected` → 显式 `if len(confirmed_rows) != expected: raise HTTPException(500, detail={"reason": "auto_confirm_row_count_mismatch", "expected": ..., "found": ...})`。
+  - 状态码取 **500** 而非 400：行数不匹配是服务端内部不变量被破坏（图未写入预期的行），不是客户端输入问题，客户端无法修正它；B3 结构化 detail 形态与本路由既有的 `cross_batch_sn_conflict` / `unknown rule version` 等 B3 错误响应一致。
+  - 注释同步改为说明「这是正确性不变量，须 `fail closed`，用 `raise` 不用 `assert`（optimizer 会剥离）」。
+- **拒绝与纠偏**：无（上轮我未擅自升级是正确行为——该判断归属 reviewer 拍板，现在按拍板闭环）。
+- **翻车与返工**：无；改动面 9 行（同一守卫块），未引入新依赖/新 import（`HTTPException` 已在模块顶部）。
+- **验证（原始输出）**：`uv run pytest tests/` → 127 passed（auto-confirm 路径行数恒匹配，守卫不触发，全绿无回归）；`uv run ruff check .` → All checks passed；`uv run black --check .` → 54 files unchanged。
+- **人工复核点**：若你认为该失败不该是 500 而应让批次停留在「已入库未确认」态由客户端重试（而非服务端 500），可改为 `raise` 一个让 TestClient/生产能区分重试语义的异常；当前判断 500 fail-closed 是保守且正确的默认。
