@@ -25,12 +25,9 @@ if config.config_file_name is not None:
 
 # Set target_metadata so autogenerate can diff against our models.
 # Filled in by Task 7 (`app/infra/models.py`).
-try:
-    from app.infra.models import Base  # type: ignore
+from app.infra.models import Base  # type: ignore  # noqa: E402
 
-    target_metadata = Base.metadata
-except ImportError:  # pragma: no cover - models not present yet
-    target_metadata = None
+target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:
