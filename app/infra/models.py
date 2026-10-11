@@ -19,7 +19,7 @@ Design choices for cross-DB self-check (SQLite in-memory in tests):
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import (
     JSON,
@@ -53,7 +53,7 @@ def _ts(col_default_server=True) -> Mapped[datetime | None]:
     """A timestamptz column; Python default so SQLite inserts work."""
     kw = {"nullable": True}
     if col_default_server:
-        kw["default"] = lambda: datetime.utcnow()
+        kw["default"] = lambda ctx: datetime.now(UTC)
     return mapped_column(DateTime(timezone=True), **kw)  # type: ignore
 
 

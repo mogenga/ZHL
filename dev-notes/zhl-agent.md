@@ -281,3 +281,24 @@
   1. 路由拆分后 app/main.py 从 422 行缩到 ~150 行 (工厂 + AppDeps), 路由全部在 app/api/。BatchCreate 模型移到 app/api/batches.py, IntakeRequestIn/IntakeConfirmIn 移到 app/api/intake.py。
   2. CrossBatchSnConflict 400 守卫: detail.reason 固定 "cross_batch_sn_conflict" + detail.error 为异常消息 (含冲突 SN), 符合 B3 结构化 detail。
   3. dev-notes 收口节点本身在下一 commit。
+## 2026-10-11 16:05 · Phase A 收口 PR · datetime.utcnow() 弃用修复 (分支 fix/deprecation-datetime-utcnow)
+- 关键原话：「三点裁决：1.拆 router 2.图契约变化接受 3.datetime.utcnow() 不动冻结文件，走 PR 修」
+- 关键产出：
+  - app/infra/models.py:56 (P0 冻结文件, 走本 PR 解冻): `lambda: datetime.utcnow()` → `lambda ctx: datetime.now(UTC)` (ruff UP017 自动规范为 datetime.UTC 别名); 同步 import 行。
+  - tests/infra/test_models_utcnow.py (新, 2 例, RED 先行):
+    1. test_no_model_default_calls_utcnow — 源码层扫描, 防 utcnow 回归
+    2. test_ts_column_defaults_produce_aware_datetimes — _ts 默认值必须 tz-aware (UTC)
+- 验证：
+  - 修复前 516 条 DeprecationWarning/全量跑 → 修复后 0 条
+  - uv run pytest tests/ → 125 passed (123 + 2 新守卫测试)
+  - ruff check . / black --check . → 全绿
+  - 覆盖率 TOTAL 94.00% (门线 90%)
+  - 分支 diff vs feature/phase-a: 仅 app/infra/models.py 2 行 + 新测试文件 (最小化, 单行修复面)
+  - P0 冻结项 app/domain/ migrations/ tests/fixtures/ vs bebec66 零 diff (models.py 解冻仅本 PR, review 范围明确)
+- 翻车与返工：
+  1. 首个守卫测试用 DeliveryBatch 探针插库 → rule_version_id NOT NULL 失败; 改用 _ts 助手直接取默认可调用对象 (col.column.default.arg(None)), 避开 FK 约束
+  2. ruff UP017: timezone.utc → datetime.UTC 别名 (自动修)
+- 人工复核点：
+  1. 这是对 P0 冻结文件的修改 (按裁决 3 走 PR): diff 仅 2 行 + 2 个守卫测试, 无行为变化 (仍是 Python 侧默认值, SQLite/PG 插入行为不变, 只是 naive → aware UTC)
+  2. 合并后 516 条 DeprecationWarning 归零
+  3. 分支基于 feature/phase-a, 建议合并路径: 先并 feature/phase-a 到 main, 再并本 PR; 或本 PR 直接基于 main 重基
