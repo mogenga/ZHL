@@ -102,7 +102,18 @@ def create_app(
 
 
 def _default_postgres_session() -> Callable[[], Any]:
-    url = os.environ.get("ZHL_DATABASE_URL", "sqlite:///./zhl.db")
+    # Fail fast: no silent SQLite fallback (an empty ./zhl.db created by
+    # Base.metadata.create_all masks a missing/unread .env and makes every
+    # API call return 404 against an empty DB). The caller must set
+    # ZHL_DATABASE_URL (a Postgres URL from .env / the environment); the
+    # test path never reaches here — it injects a SQLite session via
+    # dependency_overrides.
+    url = os.environ.get("ZHL_DATABASE_URL")
+    if not url:
+        raise RuntimeError(
+            "ZHL_DATABASE_URL is not set; configure .env (loaded by app.main) "
+            "or the environment. Refusing to fall back to a silent SQLite DB."
+        )
     engine = create_engine(url, future=True)
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine, future=True)
