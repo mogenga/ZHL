@@ -94,3 +94,23 @@ Task 8: DONE — release endpoint (app/api/release.py) + assert_release required
   - code-reviewer: APPROVE, 0 blocker, 3 minor (m1: content_hash placeholder sha256:uuid; m2: single-AQL assumption iso_rows[0]; m3: lot_size=len(actual) ISO lookup) — task-8-code-review.md
   - spec-reviewer: APPROVE, 1 documented deviation (required_sns authoritative param added to frozen domain fn to close self-reference gap; Phase 0 backward compat kept) — task-8-spec-review.md
 - Awaiting human gate. Task 8 m2 handoff to Task 7 report-render: report context should feed real assert_release results (release API now produces them).
+
+
+Task 9: DONE — app assembly + D8 archived terminal guard (create_app, guards.py, app.main).
+- TDD: RED (ModuleNotFoundError app.api.main) -> GREEN (4 smoke tests).
+- Hiccups: (1) circular import main->release->main when the guard was imported
+  from main into the routers -> extracted the guard to app/api/guards.py, called
+  as a plain function with the endpoint's session; (2) B1/B2 fixture collision on
+  batch_no/evidence_id/iso/rule (shared across two _seed calls) -> distinct UUIDs
+  per batch + ISO/rule inserted once in the fixture; (3) FastAPI HTTPException
+  detail is nested under the "detail" key (tests asserted the top level) -> fixed.
+- D8 guard wired into all 4 write endpoints (incidents / reinspections / release /
+  reports) as the first 409 on archived (Review Focus #4).
+- app.domain untouched (frozen). 135 tests green, ruff+black clean.
+- Two-phase review (in-session fallback):
+  - code-reviewer: APPROVE, 0 blocker, 3 minor (m1: per-router archived check now
+    redundant after guard; m2: create_incident guard uses payload batch_id; m3:
+    _make_session_dependency unused) — task-9-code-review.md
+  - spec-reviewer: APPROVE, 1 documented deviation (guard extracted to guards.py +
+    plain-function call to avoid the circular import; same D8 semantics / 409 payload) — task-9-spec-review.md
+- Awaiting human gate.

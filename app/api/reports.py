@@ -21,6 +21,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from app.api.guards import require_not_archived
 from app.domain.state_machine import transition
 from app.infra.models import (
     DeliveryBatch,
@@ -100,7 +101,8 @@ def create_report(batch_id: uuid.UUID, payload: ReportCreate, session: SessionDe
     if batch is None:
         raise HTTPException(status_code=404, detail="batch_not_found")
 
-    # D8: archived batches cannot receive new reports.
+    # D8: archived batches cannot receive new reports (shared guard fires first).
+    require_not_archived(batch_id, session)
     if batch.status == "archived":
         raise HTTPException(
             status_code=409,

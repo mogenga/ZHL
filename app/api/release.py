@@ -43,6 +43,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from app.api.guards import require_not_archived
 from app.domain.release import assert_release
 from app.domain.types import (
     BatchView,
@@ -300,7 +301,8 @@ def release_batch(
     if batch is None:
         raise HTTPException(status_code=404, detail="batch_not_found")
 
-    # D8: archived is terminal.
+    # D8: archived is terminal (shared guard, same 409 as the per-router check).
+    require_not_archived(batch_id, session)
     if batch.status == "archived":
         raise HTTPException(status_code=409, detail={"error": "batch_archived"})
     # Must be in pending_release to release.

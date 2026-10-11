@@ -30,6 +30,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from app.api.guards import require_not_archived
 from app.domain.state_machine import transition
 from app.infra.models import (
     DeliveryBatch,
@@ -180,6 +181,8 @@ def create_incident(payload: IncidentCreate, session: SessionDep) -> IncidentOut
     batch = session.get(DeliveryBatch, payload.batch_id)
     if batch is None:
         raise HTTPException(status_code=404, detail="batch_not_found")
+    # D8: archived terminal guard (shared) — fires before the not-isolated check.
+    require_not_archived(payload.batch_id, session)
     if batch.status != "isolated":
         raise HTTPException(
             status_code=409,

@@ -26,6 +26,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from app.api.guards import require_not_archived
 from app.domain.state_machine import transition
 from app.infra.models import (
     DeliveryBatch,
@@ -198,6 +199,8 @@ def create_reinspection(
     # The reinspection references a module_inspection row (the SN being re-tested).
     sn = _resolve_sn(session, payload.inspection_id)
     batch = session.get(DeliveryBatch, incident.batch_id)
+    # D8: archived terminal guard (shared).
+    require_not_archived(incident.batch_id, session)
     rule_version_id = batch.rule_version_id
 
     re_ = Reinspection(
