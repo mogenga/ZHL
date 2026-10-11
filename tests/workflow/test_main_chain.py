@@ -317,9 +317,21 @@ def _deps(env: dict) -> dict:
 
 
 def _run_to_completion(graph, inputs: dict, thread_id: str) -> dict:
-    """Stream until the graph reaches END (or pauses); return the final values."""
-    for _chunk in graph.stream(inputs, config={"configurable": {"thread_id": thread_id}}):
+    """Stream to END, resuming the human_confirm interrupt with ``confirm``.
+
+    The graph interrupts on every run at ``human_confirm`` (spec 5.6: the
+    confirmation record is owned by the caller). At graph level the test
+    stands in for the API layer: when paused it resumes with a confirm
+    payload (mirroring the auto-confirm / confirm-endpoint paths) so the
+    chain can reach END.
+    """
+    cfg = {"configurable": {"thread_id": thread_id}}
+    for _chunk in graph.stream(inputs, config=cfg):
         pass
+    snap = graph.get_state(cfg)
+    if snap.next:
+        for _chunk in graph.stream(Command(resume={"action": "confirm"}), config=cfg):
+            pass
     return _final_state(graph, thread_id)
 
 
@@ -351,7 +363,12 @@ def test_full_pass_path() -> None:
 
 
 def test_confidence_boundary_auto_confirm() -> None:
-    """Review Focus #1: confidence == 0.8 exactly -> no interrupt, auto-confirm."""
+    """Review Focus #1: confidence == 0.8 exactly -> auto-confirm, no low-conf SNs.
+
+    At graph level the interrupt always fires (spec 5.6: the confirmation
+    record is owned by the caller); 0.8 must yield an *empty* low-conf list
+    so the API layer auto-resumes with ``confirm`` (boundary inclusive).
+    """
     from app.workflow.main_chain import build_main_chain_graph
 
     sns = [f"SN-B-{i:02d}" for i in range(_LOT)]
@@ -361,7 +378,7 @@ def test_confidence_boundary_auto_confirm() -> None:
 
     assert env["llm"].call_count == _LOT  # one extraction per SN
     assert state["intake_status"] == "confirmed"
-    assert state["low_conf_sns"] == []
+    assert state["low_conf_sns"] == []  # boundary: 0.8 is NOT low confidence
     assert state["batch_status"] == "pending_release"
 
 
@@ -461,7 +478,10 @@ def test_thread_isolation() -> None:
     graph_b = build_main_chain_graph(_deps(env_b), checkpointer=saver)
 
     graph_a.invoke(_initial_inputs(env_a), config={"configurable": {"thread_id": "thread-A"}})
-    state_a = graph_a.get_state({"configurable": {"thread_id": "thread-A"}}).values
+    cfg_a = {"configurable": {"thread_id": "thread-A"}}
+    assert graph_a.get_state(cfg_a).next, "A pauses at the interrupt too (spec 5.6)"
+    graph_a.invoke(Command(resume={"action": "confirm"}), config=cfg_a)
+    state_a = graph_a.get_state(cfg_a).values
 
     graph_b.invoke(_initial_inputs(env_b), config={"configurable": {"thread_id": "thread-B"}})
     snap_b = graph_b.get_state({"configurable": {"thread_id": "thread-B"}})

@@ -9,13 +9,15 @@ Nodes (deterministic wrappers — no business judgment in the node body, R3):
 - ``extract``       one ``extract_inspection_data`` (Task 5 Skill) call per
                     SN — batch-level confidence is the *graph node's* min
                     aggregation (Q3, spec §5.2); the Skill stays per-SN.
-- ``human_confirm`` the single interrupt point (R3): auto-confirms when
-                    ``confidence >= 0.8`` (Review Focus #1 boundary),
-                    otherwise ``interrupt()`` and consume the resume payload
-                    ``{action: confirm|reject}`` (Q1/Q3; the DB-side
-                    ``intake_status`` + ``human_confirmation`` evidence are
-                    written by the API confirm endpoint *before* resume,
-                    spec §5.6 — this node does NOT re-write them).
+- ``human_confirm`` the single interrupt point (R3): ``interrupt()`` fires on
+                    every run; the API layer owns the confirmation record —
+                    auto-confirm (``confidence >= 0.8``, Review Focus #1
+                    boundary) is decided by the intake route, which writes the
+                    DB ``intake_status`` + ``human_confirmation`` evidence and
+                    resumes immediately (spec §5.6, Q3); low confidence
+                    defers to the confirm endpoint. The node only consumes the
+                    resume payload ``{action: confirm|reject}`` and routes —
+                    it never writes DB state (spec §2.3).
 - ``judge``         ``judge_batch`` Skill (Task 6), single transaction.
 - ``sample``        ``run_sampling`` Plugin (Task 6): hit → freeze +
                     conclusion; missing combo → ``rule_missing`` (D9, no
@@ -187,22 +189,24 @@ def build_main_chain_graph(
     def human_confirm_node(state: BatchWorkflowState) -> dict:
         """The single interrupt point (R3) / Q1 / Q3.
 
-        - ``confidence >= 0.8`` → auto-confirm the whole batch (no interrupt).
-        - ``confidence < 0.8``  → ``interrupt()``; the resume payload is
-          ``{"action": "confirm"|"reject", "fields"?: dict}``. The DB-side
-          ``intake_status`` write + ``human_confirmation`` evidence are the
-          API confirm endpoint's job (spec §5.6, Q1) — this node only
-          consumes the payload and routes.
+        ``interrupt()`` fires on **every** run (low- or high-confidence):
+        the confirmation record (DB ``intake_status`` + ``human_confirmation``
+        evidence) is owned by the API layer — on auto-confirm the intake
+        route writes it and resumes immediately (spec §5.6, Q3); on low
+        confidence the caller confirms/rejects later via the confirm
+        endpoint. This ordering guarantees the judge node's A4 guard
+        (every SN confirmed) is satisfied on every path, because the judge
+        only ever runs *after* a resume whose payload the API endpoint has
+        already persisted. The resume payload is
+        ``{"action": "confirm"|"reject", "fields"?: dict}``.
         """
         confidence = float(state.get("confidence", 0.0))
-        if confidence >= CONFIDENCE_THRESHOLD:
-            # Boundary Review Focus #1: exactly 0.8 auto-confirms.
-            return {"intake_status": "confirmed"}
         payload = interrupt(
             {
                 "action_required": "confirm_or_reject",
                 "low_conf_sns": state.get("low_conf_sns") or [],
                 "confidence": confidence,
+                "auto_confirm": confidence >= CONFIDENCE_THRESHOLD,
             }
         )
         action = (payload or {}).get("action", "reject")
@@ -212,7 +216,14 @@ def build_main_chain_graph(
         return "judge" if state.get("intake_status") == "confirmed" else "end"
 
     def judge_node(state: BatchWorkflowState) -> dict:
-        """Run the judge Skill (Task 6) for the whole batch, one tx."""
+        """Run the judge Skill (Task 6) for the whole batch, one tx.
+
+        The A4 guard (every SN confirmed) is enforced by the API layer: the
+        confirm endpoint writes the DB-side ``intake_status`` (spec §5.6, Q3)
+        *before* resuming, and the intake route records the auto-confirm
+        after the graph run. The Skill keeps its guard as a second line —
+        an unexpected unconfirmed state is a loud 400, never a silent pass.
+        """
         result = judge_batch(session, evidence, uuid.UUID(state["batch_id"]), rule_version_id)
         session.flush()
         return {
@@ -282,7 +293,7 @@ def build_main_chain_graph(
                 "result": decision.get("result"),
                 "sample_result": sample.get("result"),
             },
-            validation_result="full" if tr.accepted else "partial",
+            validation_result="pass" if tr.accepted else "partial",
             human_action={"action": state.get("intake_status")},
             started_at=datetime.now(UTC),
             finished_at=datetime.now(UTC),
