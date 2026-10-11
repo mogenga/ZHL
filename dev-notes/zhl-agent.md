@@ -237,3 +237,27 @@
 - 提交：见 git log（workflow 三文件 + 两个测试文件）
 - 翻车与返工：① 首版 sample node 用 deps.get("lot_size", len(sns))，但 _HIT_COMBOS 仅 lot=10 命中 [9,15] 区间——3/5 SN 的测试 lot 落在 [2,8] 行被 _RULE_MISSING_TABLE 剥离后 iso_lookup 返回 None → rule_missing；修：graph 从 batch.planned_quantity 读 lot size（_lot_size 辅助），测试统一 _LOT=10。② 首版 _aql 读 deps.get("aql") 默认 1.0，但 rule.sample_plan 是 P0 冻结数据（AGENT.md §3.4），graph 应从 rule 读；修：_aql 辅助从 QualityRuleVersion.sample_plan 读，deps 仅作覆盖。③ batch_transition 从 state.get("batch_status") 读当前状态，首版 intake_node 未写 batch_status → 回退到 "pending_intake"（无 pending_intake→pending_release 转移）；修：intake_node 返回 batch_status="pending_judge"（intake 确认后批次进入待判定态）。④ 幂等：sample node 对已有 sample rows 的批次不重复写，靠 freeze_sample 确定性 + run_sampling 幂等分支。
 - 人工复核点：① 六节点职责边界（节点是确定性包装器，业务判断在 Skill/Plugin/domain）② interrupt 只发生在 human_confirm（R3 单点）③ 回放语义（resume 后上游 intake/extract 不重放，LLM 调用次数不变）④ rule_missing → isolated（D9 无静默默认放行）⑤ PG checkpointer 在生产才启用，单测全用 InMemorySaver
+## 2026-10-11 14:50 · Phase A Task 8 完成 · API 层 (intake / judge / confirm, 图契约修正)
+- 关键原话：「完成Phase-A的Task8，调用superpowers skill，遵循流程，开发完成后等待人工核验」
+- 关键产出：
+  - app/main.py (403 行): create_app 工厂 (session_factory/llm/evidence/iso_table/inspect_repo/checkpointer_mode 可注入; 生产默认 MockLLMClient + 完整 ISO 表 + InMemorySaver; 模块级 app = create_app() 供 uvicorn)。AppDeps 每请求一个 session (AGENT.md §4.3 一次调用=一个事务)。
+    - POST /api/batches (R5: 建 draft 批次, 域状态机 draft→pending_intake; 未知 rule_version → 400)
+    - GET /api/batches/{id} (A8/B2: 批次 + 每 SN intake/decision 状态 + 抽样结论 + AgentTaskTrace 时间线)
+    - POST /api/intake (Q1/Q2: task_id=str(batch_id); JSON 行 captured_at 字符串→aware datetime 边界转换 B3; 图 stream 到 interrupt; conf≥0.8 → 路由写整批 intake_status=confirmed + human_confirmation 证据 (meta auto=True) 后 Command(resume=confirm) 立即续跑 → status=confirmed; conf<0.8 → status=pending + low_conf_sns)
+    - POST /api/intake/{task_id}/confirm (Q3: 先落库整批 confirmed/rejected + 可选字段覆盖 (_CONFIRMABLE 8 字段, 与仓库层同源) + human_confirmation 证据, 再 Command(resume); 未知 task → 404)
+    - POST /api/batches/{id}/judge (Q1: 独立 skill 重判, 不走图; UnconfirmedSnsError → 400 {"detail":{"unconfirmed_sns":[...]}} A4)
+  - 图契约变更 (app/workflow/main_chain.py): human_confirm 节点改为**始终 interrupt()** —— 确认记录归 API 层所有 (spec §5.6/§2.3), 保证 judge 节点 A4 守卫在所有路径上面对已确认的 DB 状态; 高置信 auto-confirm 由 intake 路由决策并即时 resume。interrupt payload 增加 auto_confirm 标志。
+  - 修复 Task 7 遗留: batch_transition_node validation_result="full" 超出 AgentTaskTrace 枚举 (pass/fail/partial) → 改 "pass"/"partial" (Task 8 复现路径上暴露)。
+  - tests/api/test_batches.py (6 例) + tests/api/test_intake.py (2 例 404): _make_client 注入 SQLite StaticPool + _ConfidenceLLM (固定置信度 + [SOURCE_SN] 回显, R4/B1) + StubEvidence (记录证据行; auto-confirm 时经 _on_confirm 会话把该批 inspection 置 confirmed, 模拟生产证据库 DB 半区); 共享 _SHARED_ENGINE/_SHARED_RULE_UUID (uuid5) 单例避免重复 seed。
+  - tests/workflow/test_main_chain.py 同步新契约: _run_to_completion 在 interrupt 后以 Command(resume=confirm) 代 API 层续跑; 边界 0.8 测试改为断言 low_conf_sns 为空 (不再断言"无 interrupt"); thread_isolation 的 thread-A 同样先 resume。
+- 验证：uv run pytest tests/ → 118 passed (原 110 + 8); --cov=app → TOTAL 93.65% (main.py 92%, 门线 90% 达标); ruff check → All checks passed; black --check → 50 files unchanged。
+- 提交：1e81460
+- 翻车与返工：
+  1. 初版让图内 auto-confirm (conf≥0.8 不 interrupt 直跑 judge), 但 DB 端 intake_status 在 stream 之后才写 → judge A4 守卫抛 UnconfirmedSnsError (400)。裁决: 图一律 interrupt, 确认记录归路由 (§5.6 "write before resume" + §2.3 节点不写库), Task 7 的"0.8 不 interrupt"断言属旧契约, 随契约修正。
+  2. AgentTaskTrace.validation_result 枚举无 "full" (Task 7 写入 "full", Task 8 首次走 auto-confirm→pending_release 验收路径时 LookupError 暴露) → "pass"。
+  3. 测试读 Evidence 表断言改用注入的 stub 行 (路由与断言同实例), 避免跨会话 ORM 身份映射坑。
+- 人工复核点：
+  1. **文件布局偏差**: plan 写 app/api/batches.py + app/api/intake.py, 实现为单文件 app/main.py (create_app 内定义路由; app/api/ 仅留空 __init__.py)。请裁决: 保持单文件, 或按 plan 拆 router。
+  2. **图契约变化**: human_confirm 始终 interrupt + 路由 auto-resume。语义不变 (0.8 边界仍 auto-confirm, 体验相同), 但 Task 7 测试已改写 —— 请确认接受。
+  3. **datetime.utcnow() TODO**: 516 条 DeprecationWarning 全部来自 P0 冻结文件 app/infra/models.py:56 (Phase 0 遗留, 非 Task 8 引入)。Phase A 收口 (Task 10) 开 PR 一行改 datetime.now(timezone.utc), 走 review 合并; Task 8 不动冻结文件。
+  4. auto-confirm 路径路由写 confirmed 后 resume —— 与 §5.6 "confirm 端点先写后 resume" 对称; 字段覆盖复用仓库层 _CONFIRMABLE 白名单同源语义。
