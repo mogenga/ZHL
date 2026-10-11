@@ -1,4 +1,4 @@
-﻿"""Release assertions (P0 spec §3.5, 总 spec §2.4).
+"""Release assertions (P0 spec §3.5, 总 spec §2.4).
 
 ``assert_release`` runs six named checks in a fixed order and returns an
 ``AssertionResult`` carrying every individual check — never a bare boolean.

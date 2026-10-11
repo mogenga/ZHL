@@ -23,6 +23,7 @@ from app.domain.types import (
     ParamStandard,
     RuleSnapshotIn,
 )
+from tests.fixtures.enums import validate_batch_status, validate_incident_status
 
 _FIXTURES_DIR = Path(__file__).resolve().parent
 
@@ -93,13 +94,25 @@ def build_inspection(raw: dict) -> ModuleInspectionIn:
 
 
 def load_acceptance(name: str) -> dict:
-    """Load a named acceptance fixture into a domain-consumable namespace."""
+    """Load a named acceptance fixture into a domain-consumable namespace.
+
+    Status fields are validated against the enums defined in
+    ``migrations/001_init.sql`` (parsed by ``tests.fixtures.enums``).
+    An illegal value raises ``ValueError`` instead of passing through.
+    """
     raw = _load_json(name)
+    batch = dict(raw.get("batch", {}))
+    if batch.get("status"):
+        validate_batch_status(batch["status"])
+    incidents = list(raw.get("incidents", []))
+    for inc in incidents:
+        if inc.get("status"):
+            validate_incident_status(inc["status"])
     return {
-        "batch": dict(raw.get("batch", {})),
+        "batch": batch,
         "inspections": [build_inspection(row) for row in raw.get("inspections", [])],
         "rules": build_rule_snapshot(raw["rules"]),
-        "incidents": list(raw.get("incidents", [])),
+        "incidents": incidents,
         "reinspections": list(raw.get("reinspections", [])),
         "raw": raw,
     }

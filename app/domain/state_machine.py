@@ -1,4 +1,4 @@
-﻿"""State machines for batch (10 states) and incident (5 states).
+"""State machines for batch (10 states) and incident (5 states).
 
 Pure data-driven transition tables plus a deterministic ``transition``
 function. Preconditions are fixed in domain (AGENT.md §3.4 / 总 spec §2.5/§2.6):

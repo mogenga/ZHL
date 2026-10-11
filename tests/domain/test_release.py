@@ -1,4 +1,4 @@
-﻿"""Release-assertion tests (Task 6, P0 spec §3.5, 总 spec §2.4).
+"""Release-assertion tests (Task 6, P0 spec §3.5, 总 spec §2.4).
 
 Pins Review Focus #4: assert_release returns six named checks (never a bare
 bool); an open critical incident or an isolated SN blocks release.

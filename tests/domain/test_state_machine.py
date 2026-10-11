@@ -1,4 +1,4 @@
-﻿"""State-machine tests (Task 6, P0 spec §3.4, 总 spec §2.5/§2.6).
+"""State-machine tests (Task 6, P0 spec §3.4, 总 spec §2.5/§2.6).
 
 Pins Review Focus #2: legal transitions are accepted, illegal jumps
 (e.g. pending_judge -> released) are rejected with the missing-precondition
