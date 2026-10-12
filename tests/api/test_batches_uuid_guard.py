@@ -43,7 +43,7 @@ def test_judge_malformed_uuid_returns_404() -> None:
     assert "not-a-uuid" in r.json()["detail"].get("batch_id", "")
 
 
-def test_create_batch_malformed_rule_version_id_returns_400() -> None:
+def test_create_batch_malformed_rule_version_id_returns_404() -> None:
     client, _ = _env_client()
     r = client.post(
         "/api/batches",
@@ -55,7 +55,7 @@ def test_create_batch_malformed_rule_version_id_returns_400() -> None:
             "planned_quantity": 1,
         },
     )
-    assert r.status_code == 400, r.text
+    assert r.status_code == 404, r.text
 
 
 def test_judge_unknown_uuid_returns_404() -> None:

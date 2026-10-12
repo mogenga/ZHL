@@ -23,13 +23,13 @@ from app.skills.judge import UnconfirmedSnsError, judge_batch
 
 
 def _parse_uuid(value: str, label: str) -> uuid.UUID:
-    """B3: malformed UUID path/body param -> 404/400 detail, never a raw
-    ``ValueError`` -> 500. Mirrors the intake route's ``_get_batch_by_id``
-    guard (M3, intake.py)."""
+    """B3: malformed UUID path/body param -> 404 detail, never a raw
+    ``ValueError`` -> 500. Uniform with the intake route's ``_get_batch_by_id``
+    guard (M3, intake.py) and ``_load_batch`` below: 404 across the board."""
     try:
         return uuid.UUID(value)
     except ValueError:
-        raise HTTPException(status_code=400, detail={label: value}) from None
+        raise HTTPException(status_code=404, detail={label: value}) from None
 
 
 def _load_batch(s: Session, batch_id: str) -> DeliveryBatch:

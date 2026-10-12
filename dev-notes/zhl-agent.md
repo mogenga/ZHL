@@ -485,3 +485,9 @@
 - 人工复核点：
   1. batches.py 的 _parse_uuid 返回 400 (body 参数, 客户端可修正) vs _load_batch 返回 404 (path 资源, 语义=不存在) — 与 intake.py 全 404 的差异: 本处 400 仅针对 body 里的 rule_version_id 畸形, path 类仍 404; 若希望两处完全一致 (body 也 404), 按 AGENT.md B3 拍板
   2. 合 main 时按上述 D20 说明 review models.py 2 行
+## 2026-10-12 10:20 · 人工拍板 · UUID 守卫统一 404 (两路由文件完全一致)
+- 关键原话：「两处完全一致」
+- 变更：app/api/batches.py _parse_uuid 由 400 改 404，与 _load_batch / intake._get_batch_by_id
+  统一为「畸形或未知 UUID → 404 detail」; 对应测试 test_create_batch_malformed_rule_version_id
+  改断言 404。B3 语义：畸形参数与未知资源同走 404（detail 带 label 定位）。
+- 验证：tests/api/test_batches_uuid_guard.py 4/4; 全量 132 passed; ruff/black 全绿
