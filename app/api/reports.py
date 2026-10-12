@@ -138,6 +138,14 @@ def create_report(batch_id: uuid.UUID, payload: ReportCreate, session: SessionDe
     )
 
     # D6a: auto-archive in the SAME transaction as the report write.
+    #
+    # D6a invariant: the ("released","archived") / ("rejected","archived")
+    # state-machine edges MUST keep an EMPTY precondition. If a precondition
+    # is ever added to these edges in app/domain/state_machine.py, the
+    # transition(..., "archived", {}, ...) call below will return
+    # accepted=False, the batch will silently stay non-archived, and the
+    # report will still commit with no error raised. Keep this comment in
+    # sync with any future Phase 0 state_machine.py change.
     archived = False
     if batch.status in ("released", "rejected"):
         res = transition(batch.status, "archived", {}, kind="batch")
