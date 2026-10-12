@@ -101,16 +101,9 @@ def create_report(batch_id: uuid.UUID, payload: ReportCreate, session: SessionDe
     if batch is None:
         raise HTTPException(status_code=404, detail="batch_not_found")
 
-    # D8: archived batches cannot receive new reports (shared guard fires first).
+    # D8: archived batches cannot receive new reports — the shared guard
+    # (guards.require_not_archived) fires first with the stable ARCHIVED_ERROR 409.
     require_not_archived(batch_id, session)
-    if batch.status == "archived":
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": "batch_archived",
-                "hint": "archived batches are terminal; no new reports",
-            },
-        )
 
     # D7: rejected batches only allow the incident (disposal) report type.
     if batch.status == "rejected" and payload.report_type != "incident":

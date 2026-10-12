@@ -301,10 +301,9 @@ def release_batch(
     if batch is None:
         raise HTTPException(status_code=404, detail="batch_not_found")
 
-    # D8: archived is terminal (shared guard, same 409 as the per-router check).
+    # D8: archived is terminal — the shared guard (guards.require_not_archived)
+    # loads the batch and 409s with the stable ARCHIVED_ERROR payload.
     require_not_archived(batch_id, session)
-    if batch.status == "archived":
-        raise HTTPException(status_code=409, detail={"error": "batch_archived"})
     # Must be in pending_release to release.
     if batch.status != "pending_release":
         raise HTTPException(
