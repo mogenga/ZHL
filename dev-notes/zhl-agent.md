@@ -491,3 +491,46 @@
   统一为「畸形或未知 UUID → 404 detail」; 对应测试 test_create_batch_malformed_rule_version_id
   改断言 404。B3 语义：畸形参数与未知资源同走 404（detail 带 label 定位）。
 - 验证：tests/api/test_batches_uuid_guard.py 4/4; 全量 132 passed; ruff/black 全绿
+---
+
+## 2026-10-12 12:00 · zhl-agent · 修复 alembic 001 marker 缺失 + 002 CHECK 分叉 + daemon.json 镜像清理
+
+- **关键原话**：用户列出两处问题：
+  1. "alembic 链断裂：002_reinspection_scope.py 的 down_revision='001_init'，但仓库里没有 001 的 revision 文件 → 任何 alembic 命令都 KeyError"
+  2. "daemon.json 镜像源列表大量失效（还留着 https://your_preferred_mirror 占位符），建议清理"
+- **关键产出**：
+  1. 新增 `alembic/versions/001_init.py`（marker revision，`down_revision=None`）：
+     upgrade no-op + 6 表断言（缺表提示先跑 001_init.sql），downgrade 直接 raise
+     （001 非 alembic 生成，反向 DDL 不可知，只能重建库）
+  2. `alembic/versions/002_reinspection_scope.py` 修复 CHECK 分叉：
+     原 `op.create_check_constraint('ck_...')` 与 psql 直跑 SQL 的自动命名
+     (`reinspections_scope_type_check`) 不一致，导致 psql 升级过的库
+     `alembic downgrade` 报 UndefinedObject（dev 库实测复现）。改为
+     `op.execute` 内联 ALTER TABLE ... CHECK（与 002 SQL 逐字一致）；
+     downgrade 用 `sqlalchemy.inspect(bind)` 按实际约束名 drop，
+     兼容新旧两个名字。`get_current_dialect` (SA 1.4 API) → `inspect`
+  3. `C:\Users\zhl\.docker\daemon.json`：连通性扫描（HTTPS /v2/ 逐个探测）
+     后 `registry-mirrors` 从 18 项（含占位符 your_preferred_mirror、
+     baidubce/daocloud 重复）清理为 3 项实测可达
+     （docker.1panelproxy.com / dockerhub.icu / dockerproxy.com），
+     其余字段保留；备份 `daemon.json.bak-20261012`
+  4. `dev-notes/alembic-migration-playbook.md`：三种场景（新库 / 已有 psql 库 /
+     回退）操作步骤 + 新 revision 规范 + 常见坑速查
+- **验证**：
+  - `alembic history` = `<base> -> 001_init -> 002_reinspection_scope (head)`，无 KeyError
+  - `alembic downgrade 001_init` + `upgrade head` 往返成功（dev 库 PG 18.6）
+  - `pg_constraint` 核对：CHECK 名 `reinspections_scope_type_check`（contype c），
+    与 psql 直跑 002 SQL 形态一致
+  - `pytest tests -q` 198 passed；ruff 全绿
+- **翻车与返工**：
+  - 首版 downgrade 用 `bind.get_current_dialect().inspect(bind)`——SA 2.x 的
+    Connection 无此方法；第二版改 `bind.dialect.inspect` 也不对；最终
+    `sqlalchemy.inspect(bind)` 才通。教训：alembic migration 里拿 inspector
+    一律用 `sqlalchemy.inspect(op.get_bind())`
+  - 验证用的一次性探查脚本 `scripts/_tmp_inspect.py` 已删
+- **人工复核点**：
+  1. Docker Desktop 需重启加载新 daemon.json（GUI Settings → Docker Engine →
+     Save 或重启），然后 `docker info | findstr /i mirror` 确认只剩 3 项
+  2. 3 个可达镜像 2 小时内可能再次失效，`docker pull` 报错时删对应 URL
+  3. 手册"场景 C"提醒：回退 002 三列前，应用层 Phase B API 的
+     "创建复检必须显式传 scope_sns" 校验会随列失效，需同步切回 pre-PB 行为
