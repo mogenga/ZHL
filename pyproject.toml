@@ -19,6 +19,7 @@ dependencies = [
     "langgraph-checkpoint-postgres>=3.1",  # spec §3.2.1：PostgreSQL 后端 Checkpointer
     "langgraph>=1.2.14",
     "python-dotenv>=1.2.4",
+    "uvicorn>=0.54.0",
 ]
 
 # PEP 735 dependency groups（uv 原生 dev group；uv sync / uv run 默认包含）

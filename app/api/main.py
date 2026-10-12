@@ -20,7 +20,6 @@ from collections.abc import Callable
 from typing import Any
 
 from fastapi import FastAPI
-from fastapi.staticfiles import StaticFiles
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -82,11 +81,6 @@ def create_app(
     app.include_router(release.router)
     app.include_router(reports.router)
 
-    if mount_static:
-        # app/api/main.py -> dirname(dirname(__file__)) = app ; pages live in app/static.
-        static_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
-        if os.path.isdir(static_dir):
-            app.mount("/static", StaticFiles(directory=static_dir, html=True), name="static")
 
     return app
 

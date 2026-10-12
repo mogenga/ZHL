@@ -285,12 +285,24 @@ def test_trace_endpoint_returns_batch_trace_rows(api_client: Any) -> None:
     engine.dispose()
 
 
-def test_static_pages_mounted_and_served(api_client: Any) -> None:
-    """The 4 Task-10 static pages are served under /static/.
+def test_static_mount_removed(api_client: Any) -> None:
+    """The old Phase B static pages (Task 10) are no longer served.
 
-    Pin the mount + each page's presence so a missing file is a test failure,
-    not a silent 404 in the browser."""
+    ``remove_static.py`` removed the 4 demo HTML pages (incident / assertion /
+    report / trace) and the ``StaticFiles`` mount from ``create_app`` — the UI
+    is being rebuilt separately. Pin the new shape: the /static/ prefix is no
+    longer mounted, so each former page path 404s (not 200, not 500, not a
+    directory listing)."""
     for page in ("incident.html", "assertion.html", "report.html", "trace.html"):
         r = api_client.get(f"/static/{page}")
-        assert r.status_code == 200, f"{page} not served: {r.status_code} {r.text[:120]}"
-        assert "<html" in r.text.lower()
+        assert r.status_code == 404, f"{page} unexpectedly served: {r.status_code}"
+
+
+def test_static_prefix_not_mounted(api_client: Any) -> None:
+    """The bare /static/ prefix itself must 404 (no StaticFiles route left).
+
+    This is the stricter invariant the UI rebuild should rely on: a new set of
+    pages must re-introduce its own mount, and any regression that re-adds the
+    old mount is caught here."""
+    r = api_client.get("/static/")
+    assert r.status_code == 404, f"/static/ prefix still mounted: {r.status_code} {r.text[:120]}"

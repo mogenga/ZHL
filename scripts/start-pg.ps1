@@ -1,4 +1,4 @@
-# ZHL · 本地 PostgreSQL 15 容器初始化（无 docker compose 插件时）
+﻿# ZHL · 本地 PostgreSQL 15 容器初始化（无 docker compose 插件时）
 #
 # 用法：  .\scripts\start-pg.ps1
 # 作用：  拉取 postgres:15 → 启动 zhl-pg 容器（localhost:15432）→ 执行 001_init.sql + verify_001.sql
@@ -10,19 +10,28 @@ $ErrorActionPreference = "Stop"
 Set-Location (Split-Path $PSScriptRoot -Parent)   # 项目根目录
 
 Write-Host "==> 检查 Docker 引擎 ..." -ForegroundColor Cyan
-docker info *> $null
+$eap = $ErrorActionPreference; $ErrorActionPreference = "Continue"; docker info *> $null; $ErrorActionPreference = $eap
 if ($LASTEXITCODE -ne 0) {
     Write-Host "!! Docker 引擎不可达（Docker Desktop 未启动？）。请启动 Docker Desktop 后重试。" -ForegroundColor Red
     exit 1
 }
 
-# 拉取镜像
-Write-Host "==> 拉取 postgres:15 ..." -ForegroundColor Cyan
-docker pull postgres:15 | Select-Object -Last 1
-if ($LASTEXITCODE -ne 0) { Write-Host "!! 拉取镜像失败" -ForegroundColor Red; exit 1 }
+# 拉取镜像（本地已有则跳过：国内镜像源不稳，pull 失败前会把本地 tag 的 manifest 污染成 HTML 垃圾描述符）
+$eap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+docker image inspect postgres:15 *> $null
+$hasLocalImage = ($LASTEXITCODE -eq 0)
+if (-not $hasLocalImage) {
+    Write-Host "==> 拉取 postgres:15 ..." -ForegroundColor Cyan
+    docker pull postgres:15 | Select-Object -Last 1
+    docker image inspect postgres:15 *> $null
+    if ($LASTEXITCODE -ne 0) { Write-Host "!! 拉取镜像失败且本地无 postgres:15 镜像" -ForegroundColor Red; exit 1 }
+} else {
+    Write-Host "==> 本地已有 postgres:15 镜像，跳过在线拉取。" -ForegroundColor Cyan
+}
+$ErrorActionPreference = $eap
 
-# 启动容器（幂等：先清理同名旧容器）
-docker rm -f zhl-pg 2>$null
+# 启动容器（幂等：先清理同名旧容器；PS5.1 下对不存在的容器 2>$null 会因 EAP=Stop 抛错，故先查再删）
+if (docker ps -a --format '{{.Names}}' | Select-String -Quiet -Pattern '^zhl-pg$') { docker rm -f zhl-pg | Out-Null }
 Write-Host "==> 启动 zhl-pg 容器 (postgres:15, localhost:15432) ..." -ForegroundColor Cyan
 docker run -d --name zhl-pg `
     -e POSTGRES_PASSWORD=postgres `
