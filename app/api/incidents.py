@@ -296,11 +296,6 @@ def incident_capa(
                 detail={"error": "capa_verified_requires_pass_reinspection"},
             )
 
-    incident.confirmed_root_cause = payload.confirmed_root_cause
-    incident.corrective_action = payload.corrective_action
-    incident.capa_verified = payload.verified
-    incident.status = "pending_recheck"
-
     batch = session.get(DeliveryBatch, incident.batch_id)
     batch_res = transition(
         batch.status, "pending_recheck", {"measures_confirmed": True}, kind="batch"
@@ -311,6 +306,15 @@ def incident_capa(
             status_code=409,
             detail={"error": "batch_transition_denied", "reason": batch_res.reason},
         )
+
+    # Validate-then-write (aligned with assign_incident): only mutate the incident
+    # rows after the L3 gate and the batch transition have both passed, so a
+    # failed batch transition rolls back cleanly without leaving the incident's
+    # in-memory fields set.
+    incident.confirmed_root_cause = payload.confirmed_root_cause
+    incident.corrective_action = payload.corrective_action
+    incident.capa_verified = payload.verified
+    incident.status = "pending_recheck"
     batch.status = "pending_recheck"
 
     _record_trace(
