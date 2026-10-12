@@ -61,6 +61,13 @@ def _build_context(
     re_ = (
         session.query(Reinspection)
         .filter(
+            # When the batch has incidents the filter uses their ids; the
+            # `or [uuid.UUID(int=0)]` guards the (unreachable here, since the
+            # `if incidents else []` guard below skips this whole branch when
+            # incidents is empty) case where the list would otherwise be an
+            # empty .in_() list — invalid SQL. A zero-UUID matches no real row,
+            # so the query returns no reinspections; an inert, loud-safe
+            # placeholder, not a real id.
             Reinspection.incident_id.in_([i.incident_id for i in incidents] or [uuid.UUID(int=0)])
         )
         .all()

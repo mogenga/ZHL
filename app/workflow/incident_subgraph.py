@@ -98,7 +98,14 @@ def _run_reinspection(
 
 
 def _route_reinspection_result(state: IncidentSubgraphState) -> str:
-    """Node 5 (conditional router): pass -> END, fail -> rejected_route."""
+    """Node 5 (conditional router): pass -> END, fail -> rejected_route.
+
+    A ``None`` / absent ``reinspection_result`` routes to END (pass), NOT
+    ``rejected_route``. This subgraph is a topology scaffold: the API layer
+    (Task 7 ``create_reinspection``) is the authority that maps "no
+    reinspection" to the item-7 release gap. A standalone subgraph replay
+    with no result is therefore "no fail", by design.
+    """
     if state.get("reinspection_result") == "fail":
         return "rejected_route"
     return END

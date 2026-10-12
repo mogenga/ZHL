@@ -41,16 +41,6 @@ def get_session() -> Any:
     raise RuntimeError("get_session not wired — create_app() overrides this")
 
 
-def _make_session_dependency(session_factory: Callable[[], Any]) -> Callable[[], Any]:
-    """(Retained for API completeness; create_app now inlines a plain closure.)"""
-
-    def _session() -> Any:
-        session = session_factory()
-        return session
-
-    return _session
-
-
 def create_app(
     session_factory: Callable[[], Any] | None = None,
     mount_static: bool = True,
