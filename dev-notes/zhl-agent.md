@@ -462,3 +462,26 @@
 - **拒绝与纠偏**：无（我上轮已按保守默认判断 500 正确，本次复核后确认维持）。
 - **翻车与返工**：无。我上轮自留的开放判断点描述里用了「已入库未确认态」这一措辞，本次复核发现该措辞本身不准确（实际是整请求原子未落地），特此在此节点更正，避免未来读者被上轮措辞误导。
 - **人工复核点**：本节点即终态裁决，无待办。如后续 Phase B 引入并发 intake / 客户端 LLM 重试协议，再重开此判断。
+## 2026-10-12 09:05 · Phase A 收尾修复节点 · B4 守卫测试入分支 + batches 路由 UUID 守卫对齐 B3 (代码审查 Important #1)
+- 关键原话：「提交工作区未跟踪的 test_checkpointer.py（B4 DSN 守卫测试）；修 Important #1（batches.py UUID 守卫对齐 B3），补测试，全量回归；合入 main 时按 dev-notes D20 偏离说明一并 review models.py 2 行」
+- 关键产出：
+  1. 44cf781 test(checkpointer): 工作区未跟踪的 test_checkpointer.py B4/§4.0 pg DSN 透传守卫测试入分支 (get_checkpointer('pg') 原样透传 ZHL_DATABASE_URL 给 PostgresSaver.from_conn_string, 交付 CM 给调用方, 工厂不连库)
+  2. app/api/batches.py: 新增 _parse_uuid (400, label=rule_version_id) + _load_batch (404, label=batch_id) 两个 B3 守卫 helper; create_batch 的 rule_version_id / get_batch_detail / judge 的 batch_id 三处裸 uuid.UUID() 调用改走 helper — 畸形 UUID 不再 500 (ValueError), 与 intake.py 的 _get_batch_by_id (M3) 对齐
+  3. tests/api/test_batches_uuid_guard.py: 4 例 TDD 先行 RED (3 fail 1 pass) → 修复后全绿: 畸形 batch_id→GET 404 / judge 404; 畸形 rule_version_id→POST 400; 未知 UUID judge→404
+  4. dev-notes 本节点 + D20 偏离记录 (见下)
+- 验证：全量 132 passed (128 + 4 新守卫测试); ruff/black 全绿; skills/plugins/workflow 覆盖率 TOTAL 96.40% (门线 90%, 较上一节点 95.86% 提升, 因 UUID 守卫分支被新测试覆盖)
+- 提交：44cf781 (B4 守卫测试) + <本 commit> (batches UUID 守卫 + 测试 + dev-notes)
+- 翻车与返工：test_batches_uuid_guard.py 初版 import 块排序不符 ruff I001 (tests.api 在 sqlalchemy 前), ruff --fix 自动规整
+- D20 偏离合并 review 说明（合入 main 时执行）：
+  本分支含对 P0 冻结文件 app/infra/models.py 的 2 行修改 (commit 08a2606):
+    - from datetime import UTC, datetime (原仅 datetime)
+    - kw["default"] = lambda ctx: datetime.now(UTC) (原 lambda: datetime.utcnow())
+  行为等价性: naive-UTC → aware-UTC, SQLite/PG 插入行为不变; 唯一变化是消除 516 条
+  DeprecationWarning (Python 3.12 弃用 utcnow)。按 D20 原规应走独立 PR + review; 因
+  Phase A 尚未合入 main, 该改动暂随 feature/phase-a, 合入 main 的 diff review 中
+  须明确核对此 2 行 (git diff main..feature/phase-a -- app/infra/models.py)。
+  守卫测试 tests/infra/test_models_utcnow.py (2 例) 防 utcnow 回归。
+  app/domain/ migrations/ tests/fixtures/ vs phase0-frozen 仍零 diff, 未扩大解冻面。
+- 人工复核点：
+  1. batches.py 的 _parse_uuid 返回 400 (body 参数, 客户端可修正) vs _load_batch 返回 404 (path 资源, 语义=不存在) — 与 intake.py 全 404 的差异: 本处 400 仅针对 body 里的 rule_version_id 畸形, path 类仍 404; 若希望两处完全一致 (body 也 404), 按 AGENT.md B3 拍板
+  2. 合 main 时按上述 D20 说明 review models.py 2 行

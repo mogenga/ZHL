@@ -22,6 +22,28 @@ from app.infra.repositories import BatchRepository
 from app.skills.judge import UnconfirmedSnsError, judge_batch
 
 
+def _parse_uuid(value: str, label: str) -> uuid.UUID:
+    """B3: malformed UUID path/body param -> 404/400 detail, never a raw
+    ``ValueError`` -> 500. Mirrors the intake route's ``_get_batch_by_id``
+    guard (M3, intake.py)."""
+    try:
+        return uuid.UUID(value)
+    except ValueError:
+        raise HTTPException(status_code=400, detail={label: value}) from None
+
+
+def _load_batch(s: Session, batch_id: str) -> DeliveryBatch:
+    """Load a batch by UUID path param; malformed or unknown -> 404 (B3)."""
+    try:
+        batch_uuid = uuid.UUID(batch_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail={"batch_id": batch_id}) from None
+    batch = s.get(DeliveryBatch, batch_uuid)
+    if batch is None:
+        raise HTTPException(status_code=404, detail={"batch_id": batch_id})
+    return batch
+
+
 #: Route-local body model (plan Task 8 Interfaces).
 class BatchCreate(BaseModel):
     batch_no: str
@@ -49,7 +71,8 @@ def build_router(get_deps: object) -> APIRouter:
         s: Session = d.session
         from app.infra.models import QualityRuleVersion
 
-        rule = s.get(QualityRuleVersion, uuid.UUID(body.rule_version_id))
+        rule_uuid = _parse_uuid(body.rule_version_id, "rule_version_id")
+        rule = s.get(QualityRuleVersion, rule_uuid)
         if rule is None:
             raise HTTPException(
                 status_code=400,
@@ -60,7 +83,7 @@ def build_router(get_deps: object) -> APIRouter:
             body.batch_no,
             body.project_id,
             body.model,
-            uuid.UUID(body.rule_version_id),
+            rule_uuid,
             body.planned_quantity,
         )
         tr = transition("draft", "pending_intake", {}, kind="batch")
@@ -77,9 +100,7 @@ def build_router(get_deps: object) -> APIRouter:
     ) -> dict:
         """A8/B2: batch + per-SN verdict detail + sample conclusion + timeline."""
         s: Session = d.session
-        batch = s.get(DeliveryBatch, uuid.UUID(batch_id))
-        if batch is None:
-            raise HTTPException(status_code=404, detail={"batch_id": batch_id})
+        batch = _load_batch(s, batch_id)
         inspections = [
             {
                 "sn": r.sn,
@@ -126,11 +147,9 @@ def build_router(get_deps: object) -> APIRouter:
     ) -> dict:
         """Q1: independent judge-skill call for standalone re-judging."""
         s: Session = d.session
-        batch = s.get(DeliveryBatch, uuid.UUID(batch_id))
-        if batch is None:
-            raise HTTPException(status_code=404, detail={"batch_id": batch_id})
+        batch = _load_batch(s, batch_id)
         try:
-            result = judge_batch(s, d.evidence, uuid.UUID(batch_id), batch.rule_version_id)
+            result = judge_batch(s, d.evidence, batch.batch_id, batch.rule_version_id)
         except UnconfirmedSnsError as exc:
             # Review Focus #3 / A4: 400 + unconfirmed SN checklist (B3).
             raise HTTPException(
