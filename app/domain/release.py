@@ -197,6 +197,18 @@ def assert_release(
     else:
         # Legacy self-referential mode (Phase 0 backward compatibility):
         # build required_by_incident from the scope rows themselves.
+        #
+        # Known limitation (H-3, review 2026-10-12): in this mode an open
+        # incident with NO reinspection scope row gets an empty required set
+        # (``required_by_incident[inc_id] = ()`` below). check_reinspection_
+        # scope_covered short-circuits ``if required_sns:`` for an empty
+        # tuple, so "no reinspection at all" does NOT fail item 7 here — the
+        # open incident with zero coverage is silently treated as covered.
+        # The authoritative ``required_sns`` mode (Task 8 release API, fed
+        # from incident_sn_links) is the correct path and always names the
+        # gap. Legacy mode is retained only for Phase 0 backward
+        # compatibility; callers that want item 7 to catch missing
+        # reinspection coverage MUST pass ``required_sns``.
         required_by_incident = {}
         for row in reinspection_scopes:
             required_by_incident.setdefault(row.incident_id, ())
