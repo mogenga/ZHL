@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ZHL · 轨迹审计</title>
+<style>
+:root{--bg:#0e1420;--card:#161f2f;--ink:#dbe6f5;--dim:#8ba0c0;--ok:#3fbf6f;--warn:#e0a34a;--bad:#e05a5a;--line:#27364f;}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.6 "Segoe UI",system-ui,sans-serif;padding:24px}
+h1{font-size:20px;margin:0 0 16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:14px}
+label{display:block;color:var(--dim);margin:0 0 4px;font-size:12px}
+input{width:100%;max-width:420px;background:#0b101a;color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:8px;font:inherit}
+button{background:#2f6feb;color:#fff;border:0;border-radius:6px;padding:9px 16px;font:inherit;cursor:pointer}
+button:disabled{opacity:.5}
+.pill{padding:2px 10px;border-radius:10px;font-size:12px;background:#22304a}
+.pill.ok{background:rgba(63,191,111,.18);color:var(--ok)}
+.pill.bad{background:rgba(224,90,90,.18);color:var(--bad)}
+.pill.warn{background:rgba(224,163,74,.18);color:var(--warn)}
+.mono{font-family:ui-monospace,Consolas,monospace;font-size:12px;word-break:break-all}
+.small{color:var(--dim);font-size:12px}
+pre{background:#0b101a;border:1px solid var(--line);border-radius:6px;padding:10px;overflow:auto;font-size:12px}
+h2{font-size:15px;margin:14px 0 6px}
+.tl{list-style:none;margin:0;padding:0}
+.tl li{position:relative;padding:0 0 14px 22px;border-left:2px solid var(--line);margin-left:8px}
+.tl li:last-child{border-left-color:transparent}
+.tl li::before{content:"";position:absolute;left:-7px;top:4px;width:12px;height:12px;border-radius:50%;background:#22304a}
+.tl li.ok::before{background:var(--ok)}
+.tl li.bad::before{background:var(--bad)}
+.tl li.warn::before{background:var(--warn)}
+.tl .head{font-weight:600}
+</style>
+</head>
+<body>
+<h1>ZHL · 轨迹审计 (trace.html)</h1>
+
+<div class="card">
+  <label>批次 UUID (batch_id)</label>
+  <div style="display:flex;gap:10px;margin-top:6px;align-items:center">
+    <input id="batch" value="">
+    <button id="load">加载轨迹</button>
+  </div>
+  <p class="small">轨迹层 (D1 三层留痕之一)：按 started_at 升序列出该批次所有 Skill / 插件调用，
+  记录 input_ref / 调用插件 / 参数摘要 / 校验结果 / 失败原因 / 人工动作。</p>
+</div>
+
+<div class="card">
+  <h2>轨迹时间线</h2>
+  <div id="verdict" class="small">尚未加载。</div>
+  <ul class="tl" id="tl" hidden></ul>
+</div>
+
+<div class="card">
+  <h2>原始响应</h2>
+  <pre id="raw" hidden></pre>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+function dump(obj){ $("raw").hidden = false; $("raw").textContent = JSON.stringify(obj, null, 2); }
+async function api(method, url){
+  const r = await fetch(url, {method});
+  let data; try { data = await r.json(); } catch { data = {raw: await r.text().catch(()=>"")}; }
+  return {status:r.status, data};
+}
+const esc = s => (s ?? "").toString().replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]));
+const valPill = v => v === "pass" ? '<span class="pill ok">pass</span>'
+  : v === "fail" ? '<span class="pill bad">fail</span>'
+  : v === "partial" ? '<span class="pill warn">partial</span>' : `<span class="pill">${esc(v ?? "-")}</span>`;
+$("load").addEventListener("click", async () => {
+  const batch = $("batch").value.trim();
+  const res = await api("GET", `/api/batches/${batch}/traces`);
+  const rows = Array.isArray(res.data) ? res.data : [];
+  dump(res.data);
+  const tl = $("tl"); tl.innerHTML = ""; tl.hidden = false;
+  const order = {attribution:0, incident_assign:1, reinspection:2, incident_capa:3, release:4, report:5, report_api:5};
+  rows.slice().sort((a,b)=> (order[a.skill_name]??99)-(order[b.skill_name]??99) || (a.started_at||"").localeCompare(b.started_at||""))
+    .forEach(t => {
+      const li = document.createElement("li");
+      const cls = t.validation_result === "pass" ? "ok" : t.validation_result === "fail" ? "bad" : "warn";
+      li.className = cls;
+      const params = t.params_summary ? `<div class="small">参数 ${esc(JSON.stringify(t.params_summary))}</div>` : "";
+      const fail = t.failure_reason ? `<div class="small" style="color:var(--bad)">失败原因 ${esc(t.failure_reason)}</div>` : "";
+      const human = t.human_action ? `<div class="small">人工动作 ${esc(JSON.stringify(t.human_action))}</div>` : "";
+      li.innerHTML =
+        `<div class="head">[${esc(t.skill_name)}] ${valPill(t.validation_result)}</div>` +
+        `<div class="small">${esc(t.started_at || "-")} · 插件 [${(t.plugins_invoked||[]).join(", ")}]` +
+        (t.model_version ? ` · 模型 ${esc(t.model_version)}` : "") + `</div>` +
+        params + fail + human +
+        `<details style="margin-top:4px"><summary class="small">input_ref / task_id</summary>` +
+        `<div class="mono small">${esc(JSON.stringify(t.input_ref))}<br>${esc(t.task_id)}</div></details>`;
+      tl.appendChild(li);
+    });
+  $("verdict").innerHTML = rows.length
+    ? `<span class="pill">${rows.length}</span> 条轨迹记录`
+    : `<span class="pill warn">无轨迹</span>（该批次尚未发生任何 Skill / 插件调用，或批次不存在）`;
+});
+</script>
+</body>
+</html>

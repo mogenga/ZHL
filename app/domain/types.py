@@ -209,6 +209,29 @@ class ReinspectionView:
     rule_version_id: str = ""
     executor: str = ""
     evidence_ids: tuple = field(default_factory=tuple)
+    # PB L2: explicit reinspection scope (SNs actually re-measured). The domain
+    # layer stays read-free; Phase B Task 7 API supplies scope_sns and the
+    # Task 8 release API checks it via assert_release item 7.
+    scope_sns: tuple = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
+class ReinspectionScopeIn:
+    """PB D7-7: input to assert_release item 7 (check_reinspection_scope_covered).
+
+    One row per reinspection scope check. lot_size / inspection_type /
+    inspection_level / aql are NOT stored in the reinspections or
+    quality_incidents tables; the Phase B release API (Task 8) resolves them
+    from module_inspections + samples and passes them here, keeping the
+    domain layer read-free (P0 purity: no DB reads in app/domain).
+    """
+
+    incident_id: str
+    scope_sns: tuple
+    lot_size: int
+    inspection_type: str
+    inspection_level: str
+    aql: float
 
 
 # ---------------------------------------------------------------------------

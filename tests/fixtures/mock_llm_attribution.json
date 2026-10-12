@@ -1,0 +1,41 @@
+{
+  "comment": "PB L1a: fixed attribution outputs for MockLLMClient (总 spec §9.1, O-2). Routed by incident_id extracted from the prompt. Structure: {incident_id: {hypotheses: [{cause, confidence, evidence_ids[], recommended_action}]}}, per PB spec §5.5. INC-001 mirrors mock_llm_outputs.json confidence style (0.87/0.62/0.40); one hypothesis deliberately carries evidence_ids=[] to pin Review Focus #1 (evidence-ID admission gate input).",
+  "INC-001": {
+    "hypotheses": [
+      {
+        "cause": "cell mismatch -> Impp drift above grade-A band",
+        "confidence": 0.87,
+        "evidence_ids": ["EV-ATT-001", "EV-ATT-002"],
+        "recommended_action": "re-test 3-cell string, replace lead cell"
+      },
+      {
+        "cause": "IV capture instrument drift",
+        "confidence": 0.62,
+        "evidence_ids": ["EV-ATT-003"],
+        "recommended_action": "calibrate IV tester, re-capture SN-I-OODB"
+      },
+      {
+        "cause": "bypass-diode hot spot from assembly",
+        "confidence": 0.4,
+        "evidence_ids": [],
+        "recommended_action": "visual re-inspect cell 4 under load"
+      }
+    ]
+  },
+  "INC-004": {
+    "hypotheses": [
+      {
+        "cause": "EVA-004 sample-conclusion fail on SN sample set",
+        "confidence": 0.71,
+        "evidence_ids": ["EV-ATT-010"],
+        "recommended_action": "extend sample round, confirm root cause before release"
+      },
+      {
+        "cause": "rule version parameter_standard stale",
+        "confidence": 0.35,
+        "evidence_ids": [],
+        "recommended_action": "re-publish rule version, re-judge lot"
+      }
+    ]
+  }
+}
