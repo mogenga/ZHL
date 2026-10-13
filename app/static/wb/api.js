@@ -178,4 +178,42 @@ WB.api = {
       return { ok: true, data: r.data };
     });
   },
+
+  /* T6：异常处置全链路 */
+  getIncident(id) {
+    return WB.api.request('GET', '/api/incidents/' + id).then(function (r) {
+      if (!r.ok) return { ok: false, error: r.error, data: null };
+      return { ok: true, data: r.data };
+    });
+  },
+  createIncident(body) {
+    return WB.api.request('POST', '/api/incidents', body).then(function (r) {
+      if (!r.ok) return { ok: false, error: r.error, data: null };
+      return { ok: true, data: r.data };
+    });
+  },
+  isolateIncident(id) {
+    return WB.api.request('POST', '/api/incidents/' + id + '/isolate').then(function (r) {
+      if (!r.ok) return { ok: false, error: r.error, data: null };
+      return { ok: true, data: r.data };
+    });
+  },
+  attributeIncident(id, decision, cause) {
+    return WB.api.request('POST', '/api/incidents/' + id + '/attribute', { decision: decision, cause: cause }).then(function (r) {
+      if (!r.ok) return { ok: false, error: r.error, data: null };
+      return { ok: true, data: r.data };
+    });
+  },
+  assignIncident(id, body) {
+    return WB.api.request('POST', '/api/incidents/' + id + '/assign', body).then(function (r) {
+      if (!r.ok) return { ok: false, error: r.error, data: null };
+      return { ok: true, data: r.data };
+    });
+  },
+  capaIncident(id, body) {
+    return WB.api.request('POST', '/api/incidents/' + id + '/capa', body).then(function (r) {
+      if (!r.ok) return { ok: false, error: r.error, data: null };
+      return { ok: true, data: r.data };
+    });
+  },
 };

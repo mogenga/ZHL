@@ -11,6 +11,7 @@ const read = (f) => fs.readFileSync(path.join(root, 'app', 'static', 'wb', f), '
 const ui = read('ui.js'), api = read('api.js'), main = read('main.js');
 const intake = read('stages/intake.js');
 const judge = read('stages/judge.js');
+const incident = read('stages/incident.js');
 
 // ---- browser-like DOM shim ----
 function el(id) {
@@ -60,6 +61,7 @@ try {
   vm.runInContext(main, ctx, { filename: 'main.js' });
   vm.runInContext(intake, ctx, { filename: 'intake.js' });
   vm.runInContext(judge, ctx, { filename: 'judge.js' });
+  vm.runInContext(incident, ctx, { filename: 'incident.js' });
 } catch (e) { threw = e; }
 assert(threw === null, 'three <script> tags share global without redeclaration crash' + (threw ? ' -> ' + threw.message : ''));
 if (threw) { console.log('\n' + failed + ' FAILED'); process.exit(1); }
@@ -93,6 +95,12 @@ assert(typeof WB.api.submitIntake === 'function', 'WB.api.submitIntake present (
 assert(typeof WB.api.confirmIntake === 'function', 'WB.api.confirmIntake present (T4)');
 assert(WB.stages._byIndex[1] === WB.stages.judge, 'judge stage registered at index 1 (T5)');
 assert(typeof WB.api.runJudge === 'function', 'WB.api.runJudge present (T5)');
+assert(WB.stages._byIndex[2] === WB.stages.incident, 'incident stage registered at index 2 (T6)');
+assert(typeof WB.api.isolateIncident === 'function', 'WB.api.isolateIncident present (T6)');
+assert(typeof WB.api.attributeIncident === 'function', 'WB.api.attributeIncident present (T6)');
+assert(typeof WB.api.assignIncident === 'function', 'WB.api.assignIncident present (T6)');
+assert(typeof WB.api.capaIncident === 'function', 'WB.api.capaIncident present (T6)');
+assert(typeof WB.api.createIncident === 'function', 'WB.api.createIncident present (T6)');
 // newBatchForm with no rule versions should disable submit (not throw)
 try {
   WB.state.ruleVersions = null; // force the disabled branch

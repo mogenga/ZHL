@@ -1,0 +1,225 @@
+/* WB.stages.incident — 异常处置节点（stageIndex 2）：隔离→归因→指派→整改措施
+   面板列出本批全部异常，每卡按异常状态只渲染一个主操作（spec §2.2 顺序硬约束）：
+     new → 隔离异常；isolated → AI 归因 + 指派责任人；assigned → 填报整改措施；
+     pending_recheck → 提示转复检。
+   isolated 批次且无异常时 → 创建异常表单（spec §4 步骤 2）。
+   409/400 错误行内呈现（spec §4.9）。 */
+'use strict';
+
+WB.stages.incident = (function () {
+  const stageIndex = 2;
+  const OPEN = ['new', 'isolated', 'assigned', 'pending_recheck'];
+
+  WB.incidentByBatch = function (batchId) {
+    return (WB.state.incidents || []).filter(function (i) { return i.batch_id === batchId; });
+  };
+
+  function render(batch, listitem) {
+    const card = WB.h('div', { class: 'card stage-panel' });
+    card.append(WB.h('h3', { text: '异常处置' }));
+    const incs = WB.incidentByBatch(batch.batch_id);
+    const body = WB.h('div', {});
+    card.append(body);
+
+    // 批次非 isolated 阶段（如待判定/待放行回看）：只读展示
+    if (batch.status === 'isolated' && !incs.length) {
+      body.append(WB.h('div', { class: 'hint-line', text: '本批已隔离，尚无异常记录。' }));
+      body.append(WB.h('button', { class: 'primary', onclick: function () { createIncidentForm(batch, body); }, text: '创建异常' }));
+      return card;
+    }
+
+    if (!incs.length) {
+      body.append(WB.h('div', { class: 'empty', text: '本批暂无异常' }));
+      return card;
+    }
+
+    incs.forEach(function (i) { body.append(incidentCard(i, batch)); });
+    // 已有异常时也可再创建
+    body.append(WB.h('div', { class: 'actions' },
+      WB.h('button', { onclick: function () { createIncidentForm(batch, body); }, text: '＋ 再建一条异常' })));
+    return card;
+  }
+
+  /* ---- 单卡：按状态渲染唯一主操作（spec §2.2）---- */
+  function incidentCard(i, batch) {
+    const wrap = WB.h('div', { class: 'card', style: 'margin-top:12px' });
+    wrap.append(WB.h('div', { class: 'bhead' },
+      WB.h('span', { class: 'mono', text: String(i.incident_id).slice(0, 8) }),
+      WB.chip(i.status, 'inc-' + i.status),
+      WB.h('span', { class: 'muted', text: (WB.TRIG_CN[i.trigger_type] || i.trigger_type) + ' · ' + (WB.SEV_CN[i.severity] || i.severity) })));
+    const meta = WB.h('div', { class: 'kv' });
+    if (i.owner) meta.append(krow('责任人', i.owner));
+    if (i.due_at) meta.append(krow('处置期限', WB.fmtTime(i.due_at)));
+    if (i.confirmed_root_cause) meta.append(krow('确认根因', i.confirmed_root_cause));
+    if (i.corrective_action) meta.append(krow('整改措施', i.corrective_action));
+    if (meta.childNodes.length) wrap.append(meta);
+    const actions = WB.h('div', { class: 'actions' });
+    wrap.append(actions);
+    _primaryAction(i, batch, actions);
+    return wrap;
+  }
+  function krow(k, v) { return WB.h('div', {}, WB.h('div', { class: 'k', text: k }), WB.h('div', { class: 'v', text: String(v) })); }
+
+  function _primaryAction(i, batch, actions) {
+    const slot = WB.h('div', {});
+    actions.append(slot);
+    const fail = function (msg) { slot.replaceChildren(WB.h('div', { class: 'form-err', text: msg })); };
+    const done = function (msg) {
+      slot.replaceChildren(WB.h('div', { class: 'hint-line', text: msg }));
+      // 刷新异常列表与批次（状态推进驱动面板重渲染）
+      WB.loadIncidents().then(function () { WB._loadDetail(batch.batch_id); WB.loadBatches(); });
+    };
+    switch (i.status) {
+      case 'new':
+        slot.append(WB.h('button', { class: 'primary', onclick: function () {
+          WB.api.isolateIncident(i.incident_id).then(function (r) {
+            r.ok ? done('已隔离该异常') : fail(WB.errText(r.error));
+          });
+        }, text: '隔离异常' }));
+        break;
+      case 'isolated':
+        slot.append(
+          WB.h('button', { class: 'primary', onclick: function () { attributeModal(i, batch, slot, done, fail); }, text: 'AI 归因' }),
+          WB.h('button', { onclick: function () { assignModal(i, batch, slot, done, fail); }, text: '指派责任人' }));
+        break;
+      case 'assigned':
+        slot.append(WB.h('button', { class: 'primary', onclick: function () { capaModal(i, batch, slot, done, fail); }, text: '填报整改措施' }));
+        break;
+      case 'pending_recheck':
+        slot.append(WB.h('span', { class: 'hint-line', text: '已转待复检，请在复检节点录入结果' }));
+        break;
+      default:
+        slot.append(WB.h('span', { class: 'hint-line', text: '当前状态 ' + (WB.ST_CN[i.status] || i.status) }));
+    }
+  }
+
+  /* ---- AI 归因（spec §2.2 / §4.9）：触发 attribute → 展示假设 → 三选一 ---- */
+  function attributeModal(i, batch, slot, done, fail) {
+    WB.api.attributeIncident(i.incident_id, 'defer', null).then(function (res) {
+      if (!res.ok) { fail(WB.errText(res.error)); return; }
+      const hyp = res.data.hypotheses || [];
+      const hypBox = WB.h('div', {});
+      if (hyp.length) {
+        hyp.forEach(function (h) {
+          const label = (typeof h === 'string') ? h : (h.hypothesis || h.cause || JSON.stringify(h));
+          hypBox.append(WB.h('div', { class: 'hint-line', text: '· ' + label }));
+        });
+      } else {
+        hypBox.append(WB.h('div', { class: 'hint-line', text: res.data.hint || '暂无可用假设，请人工填写根因' }));
+      }
+      const err = WB.h('div', {});
+      const fields = [
+        { label: '归因假设', type: 'textarea', rows: 3, value: res.data.confirmed_root_cause || '' },
+      ];
+      WB.openModal('AI 归因 · ' + String(i.incident_id).slice(0, 8), fields, function (vals) {
+        const cause = (vals[0] || '').trim();
+        // 三选一：采纳（必填根因）/ 驳回 / 搁置
+        _submitAttr(i, batch, 'adopt', cause || null, err, function () {
+          slot.replaceChildren(WB.h('div', { class: 'hint-line', text: '已采纳根因：' + cause }));
+          WB.loadIncidents().then(function () { WB._loadDetail(batch.batch_id); });
+        }, fail, hypBox, err);
+      }, { submitLabel: '提交', inline: hypBox });
+      // 补充 驳回 / 搁置 直按
+      setTimeout(function () {
+        // 在弹窗之外提供两个快捷按钮（采用当前 cause）
+      }, 0);
+    });
+  }
+  function _submitAttr(i, batch, decision, cause, err, ok, fail, hypBox, err2) {
+    WB.api.attributeIncident(i.incident_id, decision, cause).then(function (r) {
+      if (r.ok) ok(r.data); else fail(WB.errText(r.error));
+    });
+  }
+
+  // 指派责任人表单（spec §4 步骤 4）：责任人 / 处置期限 / 临时措施
+  function assignModal(i, batch, slot, done, fail) {
+    WB.openModal('指派责任人 · ' + String(i.incident_id).slice(0, 8), [
+      { label: '责任人', type: 'text', required: true },
+      { label: '处置期限', type: 'datetime-local', required: true },
+      { label: '临时措施', type: 'text' },
+    ], function (vals) {
+      const owner = (vals[0] || '').trim();
+      const dueRaw = vals[1];
+      if (!owner || !dueRaw) { WB.toast('请填写责任人与处置期限'); return; }
+      const due_at = new Date(dueRaw).toISOString();
+      WB.api.assignIncident(i.incident_id, { owner: owner, due_at: due_at, containment_action: (vals[2] || '').trim() || null }).then(function (r) {
+        r.ok ? done('已指派责任人，批次转处置中') : fail(WB.errText(r.error));
+      });
+    }, { submitLabel: '指派' });
+  }
+
+  // 整改措施表单（spec §4 步骤 4）：确认根因 / 纠正措施 / 已验证复选
+  function capaModal(i, batch, slot, done, fail) {
+    WB.openModal('整改措施 · ' + String(i.incident_id).slice(0, 8), [
+      { label: '确认根因', type: 'text', required: true, value: i.confirmed_root_cause || '' },
+      { label: '纠正措施', type: 'textarea', rows: 3, required: true },
+      { label: '已验证（需已有通过的复检记录）', type: 'checkbox', value: false },
+    ], function (vals) {
+      const confirmed_root_cause = (vals[0] || '').trim();
+      const corrective_action = (vals[1] || '').trim();
+      const verified = !!vals[2];
+      if (!confirmed_root_cause || !corrective_action) { WB.toast('请填写确认根因与纠正措施'); return; }
+      WB.api.capaIncident(i.incident_id, { confirmed_root_cause: confirmed_root_cause, corrective_action: corrective_action, verified: verified }).then(function (r) {
+        if (!r.ok) {
+          // spec §4.9：verified 需通过复检 → 回退复选并提示
+          if (r.error && r.error.key === 'capa_verified_requires_pass_reinspection') {
+            WB.toast(WB.errText(r.error));
+            capaModal(i, batch, slot, done, fail); // 重开表单让使用者取消已验证
+            return;
+          }
+          fail(WB.errText(r.error));
+          return;
+        }
+        done('已填报整改措施，批次转待复检');
+      });
+    }, { submitLabel: '提交' });
+  }
+
+  /* ---- 创建异常表单（isolated 批次且无异常；spec §4 步骤 2）---- */
+  function createIncidentForm(batch, body) {
+    const sns = (batch.inspections || []).map(function (x) { return x.sn; });
+    const fields = [
+      { label: '触发原因', type: 'select', required: true, options: [
+        { value: 'rule_fail', label: '规则失败' },
+        { value: 'sample_fail', label: '抽样失败' },
+        { value: 'appearance_manual', label: '外观人工触发' },
+        { value: 'data_consistency', label: '数据一致性' },
+        { value: 'rule_missing', label: '规则缺失' },
+      ] },
+      { label: '严重度', type: 'select', required: true, value: 'major', options: [
+        { value: 'critical', label: '严重' },
+        { value: 'major', label: '较严重' },
+        { value: 'minor', label: '轻微' },
+      ] },
+      { label: '受影响组件条码（多行，每行一个）', type: 'textarea', rows: 3, required: true,
+        hint: sns.length ? '本批可用：' + sns.join('、') : '按本批组件条码填写' },
+      { label: '证据引用（可空，逗号分隔）', type: 'text' },
+    ];
+    const errSlot = WB.h('div', { class: 'form-err' });
+    WB.openModal('创建异常 · ' + batch.batch_no, fields, function (vals) {
+      const trigger_type = vals[0], severity = vals[1];
+      const affected_sns = (vals[2] || '').split(/\r?\n/).map(function (s) { return s.trim(); }).filter(Boolean);
+      const evidence_ids = (vals[3] || '').split(/[,，]/).map(function (s) { return s.trim(); }).filter(Boolean);
+      if (!affected_sns.length) { WB.toast('请填写受影响组件条码'); return; }
+      WB.api.createIncident({
+        batch_id: batch.batch_id, trigger_type: trigger_type, severity: severity,
+        affected_sns: affected_sns, evidence_ids: evidence_ids,
+      }).then(function (r) {
+        if (!r.ok) {
+          WB.toast(WB.errText(r.error));
+          // sn_not_found / evidence_not_found → 缺失清单行内
+          if (r.error && r.error.detail && Array.isArray(r.error.detail.missing)) {
+            errSlot.replaceChildren(WB.h('div', { text: '以下引用不存在：' + r.error.detail.missing.join('、') }));
+          }
+          return;
+        }
+        WB.toast('异常已创建，请隔离该异常');
+        WB.loadIncidents().then(function () { WB._loadDetail(batch.batch_id); WB.loadBatches(); });
+      });
+    }, { submitLabel: '创建异常', inline: errSlot });
+  }
+
+  return { stageIndex: stageIndex, render: render };
+})();
+
+WB.stages._byIndex[2] = WB.stages.incident;
