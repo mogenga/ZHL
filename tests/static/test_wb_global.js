@@ -9,6 +9,7 @@ const path = require('path');
 const root = path.resolve(__dirname, '..', '..');
 const read = (f) => fs.readFileSync(path.join(root, 'app', 'static', 'wb', f), 'utf8');
 const ui = read('ui.js'), api = read('api.js'), main = read('main.js');
+const intake = read('stages/intake.js');
 
 // ---- browser-like DOM shim ----
 function el(id) {
@@ -56,6 +57,7 @@ try {
   vm.runInContext(ui, ctx, { filename: 'ui.js' });
   vm.runInContext(api, ctx, { filename: 'api.js' });
   vm.runInContext(main, ctx, { filename: 'main.js' });
+  vm.runInContext(intake, ctx, { filename: 'intake.js' });
 } catch (e) { threw = e; }
 assert(threw === null, 'three <script> tags share global without redeclaration crash' + (threw ? ' -> ' + threw.message : ''));
 if (threw) { console.log('\n' + failed + ' FAILED'); process.exit(1); }
@@ -83,6 +85,10 @@ try {
 // 5) T3: newBatchForm + createBatch wired up
 assert(typeof WB.newBatchForm === 'function', 'WB.newBatchForm present (T3)');
 assert(typeof WB.api.createBatch === 'function', 'WB.api.createBatch present (T3)');
+assert(typeof WB.stages.intake === 'object' && WB.stages.intake.stageIndex === 0, 'intake stage defined at index 0 (T4)');
+assert(WB.stages._byIndex[0] === WB.stages.intake, 'intake stage registered in _byIndex[0] (T4)');
+assert(typeof WB.api.submitIntake === 'function', 'WB.api.submitIntake present (T4)');
+assert(typeof WB.api.confirmIntake === 'function', 'WB.api.confirmIntake present (T4)');
 // newBatchForm with no rule versions should disable submit (not throw)
 try {
   WB.state.ruleVersions = null; // force the disabled branch

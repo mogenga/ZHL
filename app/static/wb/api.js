@@ -156,4 +156,18 @@ WB.api = {
       return { ok: true, data: r.data };
     });
   },
+
+  /* T4：数据入场（POST /api/intake；POST /api/intake/{task_id}/confirm） */
+  submitIntake(body) {
+    return WB.api.request('POST', '/api/intake', body).then(function (r) {
+      if (!r.ok) return { ok: false, error: r.error, data: null };
+      return { ok: true, data: r.data };
+    });
+  },
+  confirmIntake(taskId, body) {
+    return WB.api.request('POST', '/api/intake/' + taskId + '/confirm', body).then(function (r) {
+      if (!r.ok) return { ok: false, error: r.error, data: null };
+      return { ok: true, data: r.data };
+    });
+  },
 };
