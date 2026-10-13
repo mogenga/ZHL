@@ -56,36 +56,56 @@ class IncidentSubgraphState(TypedDict, total=False):
 INCIDENT_ENTRY = "incident_subgraph"
 
 
-def _generate_hypotheses(state: IncidentSubgraphState) -> dict:
+def _generate_hypotheses(
+    state: IncidentSubgraphState,
+    attribution_ctx: dict | None = None,
+) -> dict:
     """Node 1: produce the hypothesis list.
 
-    In the full pipeline this is where ``AttributionSkill`` would run. The
-    subgraph keeps it as a pass-through that reads (or seeds) the
-    ``hypotheses`` key so the rest of the graph is testable with a fixed
-    input state (no LLM required at the subgraph level).
-
-    C9: the stub source is marked in the returned state as
-    ``hypotheses_source="stub"`` so API-layer trace recording can store
-    ``validation_result="stub"`` on the trace row for this node, keeping
-    the audit trail honest until the real AttributionSkill is wired in.
+    - ``stub``: no ctx (or pre-seeded hypotheses) -> keep the C9 pass-through
+      marker ``"stub"`` (no LLM / no evidence gate ran in this node).
+    - ``attribution``: empty seed + ``attribution_ctx`` supplied -> run the
+      real ``AttributionSkill`` (closure-injected: incident / session / llm /
+      evidence_store / trace are bound here, NOT serialized into LangGraph
+      state). The Skill runs its own D2 evidence gate + trace write.
     """
-    return {
-        "hypotheses": state.get("hypotheses") or [],
-        "hypotheses_source": "stub",
-    }
+    seeded = state.get("hypotheses") or []
+    if seeded or attribution_ctx is None:
+        # C9: any path that did NOT run the real Skill keeps the "stub"
+        # marker (existing regression contract — pre-seed pass-through and
+        # the no-ctx empty case are both audit "stub": no LLM, no evidence
+        # gate executed inside this node).
+        return {"hypotheses": seeded, "hypotheses_source": "stub"}
+    from app.plugins.attribution import AttributionSkill
+
+    validated = AttributionSkill(
+        attribution_ctx["llm"],
+        attribution_ctx["evidence_store"],
+    ).run(
+        attribution_ctx["incident"],
+        trace=attribution_ctx["trace"],
+        session=attribution_ctx["session"],
+    )
+    return {"hypotheses": validated, "hypotheses_source": "attribution"}
 
 
-def _validate_evidence(state: IncidentSubgraphState) -> dict:
-    """Node 2: deterministic filter (already done in the Skill; here we
-    just forward state and keep the trace hook for API-layer records).
+def _validate_evidence(
+    state: IncidentSubgraphState,
+    attribution_ctx: dict | None = None,
+) -> dict:
+    """Node 2: evidence gate.
 
-    C9: the stub status is marked as ``evidence_validation="stub"`` so
-    trace consumers do not mistake a pass-through for a real evidence
+    On the attribution path the gate already ran inside the Skill
+    (``TraceabilityPlugin.validate_evidence``); here we mark
+    ``evidence_validation="skill"``. Seeded / stub paths keep the C9 marker
+    ``"stub"`` so trace consumers do not mistake a pass-through for a real
     validation pass.
     """
+    source = state.get("hypotheses_source")
+    marker = "skill" if source == "attribution" else "stub"
     return {
         "hypotheses": state.get("hypotheses") or [],
-        "evidence_validation": "stub",
+        "evidence_validation": marker,
     }
 
 
@@ -141,11 +161,20 @@ def build_incident_subgraph(
     checkpointer: BaseCheckpointSaver,
     *,
     reinspection_callable: Callable[[dict], dict] | None = None,
+    attribution_ctx: dict | None = None,
 ) -> Any:
-    """Compile the incident subgraph with the given checkpointer."""
+    """Compile the incident subgraph with the given checkpointer.
+
+    ``attribution_ctx`` (T-1): optional dict binding live dependencies into
+    the generate/validate node closures — ``{"incident", "session", "llm",
+    "evidence_store", "trace"}``. Live deps are closure-captured (the
+    ``_make_run_reinspection`` pattern), never serialized into
+    ``IncidentSubgraphState`` (state is JSON-checkpointed; a live session
+    is not serializable).
+    """
     builder = StateGraph(IncidentSubgraphState)
-    builder.add_node("generate_hypotheses", _generate_hypotheses)
-    builder.add_node("validate_evidence", _validate_evidence)
+    builder.add_node("generate_hypotheses", _make_generate_hypotheses(attribution_ctx))
+    builder.add_node("validate_evidence", _make_validate_evidence(attribution_ctx))
     builder.add_node("human_adopt", _human_adopt)
 
     # ``run_reinspection`` needs the closure value, so bind it via a lambda
@@ -175,3 +204,16 @@ def _make_run_reinspection(
     if reinspection_callable is None:
         return lambda state: _run_reinspection(state, None)
     return lambda state: _run_reinspection(state, reinspection_callable)
+
+
+def _make_generate_hypotheses(
+    attribution_ctx: dict | None,
+) -> Callable[[IncidentSubgraphState], dict]:
+    """Bind the optional attribution context into the generate node."""
+    return lambda state: _generate_hypotheses(state, attribution_ctx)
+
+
+def _make_validate_evidence(
+    attribution_ctx: dict | None,
+) -> Callable[[IncidentSubgraphState], dict]:
+    return lambda state: _validate_evidence(state, attribution_ctx)
