@@ -176,7 +176,7 @@ def _client() -> tuple[TestClient, Any, Any]:
     )
     Base.metadata.create_all(engine)
     session = sessionmaker(bind=engine)()
-    app = create_app(session_factory=lambda: session)
+    app = create_app(session_factory=lambda: session, own_session=False)
     return TestClient(app), session, engine
 
 
@@ -263,10 +263,14 @@ def test_sample3_incident_closure_full_chain() -> None:
         inc = session.get(QualityIncident, inc_id)
         assert inc.status == "new"
 
-        # 2a) route the incident down the P0 edge new -> isolated (the sn is
-        #     linked by step 1's incident_sn_links, so the precondition holds).
-        inc.status = "isolated"
-        session.commit()
+        # 2a) route the incident down the P0 edge new -> isolated via the
+        #     real R2 API endpoint (the sn is linked by step 1's
+        #     incident_sn_links, so the sn_linked precondition holds) — no
+        #     more manual DB write (Review Focus: closure not bypassed).
+        iso_r = client.post(f"/api/incidents/{inc_id}/isolate")
+        assert iso_r.status_code == 200, iso_r.text
+        assert iso_r.json()["status"] == "isolated"
+        assert session.get(QualityIncident, inc_id).status == "isolated"
 
         # 2b) assign (incident isolated -> assigned; batch isolated -> disposing).
         r = client.post(

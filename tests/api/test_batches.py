@@ -405,3 +405,44 @@ def test_judge_replays_skill(sqlite_env):
     assert body["counts"]["Pass"] == _LOT
     assert body["fail_sns"] == []
     assert set(body["per_sn"]) == set(sns)
+
+
+def test_judge_rule_not_effective_returns_400(sqlite_env):
+    """R1: judge with a rule whose effective_at is LATER than the inspection
+    captured_at -> stable 400 (not 500), reason 'rule not effective yet'."""
+    s, sf = sqlite_env
+    # Seed a second rule version whose effective_at is in the future (after the
+    # inspection captured_at of 2026-10-01 in _r_for).
+    s2 = sf()
+    future_rule = QualityRuleVersion(
+        project_id=_SEED["project_id"],
+        model=_SEED["model"],
+        name="JH-550W future-effective",
+        nameplate_power=_SEED["nameplate_power"],
+        power_tolerance=_SEED["power_tolerance"],
+        parameter_standards=_SEED["parameter_standards"],
+        current_bands=_SEED["current_bands"],
+        sample_plan=_SEED["sample_plan"],
+        effective_at=datetime(2027, 6, 1, tzinfo=UTC),  # after 2026-10-01
+        status="published",
+        version_no=99,
+    )
+    s2.add(future_rule)
+    s2.flush()
+    s2.commit()
+
+    sns = [f"SN-NE-{i:02d}" for i in range(_LOT)]
+    client = _make_client(0.9, "SN-I-CONF", sns, s, sf, _ISO_TABLE)
+    client._env["rule_version_id"] = str(future_rule.rule_version_id)
+    batch = _post_batch(client)
+    resp = client.post(
+        "/api/intake",
+        json={"batch_id": batch["batch_id"], "inspections": [_r_for(sn) for sn in sns]},
+    )
+    _confirm(client, resp.json()["task_id"], "confirm")
+
+    r = client.post(f"/api/batches/{batch['batch_id']}/judge")
+    assert r.status_code == 400, r.text
+    detail = r.json()["detail"]
+    assert detail["reason"] == "rule not effective yet"
+    assert detail["rule_version_id"] == str(future_rule.rule_version_id)

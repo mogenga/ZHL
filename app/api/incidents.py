@@ -152,9 +152,21 @@ def _to_out(incident: QualityIncident) -> IncidentOut:
 
 
 def _record_trace(
-    session: Any, incident: QualityIncident, skill: str, params: dict, structured: dict
+    session: Any,
+    incident: QualityIncident,
+    skill: str,
+    params: dict,
+    structured: dict,
+    validation_result: str = "pass",
 ) -> None:
-    """Write one trace row; the caller owns the commit boundary."""
+    """Write one trace row; the caller owns the commit boundary.
+
+    C9: ``validation_result`` defaults to "pass" (real transitions are
+    verified by the P0 state machine). When a subgraph node is still a
+    pass-through stub (no LLM / no evidence validation yet), the caller
+    should pass "stub" so the audit trail does not claim a pass that
+    was never actually validated.
+    """
     TraceStore().record(
         session,
         task_id=str(uuid.uuid4()),
@@ -165,7 +177,7 @@ def _record_trace(
         params_summary=params,
         model_version=None,
         structured_output=structured,
-        validation_result="pass",
+        validation_result=validation_result,
         failure_reason=None,
         human_action=None,
         started_at=datetime.now(UTC),
@@ -211,6 +223,36 @@ def create_incident(payload: IncidentCreate, session: SessionDep) -> IncidentOut
     return _to_out(incident)
 
 
+@router.post("/{incident_id}/isolate", response_model=IncidentOut)
+def isolate_incident(incident_id: uuid.UUID, session: SessionDep) -> IncidentOut:
+    """incident new -> isolated (R2: P0 state machine new->isolated needs sn_linked).
+
+    The create endpoint requires the batch to be already isolated and starts
+    the incident at ``new``. The isolation action must be driven by an
+    explicit API call (not a test manually mutating the row): this endpoint
+    validates the ``new`` status + at least one ``incident_sn_links`` row
+    (written at create), runs the state-machine edge, sets ``isolated`` and
+    records a trace row.
+    """
+    incident = session.get(QualityIncident, incident_id)
+    if incident is None:
+        raise HTTPException(status_code=404, detail="incident_not_found")
+    if incident.status != "new":
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "incident_not_new", "status": incident.status},
+        )
+    links = session.query(IncidentSnLink).filter(IncidentSnLink.incident_id == incident_id).count()
+    res = transition("new", "isolated", {"sn_linked": links > 0}, kind="incident")
+    if not res.accepted:
+        raise HTTPException(409, detail={"error": "isolate_denied", "reason": res.reason})
+    incident.status = "isolated"
+    _record_trace(session, incident, "incident_isolate", {}, {"incident_status": "isolated"})
+    session.commit()
+    session.refresh(incident)
+    return _to_out(incident)
+
+
 @router.post("/{incident_id}/assign", response_model=IncidentOut)
 def assign_incident(
     incident_id: uuid.UUID, payload: IncidentAssign, session: SessionDep
@@ -218,7 +260,19 @@ def assign_incident(
     incident = session.get(QualityIncident, incident_id)
     if incident is None:
         raise HTTPException(status_code=404, detail="incident_not_found")
-    if incident.status not in ("new", "isolated"):
+    # R3: 认领须先隔离。P0 冻结异常状态机「新建 → 已隔离 → 已指派」，
+    # `new` 态不可直接指派——须先调 `POST /{id}/isolate` 转为 `isolated`
+    # 再认领。`new` 态请求返回 409（而非 404/静默成功）并提示先隔离。
+    if incident.status == "new":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "incident_not_isolated",
+                "status": incident.status,
+                "hint": "请先调用 POST /api/incidents/{id}/isolate 完成隔离，再指派责任人",
+            },
+        )
+    if incident.status not in ("isolated",):
         raise HTTPException(
             status_code=409,
             detail={"error": "incident_not_assignable", "status": incident.status},
@@ -228,7 +282,7 @@ def assign_incident(
     owner_assigned = bool(payload.owner)
     due_set = due_at is not None
 
-    # incident: new/isolated -> assigned (precondition owner_assigned)
+    # incident: isolated -> assigned (precondition owner_assigned; R3: new 须先隔离)
     inc_res = transition(
         incident.status, "assigned", {"owner_assigned": owner_assigned}, kind="incident"
     )

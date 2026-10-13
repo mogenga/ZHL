@@ -183,7 +183,7 @@ def _client() -> tuple[TestClient, Any, Any]:
     )
     Base.metadata.create_all(engine)
     session = sessionmaker(bind=engine)()
-    app = create_app(session_factory=lambda: session)
+    app = create_app(session_factory=lambda: session, own_session=False)
     return TestClient(app), session, engine
 
 

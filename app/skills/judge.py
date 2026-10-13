@@ -49,6 +49,26 @@ class UnconfirmedSnsError(Exception):
         super().__init__(f"{len(self.unconfirmed)} unconfirmed SNs: {self.unconfirmed}")
 
 
+class RuleNotEffective(Exception):
+    """R1: the chosen rule version was not yet effective when the
+    inspections happened.
+
+    ``judge_batch`` raises this when ``rule.effective_at`` is later than the
+    earliest ``captured_at`` among the batch's confirmed inspections - a rule
+    that only takes effect in the future must not grade historical data
+    (spec §3.1). Dedicated type so the API layer maps it to a stable 400
+    reason distinct from ``unknown rule version``.
+    """
+
+    def __init__(self, effective_at, earliest_captured_at) -> None:
+        self.effective_at = effective_at
+        self.earliest_captured_at = earliest_captured_at
+        super().__init__(
+            f"rule effective_at {effective_at.isoformat()} is later than "
+            f"earliest inspection {earliest_captured_at.isoformat()}"
+        )
+
+
 def _load_rule_snapshot(session: Session, rule_version_id: uuid.UUID) -> RuleSnapshotIn:
     row = session.get(QualityRuleVersion, rule_version_id)
     if row is None:
@@ -142,6 +162,17 @@ def judge_batch(
     unconfirmed = [r.sn for r in all_rows if r.intake_status != "confirmed"]
     if unconfirmed:
         raise UnconfirmedSnsError(unconfirmed)
+
+    # R1: the rule must have been effective before the earliest inspection.
+    # A rule that only takes effect later must not grade historical data -
+    # that would be a silent "judgment reproducible" violation (spec §3.1).
+    earliest_captured = min((r.captured_at for r in confirmed if r.captured_at), default=None)
+    if (
+        earliest_captured is not None
+        and rule.effective_at is not None
+        and rule.effective_at > earliest_captured
+    ):
+        raise RuleNotEffective(rule.effective_at, earliest_captured)
 
     rule_snapshot = _load_rule_snapshot(session, rule_version_id)
     per_sn: dict[str, dict] = {}

@@ -34,12 +34,21 @@ def extract_inspection_data(
     evidence record (content = the result JSON, hash-keyed by the store).
     """
     sn = payload["sn"]
+    # The schema travels *inside* the prompt as well as to the client: the
+    # fixture mock ignores it, but a real model has no other way to learn the
+    # expected shape. Relying on response_format={"type":"json_object"} alone
+    # only guarantees "an object", not "an object with these keys".
+    schema = {"type": "extraction", "source_type": source_type}
     prompt = (
         f"Extract inspection fields from {source_type} source: "
         f"{json.dumps(payload, ensure_ascii=False, sort_keys=True)} "
-        f"[SOURCE_SN:{sn}]"
+        f"[SOURCE_SN:{sn}]\n"
+        f"Return ONLY a JSON object with exactly these keys: "
+        f'{{"extracted_params": {{<param_name>: <number>}}, '
+        f'"confidence": <float between 0 and 1>, '
+        f'"appearance_findings": [<string>]}}. '
+        f"No markdown fence, no prose."
     )
-    schema = {"type": "extraction", "source_type": source_type}
     # Model call happens BEFORE any DB write (caller transaction stays clean).
     structured = llm.chat(prompt, schema)
 
@@ -51,8 +60,20 @@ def extract_inspection_data(
         meta={"source_sn": sn, "source_type": source_type},
     )
 
+    # A live model can omit or mistype keys even when asked politely. The
+    # confidence gate below decides whether a human must confirm, so a missing
+    # value must degrade to "no confidence" (forcing confirmation) rather than
+    # raise — a hard ``structured["confidence"]`` would abort the whole
+    # intake on one malformed model reply.
+    raw_confidence = structured.get("confidence")
+    try:
+        confidence = float(raw_confidence)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    confidence = min(max(confidence, 0.0), 1.0)
+
     return {
         "fields": structured.get("extracted_params", {}),
-        "confidence": structured["confidence"],
+        "confidence": confidence,
         "appearance_findings": structured.get("appearance_findings", []),
     }

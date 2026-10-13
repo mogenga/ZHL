@@ -27,7 +27,13 @@ uv run pytest
 
 # 4. 端到端验收（四组样例）
 uv run pytest tests/e2e/ -v
+
+# 测试红线：必须用项目 .venv 的 Python（含 langgraph 等依赖）。
+# 系统 python / anaconda 直接 `python -m pytest` 会缺 langgraph 导致 10 个 collection ERROR。
+#   Windows: .\.venv\Scripts\pytest.exe tests
+#   (或装好 uv 后: uv run pytest)
 ```
+
 
 访问 `http://localhost:8000` 查看内置页面。
 

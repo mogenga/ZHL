@@ -41,7 +41,11 @@ def _get_batch_by_id(s: Session, batch_id: str, label: str) -> DeliveryBatch:
     return batch
 
 
-#: Field whitelist shared with the repository layer (D7 override surface).
+#: Measured-column whitelist (D7 audit surface). D7 locks the original
+# inspection values (Postgres column-level REVOKE; uniform across engines),
+# so human overrides are NEVER written back to the measured columns.
+# This set documents the field names a confirmer may surface; it is used for
+# audit / validation only, not applied to the row.
 _CONFIRMABLE = frozenset({"pmax", "temp", "isc", "voc", "vm", "im", "ff", "appearance_result"})
 
 
@@ -168,16 +172,23 @@ def build_router(get_deps: object) -> APIRouter:
                         "found": len(confirmed_rows),
                     },
                 )
+            # D7: measured columns are locked — do NOT apply ``body.fields``
+            # back to the row. The override is recorded in the audit evidence
+            # meta (below, ``proposed_overrides``) instead.
             for row in confirmed_rows:
                 row.intake_status = "confirmed"
-                for key, value in (body.fields or {}).items():
-                    if key in _CONFIRMABLE:
-                        setattr(row, key, value)
             d.evidence.save(
                 "human_confirmation",
                 {"kind": "batch", "id": body.batch_id},
                 content=body.batch_id.encode("utf-8"),
-                meta={"action": "confirm", "auto": True, "confidence": state.get("confidence")},
+                meta={
+                    "action": "confirm",
+                    "auto": True,
+                    "confidence": state.get("confidence"),
+                    "proposed_overrides": {
+                        k: v for k, v in (body.fields or {}).items() if k in _CONFIRMABLE
+                    },
+                },
             )
             s.commit()
             for _chunk in graph.stream(
@@ -212,15 +223,18 @@ def build_router(get_deps: object) -> APIRouter:
             select(ModuleInspection).where(ModuleInspection.batch_id == batch.batch_id)
         ).all():
             row.intake_status = new_status
-            if body.action == "confirm" and body.fields:
-                for key, value in body.fields.items():
-                    if key in _CONFIRMABLE:
-                        setattr(row, key, value)
+            # D7: measured columns are locked — do NOT apply ``body.fields``
+            # back to the row; overrides stay in the audit evidence meta below.
         d.evidence.save(
             "human_confirmation",
             {"kind": "batch", "id": task_id},
             content=str(task_id).encode("utf-8"),
-            meta={"action": body.action, "fields": body.fields},
+            meta={
+                "action": body.action,
+                "proposed_overrides": {
+                    k: v for k, v in (body.fields or {}).items() if k in _CONFIRMABLE
+                },
+            },
         )
         s.commit()
 

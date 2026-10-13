@@ -46,6 +46,10 @@ class IncidentSubgraphState(TypedDict, total=False):
     reinspection_result: str | None
     reinspection_payload: dict | None
     route_marker: str | None
+    # C9: audit markers so trace consumers can tell stub pass-throughs
+    # apart from real skill output (no LLM / no evidence validation yet).
+    hypotheses_source: str | None
+    evidence_validation: str | None
 
 
 #: Mount point constant for the (future) main_chain_graph.
@@ -59,14 +63,30 @@ def _generate_hypotheses(state: IncidentSubgraphState) -> dict:
     subgraph keeps it as a pass-through that reads (or seeds) the
     ``hypotheses`` key so the rest of the graph is testable with a fixed
     input state (no LLM required at the subgraph level).
+
+    C9: the stub source is marked in the returned state as
+    ``hypotheses_source="stub"`` so API-layer trace recording can store
+    ``validation_result="stub"`` on the trace row for this node, keeping
+    the audit trail honest until the real AttributionSkill is wired in.
     """
-    return {"hypotheses": state.get("hypotheses") or []}
+    return {
+        "hypotheses": state.get("hypotheses") or [],
+        "hypotheses_source": "stub",
+    }
 
 
 def _validate_evidence(state: IncidentSubgraphState) -> dict:
     """Node 2: deterministic filter (already done in the Skill; here we
-    just forward state and keep the trace hook for API-layer records)."""
-    return {"hypotheses": state.get("hypotheses") or []}
+    just forward state and keep the trace hook for API-layer records).
+
+    C9: the stub status is marked as ``evidence_validation="stub"`` so
+    trace consumers do not mistake a pass-through for a real evidence
+    validation pass.
+    """
+    return {
+        "hypotheses": state.get("hypotheses") or [],
+        "evidence_validation": "stub",
+    }
 
 
 def _human_adopt(state: IncidentSubgraphState) -> dict:

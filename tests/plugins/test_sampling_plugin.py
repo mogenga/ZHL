@@ -122,13 +122,71 @@ def test_sampling_hit_freezes_samples(session) -> None:
     assert result["n"] == 13
     assert result["ac"] == 0
     assert result["re"] == 1
-    assert result["result"] in ("pass", "fail", "rule_missing")
+    # C6: the seeded inspections never ran the judge, so every sampled SN's
+    # decision_status is still pending. The sample-level result is the
+    # 'pending' sentinel -- NOT written as pass/fail (no silent release of an
+    # undetermined batch), and no conclusion row is persisted yet.
+    assert result["result"] == "pending"
     samples = session.scalars(select(Sample)).all()
     assert len(samples) == 10  # capped to available SNs
     assert len(result["selected"]) == 10
     conclusions = session.scalars(select(SampleConclusion)).all()
+    assert len(conclusions) == 0  # C6: pending -> conclusion write skipped
+
+
+def test_sampling_settled_verdicts_write_conclusion(session) -> None:
+    """C6: once the judge verdicts are settled, the conclusion IS written.
+    All pass -> 'pass'."""
+    batch = _batch_with_sns(session, "B-S-003", [f"SN-{i:03d}" for i in range(10)])
+    sns = [f"SN-{i:03d}" for i in range(10)]
+    rows = session.scalars(
+        select(ModuleInspection).where(ModuleInspection.batch_id == batch.batch_id)
+    ).all()
+    for row in rows:
+        row.decision_status = "pass"
+    session.flush()
+    result = run_sampling(
+        session,
+        _ISO_TABLE,
+        batch.batch_id,
+        inspection_type="iv",
+        aql=1.0,
+        lot_size=10,
+        sns=sns,
+        seed=str(batch.batch_id),
+    )
+    session.flush()
+    assert result["result"] == "pass"
+    conclusions = session.scalars(select(SampleConclusion)).all()
     assert len(conclusions) == 1
-    assert conclusions[0].n == 13  # stored n reflects the ISO row, not the capped count
+    assert conclusions[0].result == "pass"
+
+
+def test_sampling_single_fail_verdict_writes_fail_conclusion(session) -> None:
+    """C6: one fail verdict -> sample conclusion 'fail' (terminal, persisted)."""
+    batch = _batch_with_sns(session, "B-S-004", [f"SN-{i:03d}" for i in range(10)])
+    sns = [f"SN-{i:03d}" for i in range(10)]
+    rows = session.scalars(
+        select(ModuleInspection).where(ModuleInspection.batch_id == batch.batch_id)
+    ).all()
+    for i, row in enumerate(rows):
+        row.decision_status = "fail" if i == 0 else "pass"
+    session.flush()
+    result = run_sampling(
+        session,
+        _ISO_TABLE,
+        batch.batch_id,
+        inspection_type="iv",
+        aql=1.0,
+        lot_size=10,
+        sns=sns,
+        seed=str(batch.batch_id),
+    )
+    session.flush()
+    assert result["result"] == "fail"
+    conclusions = session.scalars(select(SampleConclusion)).all()
+    assert len(conclusions) == 1
+    assert conclusions[0].result == "fail"
 
 
 def test_sampling_missing_combo_rule_missing(session) -> None:

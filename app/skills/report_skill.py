@@ -18,6 +18,8 @@ Responsibilities (plan Task 7):
 
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
 from datetime import datetime
 from typing import Any
@@ -167,6 +169,15 @@ class ReportSkill:
 
         # report_snapshot evidence (the three-layer audit trail: evidence row
         # that the report row's source_snapshot_id points at).
+        # C8: real content hash over the merged report payload (markdown +
+        # canonical JSON) instead of a random uuid fragment — the evidence
+        # row's content_hash must be verifiable, not decorative.
+        payload_bytes = (
+            markdown.encode("utf-8")
+            + b"\n---JSON---\n"
+            + json.dumps(js, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        )
+        digest = hashlib.sha256(payload_bytes).hexdigest()
         snapshot = Evidence(
             evidence_id=uuid.uuid4(),
             evidence_type="report_snapshot",
@@ -176,7 +187,7 @@ class ReportSkill:
                 "report_type": report_type,
                 "version": next_version,
             },
-            content_hash=f"sha256:{uuid.uuid4().hex[:24]}",
+            content_hash=f"sha256:{digest}",
             generated_at=generated_at,
             generated_by="report_skill",
         )

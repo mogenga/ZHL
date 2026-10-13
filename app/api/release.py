@@ -36,6 +36,8 @@ domain function, keeping ``app/domain`` read-free (P0 contract).
 
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
 from datetime import UTC, datetime
 from typing import Annotated, Any
@@ -338,12 +340,18 @@ def release_batch(
 
     if result.passed:
         # All-pass: write release evidence + transition + trace in one tx.
+        # C8: content_hash is a real sha256 over the canonical JSON of the
+        # evidence content (sort_keys=True for stability) — not a random uuid.
+        _release_content = {"approved_by": payload.approved_by, "assertions": result.to_dict()}
+        _release_hash = hashlib.sha256(
+            json.dumps(_release_content, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()
         release_ev = Evidence(
             evidence_id=uuid.uuid4(),
             evidence_type="human_confirmation",
             object_ref={"kind": "batch", "id": batch.batch_no, "approved_by": payload.approved_by},
-            content_hash=f"sha256:{uuid.uuid4().hex[:24]}",
-            content={"approved_by": payload.approved_by, "assertions": result.to_dict()},
+            content_hash=f"sha256:{_release_hash}",
+            content=_release_content,
             generated_at=datetime.now(UTC),
             generated_by=payload.approved_by,
         )

@@ -21,7 +21,7 @@ from sqlalchemy.pool import StaticPool
 from app.infra.models import Base, DeliveryBatch, ModuleInspection, QualityRuleVersion
 from app.infra.repositories import InspectionRepository
 from app.plugins.evidence_store import FileEvidenceStore
-from app.skills.judge import UnconfirmedSnsError, judge_batch
+from app.skills.judge import RuleNotEffective, UnconfirmedSnsError, judge_batch
 
 _ROOT = Path(__file__).resolve().parents[2]
 _SEED = json.loads((_ROOT / "tests" / "fixtures" / "rules_seed.json").read_text(encoding="utf-8"))[
@@ -317,4 +317,50 @@ def test_judge_persists_decision_status_and_evidence(tmp_path: Path) -> None:
     s.close()
     s2.close()
     engine.dispose()
+    engine.dispose()
+
+
+def test_judge_batch_rule_effective_after_inspections(tmp_path: Path) -> None:
+    """R1: a rule whose effective_at is later than the earliest inspection
+    must not grade historical data - judge_batch raises RuleNotEffective."""
+    engine = create_engine(
+        "sqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}
+    )
+    Base.metadata.create_all(engine)
+    s = sessionmaker(bind=engine)()
+    # effective_at is in the FUTURE relative to the inspection captured_at
+    # (_insert_inspections default captured_at is 2026-10-01).
+    rule = QualityRuleVersion(
+        project_id=_SEED["project_id"],
+        model=_SEED["model"],
+        name="JH-550W future",
+        nameplate_power=_SEED["nameplate_power"],
+        power_tolerance=_SEED["power_tolerance"],
+        parameter_standards=_SEED["parameter_standards"],
+        current_bands=_SEED["current_bands"],
+        sample_plan=_SEED["sample_plan"],
+        effective_at=datetime(2027, 1, 1, tzinfo=UTC),
+        status="published",
+        version_no=_SEED["version_no"],
+    )
+    s.add(rule)
+    s.flush()
+    s.commit()
+    batch = DeliveryBatch(
+        batch_no="B-J-R1",
+        project_id=_SEED["project_id"],
+        model=_SEED["model"],
+        planned_quantity=len(_NORMAL),
+        rule_version_id=rule.rule_version_id,
+        status="pending_judge",
+    )
+    s.add(batch)
+    s.flush()
+    s.commit()
+    _insert_inspections(s, batch.batch_id, _NORMAL["inspections"])
+    s.commit()
+    evidence = FileEvidenceStore(root=tmp_path, db=None)
+    with pytest.raises(RuleNotEffective):
+        judge_batch(s, evidence, batch.batch_id, rule.rule_version_id)
+    s.close()
     engine.dispose()

@@ -133,6 +133,10 @@ def test_protocol_conformance() -> None:
     assert isinstance(client, LLMClient)
 
 
-def test_openai_compat_client_requires_key() -> None:
+def test_openai_compat_client_requires_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Must clear the env explicitly: the client falls back to
+    # ``ZHL_LLM_API_KEY`` when the arg is empty, so a developer who configured
+    # a real key in .env would silently turn this guard into a no-op.
+    monkeypatch.delenv("ZHL_LLM_API_KEY", raising=False)
     with pytest.raises(ValueError):
         OpenAICompatClient(api_key="", base_url="http://localhost:9001/v1", model="m")

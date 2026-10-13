@@ -47,7 +47,7 @@ from app.domain.types import IsoRow
 from app.infra.models import AgentTaskTrace, DeliveryBatch, QualityRuleVersion
 from app.plugins.sampling import run_sampling
 from app.skills.extract import extract_inspection_data
-from app.skills.judge import judge_batch
+from app.skills.judge import RuleNotEffective, judge_batch
 from app.workflow.state import BatchWorkflowState
 
 if TYPE_CHECKING:
@@ -224,7 +224,31 @@ def build_main_chain_graph(
         after the graph run. The Skill keeps its guard as a second line —
         an unexpected unconfirmed state is a loud 400, never a silent pass.
         """
-        result = judge_batch(session, evidence, uuid.UUID(state["batch_id"]), rule_version_id)
+        try:
+            result = judge_batch(session, evidence, uuid.UUID(state["batch_id"]), rule_version_id)
+        except RuleNotEffective as exc:
+            # R1: the chosen rule version was not yet in force when the
+            # inspections happened. Not fatal to the graph (the confirmation
+            # itself is still valid); record the batch verdict as
+            # ``rule_missing`` so downstream sampling / release asserts
+            # (D9: no silent default) can see the gap. The independent
+            # ``/judge`` endpoint still maps the raw exception to a 400 so a
+            # standalone re-judge fails loudly.
+            result = {
+                "result": "rule_missing",
+                "reason": "rule not effective yet",
+                "counts": {"Pass": 0, "Fail": 0},
+                "fail_sns": [],
+                "per_sn": {},
+                "rule_version_id": str(rule_version_id),
+                "rule_snapshot": None,
+            }
+            session.flush()
+            return {
+                "decision": result,
+                "evidence_ids": [str(e) for e in (state.get("evidence_ids") or [])],
+                "rule_not_effective": exc.earliest_captured_at.isoformat(),
+            }
         session.flush()
         return {
             "decision": result,

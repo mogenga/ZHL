@@ -67,12 +67,18 @@ class TraceStore:
                 except (ValueError, TypeError):
                     pass  # keep original; DB layer validates the type
 
-        # Build the ORM object from the model's column names.
+        # Build the ORM object from the model's column names. C3: unknown
+        # kwargs are NOT silently dropped (a typo'd trace field would
+        # otherwise leave a gap in the audit trail while looking healthy);
+        # they raise TypeError, matching the ORM __init__ contract.
         column_names = {c.name for c in AgentTaskTrace.__table__.columns}
-        init_kwargs = {}
-        for key, value in kwargs.items():
-            if key in column_names:
-                init_kwargs[key] = value
+        unknown = sorted(k for k in kwargs if k not in column_names)
+        if unknown:
+            raise TypeError(
+                f"TraceStore.record: unknown field(s) {unknown}; "
+                f"valid fields: {sorted(column_names)}"
+            )
+        init_kwargs = dict(kwargs)
 
         trace = AgentTaskTrace(**init_kwargs)
         session.add(trace)

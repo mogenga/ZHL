@@ -262,6 +262,52 @@ def test_assign_dual_transition_then_409(api_client: Any) -> None:
     assert resp2.status_code == 409
 
 
+def test_assign_new_state_409_r3(api_client: Any) -> None:
+    """R3 regression: assign must NOT work from 'new' state.
+
+    P0 frozen incident state machine: new -> isolated -> assigned.
+    The 'new' state must first be isolated (via POST /{id}/isolate, R2)
+    before assign is accepted. A direct assign from 'new' returns 409 with
+    a hint to isolate first.
+    """
+    client, session, _engine = api_client
+    seeded = _seed(session, batch_status="isolated")
+    iid = seeded["incident"].incident_id
+    # Reset the incident to 'new' state (fresh create, not yet isolated)
+    inc = session.get(QualityIncident, iid)
+    inc.status = "new"
+    session.commit()
+
+    resp = client.post(
+        f"/api/incidents/{iid}/assign",
+        json={
+            "owner": "ZHL-QA",
+            "due_at": "2026-06-15T00:00:00Z",
+            "containment_action": "quarantine",
+        },
+    )
+    assert resp.status_code == 409, resp.text
+    body = resp.json()
+    assert body["detail"]["error"] == "incident_not_isolated"
+    assert "isolate" in body["detail"].get("hint", "")
+
+    # Now isolate first, then assign should succeed
+    iso_resp = client.post(f"/api/incidents/{iid}/isolate")
+    assert iso_resp.status_code == 200, iso_resp.text
+    assert iso_resp.json()["status"] == "isolated"
+
+    ok_resp = client.post(
+        f"/api/incidents/{iid}/assign",
+        json={
+            "owner": "ZHL-QA",
+            "due_at": "2026-06-15T00:00:00Z",
+            "containment_action": "quarantine",
+        },
+    )
+    assert ok_resp.status_code == 200, ok_resp.text
+    assert ok_resp.json()["status"] == "assigned"
+
+
 def test_capa_verified_requires_pass_reinspection(api_client: Any) -> None:
     client, session, _engine = api_client
     seeded = _seed(session, batch_status="isolated")
@@ -311,6 +357,37 @@ def test_capa_with_pass_reinspection_sets_flag(api_client: Any) -> None:
     assert body["capa_verified"] is True
     assert body["status"] == "pending_recheck"
     assert session.get(DeliveryBatch, _BATCH).status == "pending_recheck"
+
+
+def test_isolate_new_to_isolated(api_client: Any) -> None:
+    """R2: POST /isolate drives the P0 edge new -> isolated (sn_linked holds
+    because _seed writes incident_sn_links at create)."""
+    client, session, _ = api_client
+    seeded = _seed(session, batch_status="isolated")
+    iid = seeded["incident"].incident_id
+    assert session.get(QualityIncident, iid).status == "new"
+    resp = client.post(f"/api/incidents/{iid}/isolate")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "isolated"
+    assert session.get(QualityIncident, iid).status == "isolated"
+
+
+def test_isolate_not_new_409(api_client: Any) -> None:
+    """R2: isolating an incident that already left ``new`` -> 409."""
+    client, session, _ = api_client
+    seeded = _seed(session, batch_status="isolated")
+    iid = seeded["incident"].incident_id
+    inc = session.get(QualityIncident, iid)
+    inc.status = "isolated"
+    session.commit()
+    resp = client.post(f"/api/incidents/{iid}/isolate")
+    assert resp.status_code == 409
+
+
+def test_isolate_unknown_404(api_client: Any) -> None:
+    client, _session, _ = api_client
+    resp = client.post(f"/api/incidents/{UUID('00000000-0000-0000-0000-000000000099')}/isolate")
+    assert resp.status_code == 404
 
 
 def test_get_detail_includes_hypotheses(api_client: Any) -> None:

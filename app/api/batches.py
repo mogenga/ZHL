@@ -17,9 +17,15 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.domain.state_machine import transition
-from app.infra.models import AgentTaskTrace, DeliveryBatch, ModuleInspection, SampleConclusion
+from app.infra.models import (
+    AgentTaskTrace,
+    DeliveryBatch,
+    ModuleInspection,
+    QualityRuleVersion,
+    SampleConclusion,
+)
 from app.infra.repositories import BatchRepository
-from app.skills.judge import UnconfirmedSnsError, judge_batch
+from app.skills.judge import RuleNotEffective, UnconfirmedSnsError, judge_batch
 
 
 def _parse_uuid(value: str, label: str) -> uuid.UUID:
@@ -69,8 +75,6 @@ def build_router(get_deps: object) -> APIRouter:
     ) -> dict:
         """R5: insert the draft batch and advance it to ``pending_intake``."""
         s: Session = d.session
-        from app.infra.models import QualityRuleVersion
-
         rule_uuid = _parse_uuid(body.rule_version_id, "rule_version_id")
         rule = s.get(QualityRuleVersion, rule_uuid)
         if rule is None:
@@ -155,6 +159,18 @@ def build_router(get_deps: object) -> APIRouter:
             raise HTTPException(
                 status_code=400, detail={"unconfirmed_sns": exc.unconfirmed}
             ) from exc
+        except RuleNotEffective as exc:
+            # R1: the selected rule version had not yet taken effect when the
+            # inspections happened. Map to the stable 400 reason aligned with
+            # "unknown rule version" so the caller can fall back to a rule that
+            # was actually in force (see the create endpoint's L83 shape).
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "rule_version_id": str(batch.rule_version_id),
+                    "reason": "rule not effective yet",
+                },
+            ) from exc
         s.commit()
         return {
             "batch_id": batch_id,
@@ -163,6 +179,37 @@ def build_router(get_deps: object) -> APIRouter:
             "fail_sns": result["fail_sns"],
             "per_sn": result["per_sn"],
         }
+
+    @router.get("")
+    def list_batches(
+        status: str | None = None,
+        d: AppDepsRef = Depends(get_deps),  # noqa: B008
+    ) -> list[dict]:
+        """批次列表（前端工作台主数据源）。
+
+        返回 batch_id / batch_no / project_id / model / status /
+        planned_quantity / created_at，按创建时间倒序；可选 status 过滤；
+        不做分页（平台规模小，全量返回即可；若未来需要再加分页）。
+        """
+        s: Session = d.session
+        stmt = select(DeliveryBatch)
+        if status is not None:
+            stmt = stmt.where(DeliveryBatch.status == status)
+        # 按创建时间倒序；Postgres/SQLite DESC 默认 NULL 排最后（无需 NULLS LAST）。
+        stmt = stmt.order_by(DeliveryBatch.created_at.desc())
+        rows = s.scalars(stmt).all()
+        return [
+            {
+                "batch_id": str(r.batch_id),
+                "batch_no": r.batch_no,
+                "project_id": r.project_id,
+                "model": r.model,
+                "status": r.status,
+                "planned_quantity": r.planned_quantity,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ]
 
     return router
 

@@ -121,20 +121,33 @@ class InspectionRepository:
         inspection_id: uuid.UUID,
         fields: dict | None,
     ) -> ModuleInspection:
-        """Confirm an inspection, applying any human-modified field values.
+        """Confirm an inspection. D7: original measured columns are locked.
 
-        ``fields`` may carry overridden electrical parameters or the
-        appearance result; the original measured columns stay immutable in
-        Postgres (D7), so overrides are applied only in SQLite / dev DBs
-        where the column-level REVOKE does not exist.
+        The Postgres DDL revokes UPDATE on the measured columns for the app
+        role (D7 / AGENT.md §8: original inspection values stay immutable so
+        the evidence chain remains auditable). We keep that semantics uniform
+        across engines: confirming only flips ``intake_status`` to
+        ``confirmed``; any ``fields`` passed in are NEVER written back to the
+        measured columns (pmax / temp / isc / voc / vm / im / ff /
+        appearance_result).
+
+        ``fields`` is retained in the signature (the API layer may still pass
+        a human-proposed override); it is used for whitelist validation /
+        audit only, not applied. Unknown keys are rejected by the API-layer
+        ``_CONFIRMABLE`` guard before reaching here.
+
+        ``fields`` is intentionally not applied in the body (it is the audit
+        surface; writing it back would violate D7). It stays in the signature
+        so callers / API routes keep their current call shape.
         """
+        _ = fields  # audit-only; measured columns stay immutable (D7).
         inspection = session.get(ModuleInspection, inspection_id)
         if inspection is None:
             raise LookupError(f"unknown inspection_id: {inspection_id}")
-        if fields:
-            for key, value in fields.items():
-                if key in _CONFIRMABLE_FIELDS:
-                    setattr(inspection, key, value)
+        # D7: do NOT setattr the measured columns — original values are
+        # immutable. The fields dict is accepted but deliberately not applied
+        # (audit surface only; the API layer already whitelists via
+        # ``_CONFIRMABLE``).
         inspection.intake_status = "confirmed"
         session.flush()
         return inspection
@@ -163,9 +176,11 @@ class InspectionRepository:
             raise CrossBatchSnConflict(f"SN {conflict!r} already recorded in a different batch")
 
 
-# Fields a human confirmer is allowed to override when confirming.
-# The Postgres DDL (D7) revokes UPDATE on the measured columns for the app
-# role; the fallback check here only applies where the constraint is absent.
+# Measured-column whitelist (D7 audit surface). The Postgres DDL revokes UPDATE
+# on these columns for the app role; confirming never writes them back
+# (``confirm_inspection`` is audit-only over ``fields``). This set documents the
+# field names the API layer may surface to a human confirmer and validate; it is
+# NOT applied to the row.
 _CONFIRMABLE_FIELDS = frozenset(
     {
         "pmax",
@@ -286,25 +301,15 @@ class SampleRepository:
 def _resolve_database_url() -> str:
     """``ZHL_DATABASE_URL`` env var, falling back to the project-root .env.
 
-    Same convention as ``alembic/env.py``: no third-party dotenv, no
-    committed credentials.
+    C11: falls back to python-dotenv (already a project dependency, see
+    ``app/main.py``) instead of a hand-rolled .env parser.
     """
     url = os.environ.get("ZHL_DATABASE_URL")
     if not url:
-        env_file = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-            ".env",
-        )
-        if os.path.isfile(env_file):
-            with open(env_file, encoding="utf-8") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line or line.startswith("#") or "=" not in line:
-                        continue
-                    key, _, val = line.partition("=")
-                    if key.strip() == "ZHL_DATABASE_URL" and val.strip():
-                        url = val.strip().strip('"').strip("'")
-                        break
+        from dotenv import load_dotenv
+
+        load_dotenv()
+        url = os.environ.get("ZHL_DATABASE_URL")
     if not url:
         raise RuntimeError(
             "No database URL. Set ZHL_DATABASE_URL in .env "

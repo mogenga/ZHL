@@ -85,3 +85,72 @@ def test_extract_min_confidence(llm: MockLLMClient, evidence: FileEvidenceStore)
     r2 = extract_inspection_data(llm, "IV_CSV", _payload(), evidence, ref)
     batch_confidence = min(r1["confidence"], r2["confidence"])
     assert batch_confidence == 0.81
+
+
+# ---------------------------------------------------------------------------
+# Live-model hardening (the production path uses a real LLM, not the fixture)
+# ---------------------------------------------------------------------------
+
+
+class _MalformedLLM:
+    """Stands in for a live model that ignores the requested shape.
+
+    Real endpoints occasionally omit keys the prompt asked for. The Skill must
+    degrade to "no confidence" (which routes the batch to human confirmation)
+    instead of raising and aborting the whole intake.
+    """
+
+    def __init__(self, payload: dict) -> None:
+        self._payload = payload
+
+    def chat(self, prompt: str, schema: dict) -> dict:
+        return dict(self._payload)
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ({"extracted_params": {"Pmax": 1.0}}, 0.0),  # key absent
+        ({"confidence": "not-a-number"}, 0.0),  # wrong type
+        ({"confidence": None}, 0.0),
+        ({"confidence": "0.5"}, 0.5),  # numeric string
+        ({"confidence": 1.7}, 1.0),  # clamp high
+        ({"confidence": -0.2}, 0.0),  # clamp low
+    ],
+)
+def test_extract_survives_malformed_confidence(
+    payload: dict, expected: float, evidence: FileEvidenceStore
+) -> None:
+    result = extract_inspection_data(
+        _MalformedLLM(payload), "IV_CSV", _payload(), evidence, {"kind": "b", "id": "B"}
+    )
+    assert result["confidence"] == expected
+    # The raw reply is still archived as evidence, malformed or not.
+    assert result["fields"] == payload.get("extracted_params", {})
+
+
+def test_extract_prompt_declares_the_expected_shape(
+    evidence: FileEvidenceStore,
+) -> None:
+    """A live model only sees the prompt — the schema must be spelled out there.
+
+    ``response_format={"type":"json_object"}`` guarantees *an* object, not
+    *these* keys; without the in-prompt contract the model has to guess.
+    """
+    captured: list[str] = []
+
+    class _Capture:
+        def chat(self, prompt: str, schema: dict) -> dict:
+            captured.append(prompt)
+            return {"extracted_params": {}, "confidence": 1.0}
+
+    extract_inspection_data(
+        _Capture(), "IV_CSV", _payload(), evidence, {"kind": "batch", "id": "B"}
+    )
+
+    assert captured, "the model was never called"
+    prompt = captured[0]
+    for token in ("extracted_params", "confidence", "appearance_findings"):
+        assert token in prompt, f"prompt never mentions {token}"
+    # The mock's routing marker must survive the added instructions.
+    assert f"[SOURCE_SN:{_SOURCE_SN}]" in prompt

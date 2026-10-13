@@ -29,6 +29,7 @@ Phase B consumer that imported it from ``app.main``.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -40,7 +41,7 @@ from app.api.intake import build_router as build_intake_router
 from app.api.main import create_app_with_trace as _phase_b_create_app_with_trace
 from app.domain.types import IsoRow
 from app.plugins.evidence_store import EvidenceStore, FileEvidenceStore
-from app.plugins.llm_client import LLMClient, MockLLMClient
+from app.plugins.llm_client import LLMClient, MockLLMClient, OpenAICompatClient
 from app.workflow.checkpointer import get_checkpointer
 
 __all__ = [
@@ -86,6 +87,44 @@ def _default_iso_table() -> list[IsoRow]:
     return [IsoRow(**row) for row in rows]
 
 
+def _default_checkpointer_mode() -> str:
+    """``ZHL_CHECKPOINTER`` = ``pg`` | ``memory`` (default ``memory``).
+
+    ``pg`` reuses the existing ``ZHL_DATABASE_URL`` — no new credential is
+    needed for persistent human-task recovery across restarts. Resolution is
+    lazy (inside the factory), so importing ``app.main`` stays side-effect
+    free and tests that inject their own mode are unaffected.
+    """
+    mode = os.environ.get("ZHL_CHECKPOINTER", "memory").strip().lower()
+    if mode not in ("memory", "pg"):
+        raise ValueError(f"ZHL_CHECKPOINTER must be 'pg' or 'memory', got {mode!r}")
+    return mode
+
+
+def _default_llm_client() -> LLMClient:
+    """Pick the LLM client from the environment (AGENT.md §4.0: config in env).
+
+    ``ZHL_LLM_API_KEY`` present -> real OpenAI-compatible client; absent ->
+    the deterministic fixture-backed mock. This keeps ``uvicorn app.main:app``
+    runnable with zero credentials while letting a deployment opt into a live
+    model purely by configuration — no code edit.
+
+    Both DeepSeek (``https://api.deepseek.com``) and Zhipu
+    (``https://open.bigmodel.cn/api/paas/v4``) expose the OpenAI Chat
+    Completion shape this client speaks. The Zhipu *Anthropic* endpoint
+    (``/api/anthropic``) is a different protocol and will not work here.
+    """
+    key = os.environ.get("ZHL_LLM_API_KEY", "").strip()
+    if not key:
+        return MockLLMClient(_DEFAULT_FIXTURES)
+    try:
+        return OpenAICompatClient()
+    except ValueError:
+        # Misconfigured (e.g. key set but no base_url) must not silently
+        # degrade to mock data in production — fail loud instead.
+        raise
+
+
 def create_app(
     checkpointer_mode: str = "memory",
     session_factory: sessionmaker | None = None,
@@ -105,7 +144,9 @@ def create_app(
     app = FastAPI(title="ZHL Phase A")
 
     checkpointer = get_checkpointer(checkpointer_mode)
-    llm_client = llm or MockLLMClient(_DEFAULT_FIXTURES)
+    # An explicitly injected client always wins — tests and callers that pass
+    # ``llm=`` must keep their own double. Only the None case consults env.
+    llm_client = llm or _default_llm_client()
     table = iso_table if iso_table is not None else _default_iso_table()
     default_evidence = evidence
     default_repo = inspect_repo
@@ -132,7 +173,7 @@ def create_app(
 
 def create_unified_app(
     session_factory: sessionmaker | None = None,
-    checkpointer_mode: str = "memory",
+    checkpointer_mode: str | None = None,
     mount_static: bool = True,
 ) -> FastAPI:
     """Phase A + Phase B unified app.
@@ -154,16 +195,23 @@ def create_unified_app(
 
     # Phase A: build its router set with its own get_deps closure and mount
     # it onto the unified app. checkpointer_mode only affects Phase A's
-    # main-chain skill runs (memory is the import-safe default).
-    checkpointer = get_checkpointer(checkpointer_mode)
-    llm_client = MockLLMClient(_DEFAULT_FIXTURES)
+    # main-chain skill runs; ``None`` resolves from ZHL_CHECKPOINTER.
+    checkpointer = get_checkpointer(checkpointer_mode or _default_checkpointer_mode())
+    llm_client = _default_llm_client()
     table = _default_iso_table()
     default_repo: object | None = None
 
     def get_deps() -> AppDeps:
         from app.infra.repositories import InspectionRepository, get_session_factory
 
-        factory = get_session_factory()
+        # Honour the injected factory first, exactly like the Phase A
+        # ``create_app`` closure above. Ignoring it made every Phase A route
+        # on the unified app fall back to the environment default database —
+        # so ``GET /api/batches`` read from an unrelated DB (tests could even
+        # hit the live Postgres and see real batches) instead of the caller's.
+        factory = session_factory
+        if factory is None:
+            factory = get_session_factory()
         session = factory()
         ev = FileEvidenceStore(_DEFAULT_EVIDENCE_ROOT, db=session)
         repo = default_repo if default_repo is not None else InspectionRepository()

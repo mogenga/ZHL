@@ -282,3 +282,28 @@ def test_release_wrong_state_409(api_client: Any) -> None:
     session.commit()
     resp = client.post(f"/api/batches/{_BATCH}/release", json={"approved_by": "ZHL-ENG"})
     assert resp.status_code == 409
+
+
+def test_release_evidence_hash_is_stable_real_sha256(api_client: Any) -> None:
+    """C8 regression: the release evidence row's content_hash must be a real
+    sha256 of the evidence content (canonical JSON, sort_keys=True) - stable
+    across recomputation, not a random uuid fragment."""
+    import hashlib
+    import json
+
+    client, session, _ = api_client
+    _seed(session)
+    resp = client.post(f"/api/batches/{_BATCH}/release", json={"approved_by": "ZHL-ENG"})
+    assert resp.status_code == 200 and resp.json()["passed"] is True
+    ev = session.query(Evidence).filter(Evidence.evidence_type == "human_confirmation").one()
+    assert ev.content is not None
+    digest = hashlib.sha256(
+        json.dumps(ev.content, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    assert ev.content_hash == f"sha256:{digest}"
+    assert len(digest) == 64
+    # Stable: recomputing from the same content yields the identical digest.
+    digest2 = hashlib.sha256(
+        json.dumps(ev.content, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    assert digest == digest2

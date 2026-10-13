@@ -144,7 +144,7 @@ def api_client() -> Any:
     session.add(inc)
     session.add(IncidentSnLink(incident_id=_INC, inspection_id=_INSP1))
     session.commit()
-    app = create_app(session_factory=lambda: session)
+    app = create_app(session_factory=lambda: session, own_session=False)
     yield TestClient(app)
     session.close()
     engine.dispose()
@@ -276,7 +276,7 @@ def test_trace_endpoint_returns_batch_trace_rows(api_client: Any) -> None:
         )
     )
     session.commit()
-    app = create_app_with_trace(session_factory=lambda: session)
+    app = create_app_with_trace(session_factory=lambda: session, own_session=False)
     client = TestClient(app)
     r = client.get(f"/api/batches/{batch_id}/traces")
     assert r.status_code == 200, r.text
@@ -285,24 +285,18 @@ def test_trace_endpoint_returns_batch_trace_rows(api_client: Any) -> None:
     engine.dispose()
 
 
-def test_static_mount_removed(api_client: Any) -> None:
-    """The old Phase B static pages (Task 10) are no longer served.
+def test_static_mount_present(api_client: Any) -> None:
+    """The rebuilt UI (frontend rebuild, 2026-10-12) serves ``app/static``.
 
-    ``remove_static.py`` removed the 4 demo HTML pages (incident / assertion /
-    report / trace) and the ``StaticFiles`` mount from ``create_app`` — the UI
-    is being rebuilt separately. Pin the new shape: the /static/ prefix is no
-    longer mounted, so each former page path 404s (not 200, not 500, not a
-    directory listing)."""
-    for page in ("incident.html", "assertion.html", "report.html", "trace.html"):
-        r = api_client.get(f"/static/{page}")
-        assert r.status_code == 404, f"{page} unexpectedly served: {r.status_code}"
-
-
-def test_static_prefix_not_mounted(api_client: Any) -> None:
-    """The bare /static/ prefix itself must 404 (no StaticFiles route left).
-
-    This is the stricter invariant the UI rebuild should rely on: a new set of
-    pages must re-introduce its own mount, and any regression that re-adds the
-    old mount is caught here."""
-    r = api_client.get("/static/")
-    assert r.status_code == 404, f"/static/ prefix still mounted: {r.status_code} {r.text[:120]}"
+    ``create_app(mount_static=True)`` mounts ``StaticFiles`` at ``/static`` and
+    adds a ``GET /`` redirect to ``/static/index.html``. ``/`` no longer 404s;
+    it 302-redirects to the index page, and shared assets (style.css / common.js)
+    are served. Any regression that drops the mount is caught here."""
+    r = api_client.get("/", follow_redirects=False)
+    assert r.status_code in (200, 302), f"/ should serve or redirect: {r.status_code}"
+    r_idx = api_client.get("/static/index.html")
+    assert r_idx.status_code == 200, f"index.html should be served: {r_idx.status_code}"
+    r_css = api_client.get("/static/style.css")
+    assert r_css.status_code == 200, f"style.css should be served: {r_css.status_code}"
+    r_js = api_client.get("/static/common.js")
+    assert r_js.status_code == 200, f"common.js should be served: {r_js.status_code}"

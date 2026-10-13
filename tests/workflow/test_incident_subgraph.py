@@ -112,3 +112,18 @@ def test_recheck_fail_routes_rejected() -> None:
     assert snap.values["reinspection_result"] == "fail"
     # fail routes to rejected_route, which marks the state; no further next node.
     assert snap.values.get("route_marker") == "rejected" or snap.next == ()
+
+
+def test_c9_stub_markers_in_state() -> None:
+    """C9 regression: the pass-through stub nodes must mark themselves in
+    state so trace consumers can store validation_result='stub' instead of
+    mistaking a stub for a real skill output."""
+    graph = build_incident_subgraph(MemorySaver())
+    state = _initial_state()
+    for _ in graph.stream(state, config=_config(), stream_mode="updates"):
+        pass
+    snap = graph.get_state(_config())
+    assert snap is not None
+    # Both stub nodes must have run and marked themselves.
+    assert snap.values.get("hypotheses_source") == "stub"
+    assert snap.values.get("evidence_validation") == "stub"

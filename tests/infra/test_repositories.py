@@ -7,7 +7,7 @@ SQLite in-memory engine + P0 frozen models (cross-DB create_all) +
 - (batch_id, sn) unique within one batch
 - cross-batch same-SN fallback (Review Focus #4: app-layer guard, since
   SQLite has no EXCLUDE)
-- confirm_inspection field-modification semantics
+- confirm_inspection locks measured columns (D7: overrides audit-only)
 - freeze_samples deterministic replay (same seed => same selection)
 - save_conclusion unique key (batch_id, inspection_type, rule_version_id,
   sample_round)
@@ -147,10 +147,41 @@ def test_confirm_inspection_fields(session) -> None:
     ins = InspectionRepository()
     created = ins.create_inspections(s, batch.batch_id, [_row("SN-005")])
     s.flush()
+    original_pmax = created[0].pmax
     confirmed = ins.confirm_inspection(s, created[0].inspection_id, {"pmax": 549.5})
     s.flush()
     assert confirmed.intake_status == "confirmed"
-    assert confirmed.pmax == 549.5
+    # D7: original measured values are immutable — the proposed override is
+    # NOT written back (it is audit-only). pmax keeps its measured value.
+    assert confirmed.pmax == original_pmax
+
+
+def test_confirm_inspection_does_not_overwrite_measured_columns(session) -> None:
+    """D7 regression: confirming with a field override must NOT mutate the
+    measured columns (original values are locked; overrides are audit-only)."""
+    s = session
+    rule = s.query(QualityRuleVersion).first()
+    batch = _make_batch(BatchRepository(), s, "B-003-bis", rule.rule_version_id)
+    s.flush()
+    ins = InspectionRepository()
+    created = ins.create_inspections(
+        s, batch.batch_id, [_row("SN-006", pmax=500.0, im=12.0, ff=0.77)]
+    )
+    s.flush()
+    row = created[0]
+    assert row.pmax == 500.0 and row.im == 12.0 and row.ff == 0.77
+    ins.confirm_inspection(
+        s,
+        row.inspection_id,
+        {"pmax": 549.5, "im": 99.0, "ff": 0.99, "appearance_result": "fail"},
+    )
+    s.flush()
+    assert row.intake_status == "confirmed"
+    # measured values must be unchanged (D7 immutability)
+    assert row.pmax == 500.0
+    assert row.im == 12.0
+    assert row.ff == 0.77
+    assert row.appearance_result == "pass"  # from _row default
 
 
 def test_freeze_samples_deterministic(session) -> None:
