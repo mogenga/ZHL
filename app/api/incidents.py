@@ -84,6 +84,13 @@ class IncidentOut(BaseModel):
     verification_id: uuid.UUID | None
 
 
+class AttributeRequest(BaseModel):
+    """T-1 attribution 3-way request (D9 single-request sync; P1 cross-request)."""
+
+    decision: str  # "adopt" | "reject" | "defer"
+    cause: str | None = None
+
+
 # --- dependency (session) — injected by the app factory in Task 9 ----------
 
 
@@ -97,6 +104,46 @@ def get_session() -> Any:
 
 
 SessionDep = Annotated[Any, Depends(get_session)]
+
+
+def get_llm() -> Any:
+    """Attribution LLM client dependency (T-1).
+
+    Mirrors ``app.main._default_llm_client``: env-configured OpenAI-compatible
+    client when ``ZHL_LLM_API_KEY`` is set, otherwise the deterministic
+    fixture-backed mock pointed at ``tests/fixtures``.
+    """
+    import os
+    from pathlib import Path
+
+    from app.plugins.llm_client import MockLLMClient, OpenAICompatClient
+
+    fixtures = Path(__file__).resolve().parents[2] / "tests" / "fixtures"
+    if os.environ.get("ZHL_LLM_API_KEY", "").strip():
+        return OpenAICompatClient()
+    return MockLLMClient(fixtures)
+
+
+LLMDep = Annotated[Any, Depends(get_llm)]
+
+
+def get_evidence_store(session: SessionDep) -> Any:
+    """Request-scoped evidence store dependency (T-1).
+
+    Bound to the session that owns the transaction (AGENT.md §4.3); the D2
+    gate reads evidence existence through this store. The evidence root is
+    the repo-relative ``data/evidence`` (the ``_DEFAULT_EVIDENCE_ROOT``
+    app.main wires), computed here to avoid importing app.main (circular).
+    """
+    from pathlib import Path
+
+    from app.plugins.evidence_store import FileEvidenceStore
+
+    evidence_root = Path(__file__).resolve().parents[2] / "data" / "evidence"
+    return FileEvidenceStore(evidence_root, db=session)
+
+
+EvidenceStoreDep = Annotated[Any, Depends(get_evidence_store)]
 
 
 # --- helpers --------------------------------------------------------------
@@ -394,3 +441,98 @@ def get_incident(incident_id: uuid.UUID, session: SessionDep) -> IncidentOut:
     if incident is None:
         raise HTTPException(status_code=404, detail="incident_not_found")
     return _to_out(incident)
+
+
+@router.post("/{incident_id}/attribute")
+def attribute_incident(
+    incident_id: uuid.UUID,
+    payload: AttributeRequest,
+    session: SessionDep,
+    llm: LLMDep,
+    evidence_store: EvidenceStoreDep,
+) -> dict:
+    """T-1 AI attribution trigger (single-request 3-way, D9; P1 cross-request).
+
+    AGENT.md §4.3: the LLM call runs outside the transaction (inside the
+    LangGraph node); the business write + trace row commit in one unit.
+    Mock with no fixture key for this incident UUID -> 200 + empty + hint
+    (spec §6 Q3: not a 404/500).
+    """
+    incident = session.get(QualityIncident, incident_id)
+    if incident is None:
+        raise HTTPException(status_code=404, detail="incident_not_found")
+    # D8: archived terminal guard (shared, single call site).
+    require_not_archived(incident.batch_id, session)
+
+    from langgraph.checkpoint.memory import MemorySaver
+    from langgraph.types import Command
+
+    from app.workflow.incident_subgraph import build_incident_subgraph
+
+    attribution_ctx = {
+        "incident": incident,
+        "session": session,
+        "llm": llm,
+        "evidence_store": evidence_store,
+        "trace": TraceStore(),
+    }
+    graph = build_incident_subgraph(
+        MemorySaver(),
+        attribution_ctx=attribution_ctx,
+        reinspection_callable=lambda p: {"result": "pass"},
+    )
+    initial_state = {
+        "incident_id": str(incident.incident_id),
+        "batch_id": str(incident.batch_id),
+        "hypotheses": [],
+        "human_decision": None,
+        "reinspection_result": None,
+        "reinspection_payload": {"scope_type": "minimal", "scope_sns": []},
+    }
+    thread = {"configurable": {"thread_id": f"attr-{uuid.uuid4().hex}"}}
+    try:
+        for _ in graph.stream(initial_state, config=thread, stream_mode="updates"):
+            pass
+        resume = Command(resume={"decision": payload.decision, "cause": payload.cause})
+        for _ in graph.stream(resume, config=thread, stream_mode="updates"):
+            pass
+    except KeyError:
+        # Mock LLM has no fixture key for this incident UUID (spec §6 Q3):
+        # graceful 200 + empty hypotheses + hint.
+        session.rollback()
+        return {
+            "incident_id": str(incident.incident_id),
+            "decision": payload.decision,
+            "hypotheses": [],
+            "confirmed_root_cause": incident.confirmed_root_cause,
+            "hint": "该 incident UUID 在归因 Mock 中无 fixture 键（未知 incident）",
+        }
+
+    snap = graph.get_state(thread)
+    hypotheses = (snap.values.get("hypotheses") if snap else None) or []
+    source = snap.values.get("hypotheses_source") if snap else None
+
+    # Business write: adopt persists the confirmed cause; one transaction.
+    if payload.decision == "adopt":
+        incident.confirmed_root_cause = payload.cause
+    _record_trace(
+        session,
+        incident,
+        "incident_attribute",
+        {"decision": payload.decision, "cause": payload.cause},
+        {
+            "hypotheses": hypotheses,
+            "hypotheses_source": source,
+            "reinspection_result": snap.values.get("reinspection_result") if snap else None,
+        },
+        validation_result="pass" if source == "attribution" else "stub",
+    )
+    session.commit()
+    session.refresh(incident)
+    return {
+        "incident_id": str(incident.incident_id),
+        "decision": payload.decision,
+        "hypotheses": hypotheses,
+        "confirmed_root_cause": incident.confirmed_root_cause,
+        "hint": None,
+    }
