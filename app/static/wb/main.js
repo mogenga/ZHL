@@ -1,4 +1,4 @@
-/* WB.main — 视图状态 + 渲染调度 + URL 参数读写（T1：内置 mock；T2 起接真实数据）
+/* WB.main — 视图状态 + 渲染调度 + URL 参数读写（T2：接真实数据，移除 mock）
    状态→界面映射由纯函数驱动（spec §2）；数据只来自 spec §3 事实表列出的端点。 */
 'use strict';
 
@@ -6,33 +6,14 @@ WB.state = {
   view: 'batch',       // batch | rules | incidents | reports
   batchId: null,       // 当前选中批次（URL ?batch=<id>）
   batches: [],         // 批次列表（左列批次视图）
+  batchesLoading: false,
   selected: null,      // 选中批次详情（getBatch 结果）
+  detailLoading: false,
   ruleVersions: null,  // 规则版本列表（{items, available, reason}）
   incidents: [],       // 全量异常（左列异常视图）
-  reports: [],         // 报告列表（左列报告视图）
+  reports: [],         // 报告列表（左列报告视图，T9 接入）
   traces: [],          // 右栏轨迹（当前批次）
   viewStage: null,     // 流水线回看节点（null = 当前节点）
-};
-
-/* ---- T1 mock（三种批次状态；T2 起移除，替换为 WB.api.listBatches）---- */
-WB.mock = {
-  batches: [
-    { batch_id: 'b1', batch_no: 'B-20261013-001', project_id: 'P-GLM72C', model: 'GLM-72C', status: 'pending_judge', planned_quantity: 26, created_at: '2026-10-13T08:36:00Z' },
-    { batch_id: 'b2', batch_no: 'DIAG-1', project_id: 'P-JH550W', model: 'JH-550W', status: 'pending_intake', planned_quantity: 5, created_at: '2026-10-13T17:49:00Z' },
-    { batch_id: 'b3', batch_no: 'B-V-1', project_id: 'P-JH550W', model: 'JH-550W', status: 'archived', planned_quantity: 2, created_at: '2026-10-09T08:10:00Z' },
-  ],
-  detail: {
-    b1: { batch_id: 'b1', batch_no: 'B-20261013-001', status: 'pending_judge', planned_quantity: 26, rule_version_id: 'rv1', inspections: [], sample_result: null, status_timeline: [{ skill_name: 'intake', started_at: '2026-10-13T09:02:00Z', accepted: true }] },
-    b2: { batch_id: 'b2', batch_no: 'DIAG-1', status: 'pending_intake', planned_quantity: 5, rule_version_id: 'rv1', inspections: [], sample_result: null, status_timeline: [] },
-    b3: { batch_id: 'b3', batch_no: 'B-V-1', status: 'archived', planned_quantity: 2, rule_version_id: 'rv2', inspections: [], sample_result: null, status_timeline: [{ skill_name: 'release', started_at: '2026-10-09T15:30:00Z', accepted: true }] },
-  },
-  ruleVersions: { available: true, items: [
-    { rule_version_id: 'rv1', project_id: 'P-JH550W', model: 'JH-550W', name: 'JH-550W 测试规则', status: 'published', version_no: 2, effective_at: '2026-01-01T00:00:00Z' },
-    { rule_version_id: 'rv2', project_id: 'P-GLM72C', model: 'GLM-72C', name: 'GLM-72C 规则', status: 'published', version_no: 1, effective_at: '2026-01-01T00:00:00Z' },
-  ] },
-  incidents: [],
-  reports: [],
-  traces: {},
 };
 
 /* ---- URL 参数读写（?batch=<id>，刷新恢复选中批次）---- */
@@ -80,6 +61,11 @@ WB._currentPanel = function (detail) {
 WB.renderCenter = function (detail, listitem, panelDom) {
   const main = WB.el('mainPane');
   main.replaceChildren();
+  if (WB.state.detailLoading) {
+    main.append(WB.h('div', { class: 'crumb', text: '工作台 / 批次' }));
+    main.append(WB.h('div', { class: 'card empty', text: '正在加载批次…' }));
+    return;
+  }
   if (!detail) {
     main.append(WB.h('div', { class: 'crumb', text: '工作台 / 批次' }));
     main.append(WB.h('div', { class: 'card empty', text: '从左侧选择批次开始工作' }));
@@ -145,11 +131,14 @@ WB.renderRight = function (detail) {
   const inspections = (detail && detail.inspections) || [];
   const passCnt = inspections.filter((i) => i.decision_status === 'pass').length;
   const failCnt = inspections.filter((i) => i.decision_status === 'fail').length;
+  const kpiBox = (n, label) => WB.h('div', { class: 'box' },
+    WB.h('div', { class: 'n', text: n }),
+    WB.h('div', { class: 'l', text: label }));
   rp.append(WB.h('div', { class: 'mini-kpi' },
-    WB.h('div', { class: 'box' }, WB.h('div', { class: 'n', text: String(passCnt) }), WB.h('div', { class: 'l', text: '判定合格' })),
-    WB.h('div', { class: 'box' }, WB.h('div', { class: 'n', text: String(failCnt) }), WB.h('div', { class: 'l', text: '判定不合格' })),
-    WB.h('div', { class: 'box' }, WB.h('div', { class: 'n', text: detail ? WB.ST_CN[detail.status] : '—' }), WB.h('div', { class: 'l', text: '当前状态' })),
-    WB.h('div', { class: 'box' }, WB.h('div', { class: 'n', text: detail ? String(detail.planned_quantity) : '—' }), WB.h('div', { class: 'l', text: '计划数量' })));
+    kpiBox(String(passCnt), '判定合格'),
+    kpiBox(String(failCnt), '判定不合格'),
+    kpiBox(detail ? WB.ST_CN[detail.status] : '—', '当前状态'),
+    kpiBox(detail ? String(detail.planned_quantity) : '—', '计划数量')));
 };
 
 /* ---- 轨迹时间线（右栏；skill_name 中文名 + 时间 + 结果着色，spec §1.3）---- */
@@ -186,6 +175,12 @@ WB.renderLeft = function () {
   const pane = WB.el('leftView');
   pane.replaceChildren();
   if (WB.state.view === 'batch') {
+    if (WB.state.batchesLoading) { pane.append(WB.h('div', { class: 'empty', text: '加载中…' })); return; }
+    if (WB.state.batchesError) {
+      pane.append(WB.h('div', { class: 'empty', text: WB.errText(WB.state.batchesError) + '（点击重试）' },
+        WB.h('button', { class: 'newbtn', style: 'margin-top:8px', onclick: WB.loadBatches, text: '重试' })));
+      return;
+    }
     pane.append(WB.h('input', { class: 'search', placeholder: '搜索批次号 / 项目 / 型号', oninput: WB._onSearch, value: WB.state._search || '' }));
     const list = WB.state.batches;
     const q = (WB.state._search || '').trim().toLowerCase();
@@ -206,7 +201,10 @@ WB.renderLeft = function () {
   } else if (WB.state.view === 'rules') {
     const rv = WB.state.ruleVersions;
     if (!rv) { pane.append(WB.h('div', { class: 'empty', text: '加载中…' })); return; }
-    if (!rv.available) { pane.append(WB.h('div', { class: 'empty', text: '规则版本数据暂不可用' })); return; }
+    if (!rv.available) {
+      pane.append(WB.h('div', { class: 'empty', text: rv.reason === 'network' ? '规则版本加载失败（网络异常）' : '规则版本数据暂不可用（请先初始化规则库）' }));
+      return;
+    }
     pane.append(WB.h('div', { class: 'group-title', text: '规则版本' }));
     (rv.items || []).forEach((r) => pane.append(WB.h('button', { class: 'batch-item', onclick: () => WB._ruleDrawer(r) },
       WB.h('div', { class: 'no' },
@@ -253,15 +251,32 @@ WB._reportDrawer = function (r) {
     '报告号 ' + r.report_id + ' · 版本 v' + r.version + ' · 生成 ' + WB.fmtTime(r.generated_at) + '\n内容渲染见 T9。');
 };
 
-/* ---- 选中批次：mock 取详情；T3 起接真实 getBatch ---- */
+/* ---- 选中批次：接真实 getBatch + traces（spec §1.4 刷新恢复）---- */
 WB.selectBatch = function (id) {
   WB.state.viewStage = null;
-  const detail = (WB.mock.detail || {})[id] || null;
-  if (detail) WB.state.selected = detail;
   WB.setBatch(id);
+  WB._loadDetail(id);
+};
+WB._loadDetail = function (id) {
+  if (!id) { WB.state.selected = null; WB.state.traces = []; WB._renderCenterAndRight(); return; }
+  WB.state.detailLoading = true;
+  WB._renderCenterAndRight();
+  WB.api.getBatch(id).then(function (res) {
+    if (!res.ok || !WB.state.detailLoading) return;
+    if (!res.ok) { WB.toast(WB.errText(res.error)); }
+    else { WB.state.selected = res.data; }
+    WB.state.detailLoading = false;
+    // 轨迹异步加载（失败不阻断，降级为空）
+    WB.api.listTraces(id).then(function (t) {
+      if (!WB.state.batchId || WB.state.batchId !== id) return;
+      WB.state.traces = t.ok ? t.data : [];
+      if (WB.state.view === 'batch') WB._renderCenterAndRight();
+    });
+    WB._renderCenterAndRight();
+  });
 };
 
-/* ---- 新建批次（T3 实现表单；T1 占位）---- */
+/* ---- 新建批次（T3 实现表单；T2 占位）---- */
 WB._onNewBatch = function () {
   if (WB.newBatchForm) WB.newBatchForm();
   else WB.toast('新建批次表单见 T3');
@@ -273,22 +288,58 @@ WB._renderCenterAndRight = function () {
   WB.renderRight(WB.state.selected);
 };
 WB._onSelectedChanged = function () {
+  // 点击列表项（setBatch 触发）：若选中未变仅重渲染；已变则异步加载
   if (WB.state.selected && WB.state.selected.batch_id === WB.state.batchId) {
     WB._renderCenterAndRight();
-    return;
+  } else if (WB.state.batchId) {
+    WB._loadDetail(WB.state.batchId);
+  } else {
+    WB.state.selected = null;
+    WB.state.traces = [];
+    WB._renderCenterAndRight();
   }
-  WB.state.selected = (WB.mock.detail || {})[WB.state.batchId] || null;
-  WB._renderCenterAndRight();
 };
 
-/* ---- 启动：读 URL → 加载 mock → 绑定 ---- */
+/* ---- 数据加载（T2：批次列表 / 规则库 / 异常 / 轨迹）---- */
+WB.loadBatches = function () {
+  WB.state.batchesLoading = true;
+  WB.renderLeft();
+  return WB.api.listBatches().then(function (res) {
+    WB.state.batchesLoading = false;
+    if (res.ok) { WB.state.batches = res.data; }
+    else { WB.state.batches = []; /* 行内错误由 renderLeft 读取 */ }
+    WB.state.batchesError = res.ok ? null : res.error;
+    WB.renderLeft();
+    return res;
+  });
+};
+WB.loadRuleVersions = function () {
+  return WB.api.listRuleVersions().then(function (res) {
+    if (res.ok) WB.state.ruleVersions = res.data;
+    else WB.state.ruleVersions = { items: [], available: false, reason: 'network' };
+    if (WB.state.view === 'rules') WB.renderLeft();
+    return res;
+  });
+};
+WB.loadIncidents = function () {
+  return WB.api.listIncidents().then(function (res) {
+    WB.state.incidents = res.ok ? res.data : [];
+    if (WB.state.view === 'incidents') WB.renderLeft();
+    return res;
+  });
+};
+
+/* ---- 启动：读 URL → 加载真实数据 → 绑定 → 恢复选中批次 ---- */
 WB.boot = function () {
   WB._readUrl();
-  WB.state.batches = WB.mock.batches;
-  WB.state.ruleVersions = WB.mock.ruleVersions;
-  WB.state.selected = (WB.mock.detail || {})[WB.state.batchId] || null;
   WB._bindLeftTabs();
-  WB._renderCenterAndRight();
+  // 并行加载三类数据
+  WB.loadBatches();
+  WB.loadRuleVersions();
+  WB.loadIncidents();
+  // 恢复 URL 选中批次
+  if (WB.state.batchId) WB._onSelectedChanged();
+  else WB._renderCenterAndRight();
   WB.renderLeft();
 };
 WB.boot();

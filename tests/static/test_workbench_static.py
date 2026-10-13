@@ -9,8 +9,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-WB_FILES = ["workbench.html", "wb.css", "wb/ui.js", "wb/main.js"]
+WB_FILES = ["workbench.html", "wb.css", "wb/ui.js", "wb/api.js", "wb/main.js"]
 ROOT = Path(__file__).resolve().parents[2] / "app" / "static"
+
+
+def test_api_js_served_by_html():
+    html = (ROOT / "workbench.html").read_text(encoding="utf-8")
+    assert 'src="/static/wb/api.js"' in html, "api.js 未在 workbench.html 中加载"
+    assert html.index("wb/ui.js") < html.index("wb/api.js") < html.index("wb/main.js"), "脚本加载顺序应为 ui.js → api.js → main.js"
 
 
 def test_no_native_dialogs():

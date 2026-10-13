@@ -1,7 +1,10 @@
 /* WB.ui — DOM 构建 / toast / modal / drawer（spec §6.2 原生 JS，全局命名空间 WB，沿用 ZHL 模式） */
 'use strict';
 
-const WB = (typeof WB !== 'undefined' ? WB : {});
+/* 首个脚本创建全局 WB。用 window 上的对象属性（而非顶层 const/let）跨脚本共享：
+   后续 api.js / main.js 直接引用 WB。多文件同页下若各写 `const WB` 会在共享
+   全局词法环境里「重复声明」直接 SyntaxError，故命名空间挂在 window.WB 上。 */
+var WB = (typeof window !== 'undefined' ? (window.WB = window.WB || {}) : (globalThis.WB = globalThis.WB || {}));
 
 /* ---- h()：轻量 DOM 构建（attrs 支持 class/text/事件回调/其他属性，kids 支持数组嵌套） */
 WB.h = function h(tag, attrs, ...kids) {
