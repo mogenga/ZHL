@@ -24,16 +24,20 @@
           </select>
         </div>
       </div>
+      <!-- 技术信息（维护者参考，不渲染到界面）：
+           生成报告 = POST /api/batches/{batch_id}/report
+           加载报告列表 = GET /api/batches/{batch_id}/reports
+           查看指定报告 = GET /api/batches/{batch_id}/reports/{report_id} -->
       <div style="margin-top:12px; display:flex; gap:10px">
-        <button class="btn" id="doGenerate">生成报告（POST .../report）</button>
-        <button class="btn ghost" id="doList">加载报告列表（GET .../reports）</button>
+        <button class="btn" id="doGenerate">生成报告</button>
+        <button class="btn ghost" id="doList">加载报告列表</button>
       </div>
       <div id="generateResult"></div>
       <div id="listResult"></div>
     </div>
 
     <div class="card">
-      <h3>查看指定报告（GET .../reports/{report_id}）</h3>
+      <h3>查看指定报告</h3>
       <div class="form-grid">
         <div><label for="rpViewId">报告 ID（UUID）</label><input type="text" id="rpViewId"></div>
       </div>
@@ -56,8 +60,9 @@
     if (pre.value) {
       document.getElementById("rpBatch").value = pre.value;
       if (pre.from === "local") {
+        // UUID 不在正文全量显示（对质检员无意义），只示前 8 位 + …，完整值放 title 悬浮。
         document.querySelector(".form-grid").insertAdjacentHTML(
-          "afterend", `<div class="note info" style="margin:8px 0">批次 ID 已自动带入上次上下文（${escapeHtml(pre.value)}），可修改。</div>`
+          "afterend", `<div class="note info" style="margin:8px 0" title="批次 ID 已自动带入上次上下文：${escapeHtml(pre.value)}">批次 ID 已自动带入上次上下文（${escapeHtml(String(pre.value).slice(0, 8))}…，<span class="muted">鼠标悬浮查看完整 ID</span>），可修改。</div>`
         );
       }
     }
