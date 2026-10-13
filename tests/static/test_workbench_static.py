@@ -32,7 +32,8 @@ def test_api_js_served_by_html():
 def test_no_native_dialogs():
     for f in WB_FILES:
         src = (ROOT / f).read_text(encoding="utf-8")
-        for banned in ("alert(", "prompt(", "confirm("):
+        for banned in ("window.alert(", "window.prompt(", "window.confirm(",
+                       "alert(", "prompt(", "confirm("):
             assert banned not in src, f"{f} 使用了原生对话框 {banned}"
 
 
