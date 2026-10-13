@@ -106,8 +106,7 @@
       const hyp = d.root_cause_hypotheses;
       let hypHtml;
       if (!hyp) {
-        hypHtml = `<div class="note todo"><strong>TODO：</strong>AI 归因假设接口未实现。后端尚未生成假设（root_cause_hypotheses 为空）。<br>
-        需求 FR-3.2 要求结构化假设排序 + 证据引用 + 置信度；当前请人工填写根因。</div>`;
+        hypHtml = `<div class="note info"><strong>尚无假设</strong> —— 点「AI 归因」生成假设，或在下方选择采纳 / 驳回 / 修改后提交。</div>`;
       } else {
         hypHtml = `<h3>AI 归因假设排序</h3>${ZHL.evidenceBlock(hyp)}`;
       }
@@ -130,7 +129,21 @@
           </table>
         </div>
 
-        <div class="card" style="margin-bottom:14px">${hypHtml}</div>
+        <div class="card" style="margin-bottom:14px">${hypHtml}
+          <div class="form-grid" style="margin-top:10px">
+            <div><label for="attrDecision">归因三选一（D9）</label>
+              <select id="attrDecision">
+                <option value="adopt">采纳（写确认根因）</option>
+                <option value="reject">驳回</option>
+                <option value="defer">修改 / 暂缓</option>
+              </select>
+            </div>
+            <div class="field-full"><label for="attrCause">归因结论 / 根因描述（adopt 时必填）</label>
+              <input type="text" id="attrCause" placeholder="如：电芯虚焊导致 Impp 漂移，建议重焊 3-cell 串"></div>
+          </div>
+          <div style="margin-top:12px"><button class="btn" id="doAttribute">AI 归因</button></div>
+          <div id="attributeResult"></div>
+        </div>
 
         <div class="card" style="margin-bottom:14px">
           <h3>复检记录 ID</h3>
@@ -147,6 +160,7 @@
 
       document.getElementById("doAssign").addEventListener("click", doAssign);
       document.getElementById("doCapa").addEventListener("click", doCapa);
+      document.getElementById("doAttribute").addEventListener("click", doAttribute);
     }
 
     const assignGuard = ZHL.guardSubmit(document.getElementById("doAssign"), "提交中…");
@@ -164,6 +178,40 @@
         const r = await ZHL.request("POST", `/api/incidents/${encodeURIComponent(id)}/assign`, body, box);
         if (r.ok) {
           box.set(`<div class="note ok">指派成功，异常 → 已指派，批次 → 待处置。</div>`);
+          loadIncident();
+        }
+      });
+    }
+
+    const attrGuard = ZHL.guardSubmit(document.getElementById("doAttribute"), "归因中…");
+    async function doAttribute() {
+      attrGuard.run(async () => {
+        const box = ZHL.mount(document.getElementById("attributeResult"), "归因中…");
+        const id = document.getElementById("xIncident").value.trim();
+        if (!id) { box.fail(0, "请先加载异常。"); return; }
+        const decision = document.getElementById("attrDecision").value;
+        const cause = document.getElementById("attrCause").value.trim();
+        if (decision === "adopt" && !cause) {
+          box.fail(0, "采纳（adopt）需填写归因结论 / 根因描述。");
+          return;
+        }
+        const r = await ZHL.request(
+          "POST",
+          `/api/incidents/${encodeURIComponent(id)}/attribute`,
+          { decision, cause: cause || null },
+          box,
+        );
+        if (r.ok) {
+          const d = r.data;
+          if (d.hint) {
+            box.set(`<div class="note info">${escapeHtml(d.hint)}<br>无匹配归因 fixture（Mock 中无该 incident 的假设）。</div>`);
+          } else {
+            box.set(
+              `<div class="note ok">归因三选一已提交（${escapeHtml(d.decision)}）。` +
+              (d.hypotheses && d.hypotheses.length ? " 已生成假设，见上方排序。" : "") +
+              `</div>`,
+            );
+          }
           loadIncident();
         }
       });
