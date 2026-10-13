@@ -534,3 +534,45 @@
   2. 3 个可达镜像 2 小时内可能再次失效，`docker pull` 报错时删对应 URL
   3. 手册"场景 C"提醒：回退 002 三列前，应用层 Phase B API 的
      "创建复检必须显式传 scope_sns" 校验会随列失效，需同步切回 pre-PB 行为
+
+
+---
+
+## 2026-10-13 · T-1 + T-3 · 归因触发 + 人工拒绝 全 7-task 实现收口（dev-notes finish 节点，AGENT.md §1.4 四要素）
+
+### 关键原话
+- 用户："按superpowers流程实现" → 选定 Native 内联执行（executing-plans），非 subagent
+- 用户拍板两项边界：T-1 走**方案 A**（子图接线真 `AttributionSkill` + 触发端点）；T-3 拒绝路由**生成 incident 报告（D7）+ 同事务自动归档（D6a）**（"rejected 本就可归档，终态一致"）
+- spec 定稿（`docs/superpowers/specs/2026-10-13-attribution-reject-design.md`，builder-check 4 条 blocking 全部裁决入 §6）；plan（`docs/superpowers/plans/2026-10-13-attribution-reject-implementation.md`，7 TDD task）
+
+### 关键产出（7 task 提交链，基线 `fb1f5a2` plan commit）
+| Task | 提交 | 产出路径 |
+| --- | --- | --- |
+| 1 子图接线真归因 Skill | `4054362` | `app/workflow/incident_subgraph.py`（`attribution_ctx` 闭包工厂 `_make_generate_hypotheses`/`_make_validate_evidence`，三态 hypotheses_source：seeded/attribution/stub） |
+| 2 归因 fixture UUID 键 | `686565f` + `e2938b1` | `tests/fixtures/mock_llm_attribution.json` 追加 `8f6e2a10-…` 键（frozen INC-001/INC-004 字节不动） |
+| 3 归因触发端点 | `a1f2882` | `app/api/incidents.py` 加 `POST /api/incidents/{id}/attribute`（单请求三选一：adopt/reject/defer + cause，MemorySaver 同步跑子图，D8 409 / 未知 incident 空假设+hint） |
+| 4 前端 AI 归因按钮 | `18270bc` | `app/static/incident.html` 接「AI 归因」按钮 + 三选一交互（替换 unimplemented-TODO 占位） |
+| 5 D6a 自动归档共享 helper | `4d717cc` | `app/api/_archival.py::auto_archive_if_terminal(session,batch)`（单一调用点）+ `reports.py` L149-154 内联块改为调用 |
+| 6 人工拒绝端点 | `2a8e851` | `app/api/release.py` 加 `POST /api/batches/{id}/reject`（D7 生成 incident 报告 + D6a 自动归档，同事务） |
+| 7 前端人工拒绝按钮 | `aa143bc` | `app/static/release.html` 补「人工拒绝交付」卡片（替换 unimplemented-TODO 占位） |
+
+### 验证（原始输出，非手写）
+- `uv run pytest -q` → **全绿（0 失败，含本分支新增 test_incident_attribute 4 / test_archival 4 / test_release_reject 4 / test_llm_client 2 / test_incident_subgraph 8 共 22 新用例）**
+- `uv run ruff check .` → 仅 pre-existing `scripts/md2html.py:67 E501`（非本分支改动面）；本分支 9 个 Python 文件 `ruff check` 全绿
+- `uv run black --check .` → 仅 pre-existing `alembic/002` + `scripts/md2html.py` 2 个 target（非本分支）；本分支文件全绿
+- 冻结契约：`git diff fb1f5a2..HEAD -- app/domain/ app/infra/models.py migrations/001_init.sql` → **零变更**；`tests/fixtures/` 仅 additive UUID 键（frozen 键字节不变，`test_phase_b_frozen_keys_survive_uuid_add` 锁定）
+
+### 拒绝与纠偏（review/builder-check 驳回项）
+- builder-check 4 条 blocking 全部在 spec §6 裁决后才进 plan（单请求三选一非跨请求 interrupt；拒绝即终态故 D6a 自动归档；未知 incident 200+空假设+hint 非 404/500；adopt 必写 confirmed_root_cause）
+- **D2 门 evidence-id 不匹配（本分支最大返工点）**：初版 UUID 键 fixture 沿用 INC-001 风格用 `EV-ATT-*` 标签，但 `FileEvidenceStore.save` 派生 36-char uuid 形 id，`TraceabilityPlugin.validate_evidence` 的 `store.get(eid)` 对标签抛 KeyError → 假设被 D2 门全部丢弃（`hypos==[]`）。**修复**：UUID 键 `evidence_ids` 改为派生 36-char id（`eb356f43…` 等），与 `test_incident_attribute.py::_seed_evidence` 一致；INC-001/INC-004 frozen 键保留标签（未过 D2 门，仅 gate 输入形）
+- `transition()` preconditions 形误用：初版传 `{"human_rejected"}`（set 字面量）→ `AttributeError: 'set' object has no attribute 'get'`；改 `{"human_rejected": True}`（dict，state_machine 期望 dict 取 truthy 值）
+
+### 翻车与返工
+- PowerShell `Set-Content` 数组拼插入 `incidents.py` 中段曾吞掉 50+ 行端点函数体（含 isolate/assign/capa）→ `git checkout` 还原 + 改为**文件末尾追加**（端点一律 append，不再中段 splice）
+- PowerShell heredoc / `python -c` 多行 CJK+引号反复失败 → 一律写临时 `_tmp_*.py` + `uv run python` + 跑完即删
+- ruff `--fix` 误删 `incidents.py` 的 `transition`/`Reinspection` import（实际被 isolate/capa 端点引用）→ 还原全文件后 ruff 未再误删（本分支 release.py reject 端点 `transition` 为合法使用，保留）
+
+### 已知遗留（非本分支范围，未扩大）
+1. **真实 LLM 归因未接入**：`AttributionSkill` 走 `MockLLMClient` 固定 fixture（R4）；真实 LLM 抽取/归因属 P1（总 spec §9.1），本分支仅把接线路径打通，Mock 路由键为 incident UUID 形
+2. **incident subgraph 的 `human_adopt` interrupt 仍为 P1 跨请求**：本分支触发端点用 MemorySaver 单请求同步 resume，子图内 `interrupt()` 节点保留未删（P1 跨请求续跑时启用 PG Checkpointer）
+3. **frontend T-5 静态 state.html 漂移风险**（P2，`docs/superpowers/plans/2026-10-13-frontend-todos.md` 登记）未在本分支处理
