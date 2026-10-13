@@ -21,8 +21,8 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from app.api._archival import auto_archive_if_terminal
 from app.api.guards import require_not_archived
-from app.domain.state_machine import transition
 from app.infra.models import (
     DeliveryBatch,
     Report,
@@ -137,21 +137,9 @@ def create_report(batch_id: uuid.UUID, payload: ReportCreate, session: SessionDe
         generated_at=datetime.now(UTC),
     )
 
-    # D6a: auto-archive in the SAME transaction as the report write.
-    #
-    # D6a invariant: the ("released","archived") / ("rejected","archived")
-    # state-machine edges MUST keep an EMPTY precondition. If a precondition
-    # is ever added to these edges in app/domain/state_machine.py, the
-    # transition(..., "archived", {}, ...) call below will return
-    # accepted=False, the batch will silently stay non-archived, and the
-    # report will still commit with no error raised. Keep this comment in
-    # sync with any future Phase 0 state_machine.py change.
-    archived = False
-    if batch.status in ("released", "rejected"):
-        res = transition(batch.status, "archived", {}, kind="batch")
-        if res.accepted:
-            batch.status = "archived"
-            archived = True
+    # D6a: auto-archive in the SAME transaction as the report write, via the
+    # shared helper (single call site, also used by the reject route).
+    archived = auto_archive_if_terminal(session, batch)
 
     _record_trace(session, batch_id, payload.report_type, report.version, archived)
     session.commit()
