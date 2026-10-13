@@ -45,8 +45,10 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from app.api._archival import auto_archive_if_terminal
 from app.api.guards import require_not_archived
 from app.domain.release import assert_release
+from app.domain.state_machine import transition
 from app.domain.types import (
     BatchView,
     CapaView,
@@ -67,6 +69,7 @@ from app.infra.models import (
     SampleConclusion,
 )
 from app.plugins.trace_store import TraceStore
+from app.skills.report_skill import ReportSkill
 
 router = APIRouter(prefix="/api/batches", tags=["release"])
 
@@ -81,6 +84,19 @@ class ReleaseResponse(BaseModel):
     status: str
     release_decision: str
     checks: list[dict]
+
+
+class RejectRequest(BaseModel):
+    reason: str
+    rejected_by: str
+
+
+class RejectResponse(BaseModel):
+    batch_id: uuid.UUID
+    status: str
+    auto_archived: bool
+    reason: str
+    report_id: uuid.UUID | None
 
 
 def get_session() -> Any:
@@ -414,4 +430,81 @@ def release_batch(
         status=batch.status,
         release_decision=batch.release_decision,
         checks=[{"name": c.name, "passed": c.passed, "reason": c.reason} for c in result.checks],
+    )
+
+
+@router.post("/{batch_id}/reject", response_model=RejectResponse)
+def reject_batch(
+    batch_id: uuid.UUID, payload: RejectRequest, session: SessionDep
+) -> RejectResponse:
+    """Manual reject (D7 + D6a): record the rejection, generate the incident
+    disposal report and auto-archive the batch — all in one transaction.
+
+    D8: an already-archived batch is 409. Any other non-archived batch can be
+    rejected; the state-machine ``rejected`` edge then (D6a, empty
+    precondition) auto-transitions it to ``archived`` in the same tx.
+    """
+    batch = session.get(DeliveryBatch, batch_id)
+    if batch is None:
+        raise HTTPException(status_code=404, detail="batch_not_found")
+
+    # D8: archived is terminal.
+    require_not_archived(batch_id, session)
+
+    # D7: a rejected batch only allows the incident (disposal) report type —
+    # the reject action itself is that incident report, so D7 is satisfied by
+    # construction.
+    res = transition(batch.status, "rejected", {"human_rejected": True}, kind="batch")
+    if not res.accepted:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "batch_reject_not_allowed",
+                "from_status": batch.status,
+                "reason": res.reason,
+            },
+        )
+    batch.status = "rejected"
+
+    # D7: generate the incident disposal report in the SAME transaction.
+    skill = ReportSkill()
+    report = skill.generate(
+        session,
+        batch_id,
+        "incident",
+        generated_at=datetime.now(UTC),
+    )
+
+    # D6a: auto-archive the now-rejected batch in the SAME transaction.
+    auto_archived = auto_archive_if_terminal(session, batch)
+
+    # D1: the three-layer trace (trace row + the report's evidence + report).
+    TraceStore().record(
+        session,
+        task_id=str(uuid.uuid4()),
+        batch_id=batch_id,
+        skill_name="reject",
+        input_ref={"kind": "batch", "id": batch.batch_no},
+        plugins_invoked=["report_skill", "auto_archive"],
+        params_summary={
+            "reason": payload.reason,
+            "rejected_by": payload.rejected_by,
+            "auto_archived": auto_archived,
+        },
+        model_version=None,
+        structured_output={"status": batch.status, "report_id": str(report.report_id)},
+        validation_result="pass",
+        failure_reason=None,
+        human_action="rejected",
+        started_at=datetime.now(UTC),
+        finished_at=None,
+    )
+    session.commit()
+    session.refresh(report)
+    return RejectResponse(
+        batch_id=batch_id,
+        status=batch.status,
+        auto_archived=auto_archived,
+        reason=payload.reason,
+        report_id=report.report_id,
     )
