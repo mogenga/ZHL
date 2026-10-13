@@ -38,9 +38,15 @@
       <p class="note warn" style="margin-bottom:0">批次非 待放行 状态时后端 409；已归档 批次 409（终态）。</p>
     </div>
 
-    <div class="note todo">
-      <strong>TODO：</strong>「人工拒绝交付（任意非归档 → 已拒绝）」后端接口未实现（无 POST .../reject 路由）。
-      质量工程师主动拒绝交付需走数据库/状态机层，暂不在前端提供入口。
+    <div class="card" id="rejectForm">
+      <h3>人工拒绝交付（任意非归档 → 已拒绝 → 自动归档）</h3>
+      <p class="muted">质量工程师主动拒绝交付：记录拒绝原因 + 人工留痕，同事务生成 事故处置报告（D7）并自动归档批次（D6a）。</p>
+      <div class="form-grid">
+        <div><label for="rejReason">拒绝原因 reason（必填）</label><input type="text" id="rejReason" placeholder="如：复检全批不合格，拒绝交付"></div>
+        <div><label for="rejBy">拒绝人 rejectedBy（必填，留痕）</label><input type="text" id="rejBy" placeholder="质量工程师姓名"></div>
+      </div>
+      <div style="margin-top:12px"><button class="btn" id="doReject">人工拒绝交付</button></div>
+      <div id="rejectResult"></div>
     </div>
   </div>
 
@@ -60,6 +66,30 @@
     }
 
     /* 提交按钮防重提交 */
+    const rejectGuard = ZHL.guardSubmit(document.getElementById("doReject"), "拒绝中…");
+    document.getElementById("doReject").addEventListener("click", () => {
+      rejectGuard.run(async () => {
+        const box = ZHL.mount(document.getElementById("rejectResult"), "拒绝中…");
+        const batchId = document.getElementById("relBatch").value.trim();
+        const reason = document.getElementById("rejReason").value.trim();
+        const rejectedBy = document.getElementById("rejBy").value.trim();
+        if (!batchId) { box.fail(0, "请填写批次 ID。", "无批次上下文：可回首页批次列表点击「进入」，或直接粘贴批次 UUID 后重试。"); return; }
+        if (!reason) { box.fail(0, "拒绝原因为必填。"); return; }
+        if (!rejectedBy) { box.fail(0, "拒绝人为必填（人工留痕）。"); return; }
+
+        const r = await ZHL.request("POST", `/api/batches/${encodeURIComponent(batchId)}/reject`, { reason, rejected_by: rejectedBy }, box);
+        if (!r.ok) return;
+        const d = r.data;
+        ZHL.remember("batch", batchId);
+        box.set(`
+          <div class="note ok">批次 <span class="mono">${escapeHtml(d.batch_id)}</span> 已人工拒绝${d.auto_archived ? "并自动归档" : ""}。
+          原因：${escapeHtml(d.reason)} · 拒绝人：${escapeHtml(rejectedBy)}。</div>
+          <div class="item-list" style="margin-top:8px">
+            <div class="item-row"><span>查看批次轨迹</span><a class="btn ghost" href="trace.html?batchId=${encodeURIComponent(batchId)}">看轨迹</a></div>
+          </div>`);
+      });
+    });
+
     const releaseGuard = ZHL.guardSubmit(document.getElementById("doRelease"), "执行放行断言中…");
     document.getElementById("doRelease").addEventListener("click", () => {
       releaseGuard.run(async () => {
