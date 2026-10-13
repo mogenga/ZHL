@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>批次工作台 · 质慧链光伏检验数字化平台</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/wb.css">
+</head>
+<body>
+<div class="frame">
+  <div class="topbar">
+    <div class="brand"><span class="logo">质</span>质慧链 · 批次工作台</div>
+    <span class="env">光伏检验数字化平台</span>
+    <button id="newBatchBtn" style="margin-left:auto">＋ 新建批次</button>
+  </div>
+
+  <div class="body">
+    <!-- 左：四视图切换 -->
+    <aside class="col left" id="leftPane">
+      <div class="ltabs" role="tablist">
+        <button data-view="batch" class="on">批次</button>
+        <button data-view="rules">规则库</button>
+        <button data-view="incidents">异常</button>
+        <button data-view="reports">报告</button>
+      </div>
+      <div id="leftView"></div>
+    </aside>
+
+    <!-- 中：批次头 + 流水线 + 节点面板 -->
+    <main class="col center" id="mainPane"></main>
+
+    <!-- 右：轨迹 + 关键指标 -->
+    <aside class="col right" id="rightPane"></aside>
+  </div>
+
+  <div class="footer">
+    <span style="font-size:12px;color:var(--ink3)">质慧链 · 让每一件组件的检验过程可追溯</span>
+  </div>
+</div>
+
+<div class="mask" id="mask"></div>
+<aside class="drawer" id="drawer" aria-label="详情抽屉">
+  <header><span id="drawerTitle">详情</span><button id="drawerClose" aria-label="关闭">✕</button></header>
+  <div class="bd" id="drawerBody"></div>
+</aside>
+<div class="toast" id="toast" role="status"></div>
+
+<script src="/static/wb/ui.js"></script>
+<script src="/static/wb/main.js"></script>
+</body>
+</html>
