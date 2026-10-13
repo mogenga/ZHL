@@ -13,6 +13,7 @@ const intake = read('stages/intake.js');
 const judge = read('stages/judge.js');
 const incident = read('stages/incident.js');
 const reinspection = read('stages/reinspection.js');
+const release = read('stages/release.js');
 
 // ---- browser-like DOM shim ----
 function el(id) {
@@ -64,6 +65,7 @@ try {
   vm.runInContext(judge, ctx, { filename: 'judge.js' });
   vm.runInContext(incident, ctx, { filename: 'incident.js' });
   vm.runInContext(reinspection, ctx, { filename: 'reinspection.js' });
+  vm.runInContext(release, ctx, { filename: 'release.js' });
 } catch (e) { threw = e; }
 assert(threw === null, 'three <script> tags share global without redeclaration crash' + (threw ? ' -> ' + threw.message : ''));
 if (threw) { console.log('\n' + failed + ' FAILED'); process.exit(1); }
@@ -106,6 +108,10 @@ assert(typeof WB.api.createIncident === 'function', 'WB.api.createIncident prese
 assert(WB.stages._byIndex[3] === WB.stages.reinspection, 'reinspection stage registered at index 3 (T7)');
 assert(typeof WB.api.createReinspection === 'function', 'WB.api.createReinspection present (T7)');
 assert(typeof WB.api.listReinspections === 'function', 'WB.api.listReinspections present (T7)');
+assert(WB.stages._byIndex[4] === WB.stages.release, 'release stage registered at index 4 (T8)');
+assert(typeof WB.api.releaseBatch === 'function', 'WB.api.releaseBatch present (T8)');
+assert(typeof WB.api.rejectBatch === 'function', 'WB.api.rejectBatch present (T8)');
+assert(typeof WB.api.generateReport === 'function', 'WB.api.generateReport present (T8)');
 // newBatchForm with no rule versions should disable submit (not throw)
 try {
   WB.state.ruleVersions = null; // force the disabled branch

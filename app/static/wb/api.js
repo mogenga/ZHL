@@ -229,4 +229,29 @@ WB.api = {
       return { ok: true, data: r.data || [] };
     });
   },
+  /* T8：放行/拒绝/报告 */
+  releaseBatch(batchId, approvedBy) {
+    return WB.api.request('POST', '/api/batches/' + batchId + '/release', { approved_by: approvedBy }).then(function (r) {
+      if (!r.ok) return { ok: false, error: r.error, data: null };
+      return { ok: true, data: r.data };
+    });
+  },
+  rejectBatch(batchId, reason, rejectedBy) {
+    return WB.api.request('POST', '/api/batches/' + batchId + '/reject', { reason: reason, rejected_by: rejectedBy }).then(function (r) {
+      if (!r.ok) return { ok: false, error: r.error, data: null };
+      return { ok: true, data: r.data };
+    });
+  },
+  generateReport(batchId) {
+    return WB.api.request('POST', '/api/batches/' + batchId + '/report').then(function (r) {
+      if (!r.ok) return { ok: false, error: r.error, data: null };
+      return { ok: true, data: r.data };
+    });
+  },
+  listReports(batchId) {
+    return WB.api.request('GET', '/api/batches/' + batchId + '/reports').then(function (r) {
+      if (!r.ok) return { ok: false, error: r.error, data: [] };
+      return { ok: true, data: r.data || [] };
+    });
+  },
 };
