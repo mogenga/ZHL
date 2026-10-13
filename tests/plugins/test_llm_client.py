@@ -96,6 +96,42 @@ def test_phase_b_mock_unknown_incident_raises() -> None:
         client.chat(_prompt("INC-999"), schema={})
 
 
+# T2 UUID-shaped fixture key: consumed by the T-1 attribute endpoint (Task 3)
+# via a UUID incident, pin-verified here at the client routing level.
+_T2_UUID_INCIDENT = "8f6e2a10-0000-4000-8000-0000000000aa"
+# Frozen keys (must survive Task 2's add-only change untouched).
+_FROZEN_KEYS = ["INC-001", "INC-004"]
+
+
+def test_phase_b_mock_routes_by_uuid_incident() -> None:
+    """Task 2: MockLLMClient routes a UUID incident_id to the UUID fixture key.
+
+    Pin: incident_id=8f6e2a10-...-aa -> that key's hypothesis block; every
+    returned hypothesis carries the {cause, confidence, evidence_ids,
+    recommended_action} shape, and the D2 gate sees >=1 with-evidence
+    hypothesis (the endpoint will rely on "not always empty").
+    """
+    client = MockLLMClient(fixture_path=_ATTRIBUTION)
+    out = client.chat(_prompt(_T2_UUID_INCIDENT), schema={})
+    assert "hypotheses" in out
+    assert out["hypotheses"], "UUID key must carry >=1 hypothesis"
+    for h in out["hypotheses"]:
+        assert set(h) == {"cause", "confidence", "evidence_ids", "recommended_action"}
+
+
+def test_phase_b_frozen_keys_survive_uuid_add() -> None:
+    """Task 2 regression: the add-only UUID key must leave INC-001 / INC-004
+    byte-identical (the frozen Phase B contract) and coexist with them."""
+    client = MockLLMClient(fixture_path=_ATTRIBUTION)
+    fixture = json.loads(_ATTRIBUTION.read_text(encoding="utf-8"))
+    for key in _FROZEN_KEYS:
+        assert key in fixture, "frozen key vanished: %r" % key
+        out = client.chat(_prompt(key), schema={})
+        assert out == fixture[key], "frozen key %r routing changed" % key
+    # The UUID key coexists with the frozen keys.
+    assert _T2_UUID_INCIDENT in fixture
+
+
 def test_phase_b_mock_returns_hypotheses_shape() -> None:
     client = MockLLMClient(fixture_path=_ATTRIBUTION)
     out = client.chat(_prompt("INC-004"), schema={})
