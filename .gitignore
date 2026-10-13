@@ -1,4 +1,4 @@
-# IDE / editor
+﻿# IDE / editor
 .idea/
 .vscode/
 *.iml
@@ -31,3 +31,6 @@ data/evidence/*
 # SQLite fallback artifacts (fail-fast: ZHL_DATABASE_URL must be set via .env)
 *.db
 *.db-journal
+
+# Isolated worktrees for feature work (git-worktrees skill)
+.worktrees/
