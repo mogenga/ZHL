@@ -83,13 +83,13 @@ WB.stages.intake = (function () {
     }
     // 操作按钮
     const actions = WB.h('div', { class: 'actions' },
-      WB.h('button', { class: 'primary', onclick: () => _confirm(batch, 'confirm'), text: '确认入场' }),
-      WB.h('button', { class: 'danger', onclick: () => _confirm(batch, 'reject'), text: '拒绝入场' }),
+      WB.h('button', { class: 'primary', onclick: () => _intakeAct(batch, 'confirm'), text: '确认入场' }),
+      WB.h('button', { class: 'danger', onclick: () => _intakeAct(batch, 'reject'), text: '拒绝入场' }),
       WB.h('button', { onclick: () => WB._loadDetail(batch.batch_id), text: '重新提交' }));
     body.append(actions);
   }
 
-  function _confirm(batch, action) {
+  function _intakeAct(batch, action) {
     WB.api.confirmIntake(batch.batch_id, { action: action, fields: null }).then(function (res) {
       if (!res.ok) { WB.toast(WB.errText(res.error)); return; }
       WB.toast(action === 'confirm' ? '已确认入场' : '已拒绝入场，批次仍待入场');
