@@ -125,9 +125,9 @@ def test_phase_b_frozen_keys_survive_uuid_add() -> None:
     client = MockLLMClient(fixture_path=_ATTRIBUTION)
     fixture = json.loads(_ATTRIBUTION.read_text(encoding="utf-8"))
     for key in _FROZEN_KEYS:
-        assert key in fixture, "frozen key vanished: %r" % key
+        assert key in fixture, f"frozen key vanished: {key!r}"
         out = client.chat(_prompt(key), schema={})
-        assert out == fixture[key], "frozen key %r routing changed" % key
+        assert out == fixture[key], f"frozen key {key!r} routing changed"
     # The UUID key coexists with the frozen keys.
     assert _T2_UUID_INCIDENT in fixture
 

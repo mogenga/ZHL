@@ -43,19 +43,19 @@
       {
         "cause": "cell mismatch -> Impp drift above grade-A band",
         "confidence": 0.87,
-        "evidence_ids": ["EV-ATT-001", "EV-ATT-002"],
+        "evidence_ids": ["eb356f43f77ddda9d9e9179cd0f84105", "0737df8b122a126c9e03c3edd0ee6bc7"],
         "recommended_action": "re-test 3-cell string, replace lead cell"
       },
       {
         "cause": "IV capture instrument drift",
         "confidence": 0.62,
-        "evidence_ids": ["EV-ATT-003"],
+        "evidence_ids": ["1bda9cc25fbc1e80225d28efb9af0376"],
         "recommended_action": "calibrate IV tester, re-capture SN-I-OODB"
       },
       {
         "cause": "bypass-diode hot spot from assembly",
         "confidence": 0.4,
-        "evidence_ids": ["EV-ATT-009"],
+        "evidence_ids": ["77411f9542fcab650c7d7dc03f6278ad"],
         "recommended_action": "visual re-inspect cell 4 under load"
       }
     ]
