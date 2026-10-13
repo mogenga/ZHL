@@ -216,4 +216,17 @@ WB.api = {
       return { ok: true, data: r.data };
     });
   },
+  /* T7：复检记录（POST/GET /api/incidents/{id}/reinspections） */
+  createReinspection(incidentId, body) {
+    return WB.api.request('POST', '/api/incidents/' + incidentId + '/reinspections', body).then(function (r) {
+      if (!r.ok) return { ok: false, error: r.error, data: null };
+      return { ok: true, data: r.data };
+    });
+  },
+  listReinspections(incidentId) {
+    return WB.api.request('GET', '/api/incidents/' + incidentId + '/reinspections').then(function (r) {
+      if (!r.ok) return { ok: false, error: r.error, data: [] };
+      return { ok: true, data: r.data || [] };
+    });
+  },
 };
