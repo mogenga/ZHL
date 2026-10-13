@@ -170,4 +170,12 @@ WB.api = {
       return { ok: true, data: r.data };
     });
   },
+
+  /* T5：重新判定（POST /api/batches/{id}/judge，只重算不推进状态机） */
+  runJudge(batchId) {
+    return WB.api.request('POST', '/api/batches/' + batchId + '/judge').then(function (r) {
+      if (!r.ok) return { ok: false, error: r.error, data: null };
+      return { ok: true, data: r.data };
+    });
+  },
 };
