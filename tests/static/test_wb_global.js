@@ -28,7 +28,7 @@ const documentStub = {
   createTextNode: (t) => ({ nodeType: 3, nodeValue: t }),
   querySelectorAll: () => [],
   addEventListener(){},
-  body: { appendChild(){} },
+  body: { appendChild(){}, append(){} },
 };
 
 // Single context == the browser's shared global (all three scripts in one env).
@@ -78,6 +78,18 @@ try {
   assert(true, 'WB.boot() runs without throwing');
 } catch (e) {
   assert(false, 'WB.boot() threw: ' + e.message);
+}
+
+// 5) T3: newBatchForm + createBatch wired up
+assert(typeof WB.newBatchForm === 'function', 'WB.newBatchForm present (T3)');
+assert(typeof WB.api.createBatch === 'function', 'WB.api.createBatch present (T3)');
+// newBatchForm with no rule versions should disable submit (not throw)
+try {
+  WB.state.ruleVersions = null; // force the disabled branch
+  WB.newBatchForm();
+  assert(true, 'newBatchForm handles missing rule versions without throwing');
+} catch (e) {
+  assert(false, 'newBatchForm threw: ' + e.message);
 }
 
 console.log(failed === 0 ? '\nALL PASS' : '\n' + failed + ' FAILED');

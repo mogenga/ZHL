@@ -148,4 +148,12 @@ WB.api = {
       return { ok: true, data: r.data || [] };
     });
   },
+
+  /* T3：创建批次（POST /api/batches）→ {ok, data:{batch_id,status}, error} */
+  createBatch(body) {
+    return WB.api.request('POST', '/api/batches', body).then(function (r) {
+      if (!r.ok) return { ok: false, error: r.error, data: null };
+      return { ok: true, data: r.data };
+    });
+  },
 };

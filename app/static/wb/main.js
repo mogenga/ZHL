@@ -134,9 +134,17 @@ WB.renderRight = function (detail) {
   const kpiBox = (n, label) => WB.h('div', { class: 'box' },
     WB.h('div', { class: 'n', text: n }),
     WB.h('div', { class: 'l', text: label }));
+  // 未关闭异常数：本批异常中 status 不在 closed/rejected/scrapped 的计数（spec §3.2）
+  const openInc = detail ? WB.state.incidents.filter(function (i) {
+    return i.batch_id === detail.batch_id && ['new','isolated','assigned','pending_recheck'].indexOf(i.status) >= 0;
+  }).length : 0;
+  const sample = detail ? detail.sample_result : null;
+  const sampleTxt = sample ? (WB.ST_CN[sample] || sample) : '—';
   rp.append(WB.h('div', { class: 'mini-kpi' },
     kpiBox(String(passCnt), '判定合格'),
     kpiBox(String(failCnt), '判定不合格'),
+    kpiBox(String(openInc), '未关闭异常'),
+    kpiBox(sampleTxt, '样本结论'),
     kpiBox(detail ? WB.ST_CN[detail.status] : '—', '当前状态'),
     kpiBox(detail ? String(detail.planned_quantity) : '—', '计划数量')));
 };
@@ -276,10 +284,58 @@ WB._loadDetail = function (id) {
   });
 };
 
-/* ---- 新建批次（T3 实现表单；T2 占位）---- */
+/* ---- 新建批次（T3：模态表单，spec §4.1）---- */
 WB._onNewBatch = function () {
-  if (WB.newBatchForm) WB.newBatchForm();
-  else WB.toast('新建批次表单见 T3');
+  WB.newBatchForm();
+};
+WB.newBatchForm = function () {
+  const rv = WB.state.ruleVersions;
+  // 规则版本下拉：仅 status=published 且已生效；available:false / 无可用项时禁用提交
+  let published = [];
+  if (rv && rv.available) {
+    published = (rv.items || []).filter(function (r) { return r.status === 'published'; });
+  }
+  const options = published.map(function (r) {
+    return { value: r.rule_version_id, label: r.name + ' v' + r.version_no + '（' + r.model + '）' };
+  });
+  const submitDisabled = !rv || !rv.available || published.length === 0;
+
+  const hintEl = submitDisabled
+    ? WB.h('div', { class: 'form-note', text: rv && rv.available ? '暂无已发布的规则版本，无法创建批次' : '规则版本未初始化，请先初始化规则库' })
+    : null;
+
+  WB.openModal('新建批次', [
+    { label: '批次号', type: 'text', placeholder: '如 B-20261013-001', required: true },
+    { label: '项目', type: 'text', placeholder: '项目标识', required: true },
+    { label: '型号', type: 'text', placeholder: '如 JH-550W', required: true },
+    { label: '计划数量', type: 'text', placeholder: '≥1', required: true, min: 1 },
+    {
+      label: '规则版本', type: 'select', options: options, required: true,
+      disabled: submitDisabled,
+      hint: submitDisabled ? '' : '仅列已发布且已生效版本',
+    },
+  ], function (vals) {
+    const batch_no = (vals[0] || '').trim();
+    const project_id = (vals[1] || '').trim();
+    const model = (vals[2] || '').trim();
+    const planned = parseInt((vals[3] || '').trim(), 10);
+    const rule_version_id = vals[4];
+    if (!batch_no || !project_id || !model || !rule_version_id || !planned || planned < 1) {
+      WB.toast('请填写全部必填项（计划数量 ≥1）');
+      return;
+    }
+    WB.api.createBatch({
+      batch_no: batch_no, project_id: project_id, model: model,
+      rule_version_id: rule_version_id, planned_quantity: planned,
+    }).then(function (res) {
+      if (!res.ok) { WB.toast(WB.errText(res.error)); return; }
+      WB.toast('批次已创建，进入数据入场');
+      // 成功：回读列表一次再选中新批次（spec §4.1）
+      WB.loadBatches().then(function () {
+        WB.selectBatch(res.data.batch_id);
+      });
+    });
+  }, { submitLabel: '创建批次', inline: hintEl });
 };
 
 /* ---- 主渲染入口 ---- */
