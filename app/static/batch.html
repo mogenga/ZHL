@@ -17,10 +17,12 @@
       <div class="form-grid">
         <div><label for="bBatch">批次 ID（UUID）</label><input type="text" id="bBatch"></div>
       </div>
+      <!-- 技术信息（维护者参考，不渲染到界面）：
+           加载批次 = GET /api/batches/{id}｜触发判定 = POST /api/batches/{id}/judge｜发起异常 = POST /api/incidents -->
       <div style="margin-top:12px; display:flex; gap:10px; flex-wrap:wrap">
-        <button class="btn" id="loadBatch">加载批次（GET /api/batches/{id}）</button>
-        <button class="btn ghost" id="judgeBatch" disabled>触发判定（POST .../judge）</button>
-        <button class="btn ghost" id="openIncident" disabled>发起异常（POST /api/incidents）</button>
+        <button class="btn" id="loadBatch">加载批次</button>
+        <button class="btn ghost" id="judgeBatch" disabled>触发判定</button>
+        <button class="btn ghost" id="openIncident" disabled>发起异常</button>
       </div>
       <div id="batchResult"></div>
     </div>
@@ -30,7 +32,7 @@
 
     <div class="card" id="incidentForm" style="display:none">
       <h3>发起异常事件</h3>
-      <p class="muted">异常只能发起在 <strong>已隔离（isolated）</strong> 的批次上；后端非 isolated 状态返回 409。</p>
+      <p class="muted">异常只能发起在 <strong>已隔离</strong> 的批次上；批次不在「已隔离」状态时后端会拒绝（409）。</p>
       <div class="form-grid">
         <div><label for="incTrigger">触发类型 triggerType</label>
           <select id="incTrigger">
@@ -70,8 +72,9 @@
       document.getElementById("bBatch").value = pre;
       ZHL.remember("batch", pre);
       if (ctx.from === "local") {
+        // UUID 不在正文全量显示（对质检员无意义），只示前 8 位 + …，完整值放 title 悬浮。
         document.querySelector(".form-grid").insertAdjacentHTML(
-          "afterend", `<div class="note info" style="margin:8px 0">批次 ID 已自动带入上次上下文（${escapeHtml(pre)}），可修改。点击「加载批次」查看详情。</div>`
+          "afterend", `<div class="note info" style="margin:8px 0" title="批次 ID 已自动带入上次上下文：${escapeHtml(pre)}">批次 ID 已自动带入上次上下文（${escapeHtml(String(pre).slice(0, 8))}…，<span class="muted">鼠标悬浮查看完整 ID</span>），可修改。点击「加载批次」查看详情。</div>`
         );
       }
     }
@@ -112,7 +115,7 @@
 
       box.set(`
         <div class="note info">
-          批次 <span class="mono">${escapeHtml(d.batch_no)}</span>（ID <span class="mono">${escapeHtml(d.batch_id)}</span>），
+          批次 <span class="mono" title="批次 ID：${escapeHtml(d.batch_id)}">${escapeHtml(d.batch_no)}</span>，
           状态：${statusBadge(d.status)}，计划数量 ${escapeHtml(d.planned_quantity)}，
           抽样结论：<strong>${escapeHtml(d.sample_result || "—")}</strong>
         </div>

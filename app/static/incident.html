@@ -18,13 +18,14 @@
         <div><label for="xIncident">异常 ID（UUID）</label><input type="text" id="xIncident"></div>
       </div>
       <div style="margin-top:12px">
-        <button class="btn" id="loadIncident">加载异常（GET /api/incidents/{id}）</button>
+        <!-- 技术信息（维护者参考，不渲染到界面）：加载异常 = GET /api/incidents/{id}｜指派 = POST /api/incidents/{id}/assign｜CAPA = POST /api/incidents/{id}/capa -->
+      <button class="btn" id="loadIncident">加载异常</button>
       </div>
       <div id="incidentDetail"></div>
     </div>
 
     <div class="card" id="capaForm" style="display:none">
-      <h3>指派责任人（POST /api/incidents/{id}/assign）</h3>
+      <h3>指派责任人</h3>
       <p class="muted">异常 新建/已隔离 → 已指派；同时批次 已隔离 → 待处置（单事务）。</p>
       <div class="form-grid">
         <div><label for="aOwner">责任人 owner</label><input type="text" id="aOwner" placeholder="质量工程师姓名"></div>
@@ -37,7 +38,7 @@
     </div>
 
     <div class="card" id="capaConfirm" style="display:none">
-      <h3>CAPA 确认（POST /api/incidents/{id}/capa）</h3>
+      <h3>CAPA 确认</h3>
       <p class="muted">异常 已指派 → 待复检；批次 待处置 → 待复检（单事务）。<strong>verified=true 必须存在 复检通过 的记录，否则后端 400。</strong></p>
       <div class="form-grid">
         <div class="field-full"><label for="cRoot">确认根因 confirmedRootCause（必填，来自人工采纳的假设或人工填写）</label>
@@ -113,7 +114,7 @@
 
       box.set(`
         <div class="note ${d.status === "closed" ? "ok" : d.status === "new" || d.status === "isolated" ? "warn" : "info"}">
-          异常 <span class="mono">${escapeHtml(d.incident_id)}</span> · 批次 <span class="mono">${escapeHtml(d.batch_id)}</span><br>
+          异常 <span class="mono" title="异常 ID：${escapeHtml(d.incident_id)}">${escapeHtml(d.incident_id)}</span> · 批次 <span class="mono" title="批次 ID：${escapeHtml(d.batch_id)}">${escapeHtml(d.batch_id)}</span><br>
           状态：${statusBadge(d.status, "incident")} · 触发：${escapeHtml(d.trigger_type)} · 严重度：${escapeHtml(d.severity)}
           ${d.owner ? " · 责任人：" + escapeHtml(d.owner) : ""}
           ${d.due_at ? " · 时限：" + fmtDateTimeCell(d.due_at) : ""}

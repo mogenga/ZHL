@@ -14,7 +14,8 @@
 
     <!-- 创建复检 -->
     <div class="card">
-      <h3>创建复检（POST /api/incidents/{id}/reinspections）</h3>
+      <!-- 技术信息（维护者参考，不渲染到界面）：创建复检 = POST /api/incidents/{id}/reinspections｜查看复检记录 = GET /api/incidents/{id}/reinspections -->
+      <h3>创建复检</h3>
       <div class="form-grid">
         <div><label for="rIncident">异常 ID（UUID）</label><input type="text" id="rIncident" placeholder="从异常详情/列表跳转时自动带入"></div>
         <div><label for="rInspection">受检 SN 对应的检验记录 ID（UUID，module_inspections）</label>
@@ -78,7 +79,7 @@
 
     <!-- 查看复检记录 -->
     <div class="card">
-      <h3>查看复检记录（GET /api/incidents/{id}/reinspections）</h3>
+      <h3>复检记录</h3>
       <div class="form-grid">
         <div><label for="vIncident">异常 ID（UUID）</label><input type="text" id="vIncident"></div>
       </div>

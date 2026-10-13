@@ -13,7 +13,8 @@
     <p class="subtitle">执行放行断言：逐条列出前提，缺一条即阻断。断言全通过 + 人工批准才放行。</p>
 
     <div class="card">
-      <h3>发起放行（POST /api/batches/{id}/release）</h3>
+      <!-- 技术信息（维护者参考，不渲染到界面）：发起放行 = POST /api/batches/{id}/release -->
+      <h3>发起放行</h3>
       <div class="form-grid">
         <div><label for="relBatch">批次 ID（UUID）</label><input type="text" id="relBatch"></div>
         <div><label for="relBy">批准人 approvedBy（必填，留痕）</label><input type="text" id="relBy" placeholder="质量工程师姓名"></div>
@@ -26,7 +27,7 @@
       <h3>放行断言逐条说明</h3>
       <p class="muted">断言是全通过才放行。被拦截时，系统逐条说明未满足的前提（不是笼统的 false）。</p>
       <ul style="margin:0; padding-left:18px">
-        <li>批次状态 = 待放行（pending_release）</li>
+        <li>批次状态 = <strong>待放行</strong></li>
         <li>最新抽样结论 = Pass（启用抽样时）</li>
         <li>未关闭严重异常数量 = 0</li>
         <li>隔离 SN 数量 = 0</li>

@@ -71,7 +71,10 @@ function statusBadge(status, kind) {
     else if (["assigned", "pending_recheck", "isolated"].includes(status)) cls = "warn";
   }
   const text = statusZh(status, kind);
-  return `<span class="badge ${cls}">${text} <small class="mono">${status || ""}</small></span>`;
+  // 英文枚举值不进可见文案，改为 title 悬浮提示：
+  // 业务用户（质检员）看中文状态即可，pending_intake 等英文对业务无意义。
+  // 技术值保留在 title，维护者/排障时鼠标悬浮可看，信息量不丢失。
+  return `<span class="badge ${cls}" ${status ? `title="${escapeHtml(status)}"` : ""}>${text}</span>`;
 }
 
 function decisionBadge(status) {

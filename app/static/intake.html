@@ -35,7 +35,8 @@
       </div>
 
       <div style="margin-top:12px; display:flex; gap:10px">
-        <button class="btn" id="sendIntake">送检（POST /api/intake）</button>
+        <!-- 技术信息（维护者参考，不渲染到界面）：送检 = POST /api/intake -->
+        <button class="btn" id="sendIntake">送检</button>
       </div>
       <div id="intakeResult"></div>
     </div>
@@ -59,7 +60,8 @@
         <textarea id="cFields" rows="3" placeholder='{"temp": 25.4}（留空则不改）'></textarea>
       </div>
       <div style="margin-top:12px">
-        <button class="btn" id="doConfirm">提交确认 / 拒绝（POST /api/intake/{id}/confirm）</button>
+        <!-- 技术信息（维护者参考，不渲染到界面）：提交确认 / 拒绝 = POST /api/intake/{id}/confirm -->
+        <button class="btn" id="doConfirm">提交确认 / 拒绝</button>
       </div>
       <div id="confirmResult"></div>
     </div>

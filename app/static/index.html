@@ -26,7 +26,8 @@
         <div><label for="fProject">项目 ID projectId</label><input type="text" id="fProject" placeholder="P-DEFAULT"></div>
         <div><label for="fModel">型号 model</label><input type="text" id="fModel" placeholder="JH-550W"></div>
         <div class="field-wide">
-          <label for="fRule">规则版本（下拉，来自 <span class="mono">GET /api/quality-rule-versions</span>）</label>
+          <!-- 技术信息（维护者参考，不渲染到界面）：下拉选项来自 GET /api/quality-rule-versions -->
+          <label for="fRule">规则版本</label>
           <select id="fRule"><option value="">（加载中…）</option></select>
         </div>
         <div><label for="fQty">计划数量</label><input type="number" id="fQty" min="1" value="10"></div>
