@@ -91,6 +91,10 @@ WB.batchHead = function (detail, listitem) {
       row('计划数量', detail.planned_quantity),
       row('规则版本', ruleName || '规则版本信息暂不可用'),
       row('流程位置', WB.STAGES[WB.stageOfStatus(detail.status)])),
+    WB.h('div', { class: 'actions' },
+      (['released', 'rejected', 'archived'].includes(detail.status)
+        ? WB.h('button', { onclick: () => WB.generateReportForBatch(detail), text: '生成报告' })
+        : WB.h('span', { class: 'muted', text: '报告可在放行后生成' }))),
     WB._pipeline(detail));
 };
 
