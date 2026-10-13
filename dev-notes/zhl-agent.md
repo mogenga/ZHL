@@ -576,3 +576,46 @@
 1. **真实 LLM 归因未接入**：`AttributionSkill` 走 `MockLLMClient` 固定 fixture（R4）；真实 LLM 抽取/归因属 P1（总 spec §9.1），本分支仅把接线路径打通，Mock 路由键为 incident UUID 形
 2. **incident subgraph 的 `human_adopt` interrupt 仍为 P1 跨请求**：本分支触发端点用 MemorySaver 单请求同步 resume，子图内 `interrupt()` 节点保留未删（P1 跨请求续跑时启用 PG Checkpointer）
 3. **frontend T-5 静态 state.html 漂移风险**（P2，`docs/superpowers/plans/2026-10-13-frontend-todos.md` 登记）未在本分支处理
+
+
+## 2026-10-14 · 前端重构 T1-T10 全任务收口（workbench 三栏工作台）
+
+### 关键原话
+- 用户：「按 plan 逐任务实施前端重构 T1–T10，把 app/static/ 9 个平铺 MPA 收敛为单页 workbench.html」「全程 SDD 执行」「后端零改动、原生 JS 零构建」
+- 分支：feat/workbench（主检出就地；worktree 弃用——uv 子进程 + static mount 在 Windows harness 不稳定）
+
+### 关键产出（11 commit，基线 cf07a74+6036393）
+| Task | 提交 | 产出 |
+| --- | --- | --- |
+| 1 三栏骨架+视图切换(mock) | 7c1a8f9 | workbench.html/wb.css/ui.js/main.js(mock)+tests/static 守卫 |
+| 2 API 层+真实数据 | 15987af | wb/api.js(request+errText §4.9)+main.js 去 mock |
+| 3 批次详情/轨迹/新建 | 07953bd | api.createBatch + main.newBatchForm + KPI(未关闭异常/样本结论) |
+| 4 数据入场节点 | 54d263d | stages/intake.js(stageIndex0) submitIntake/confirmIntake |
+| 5 判定节点回看重算 | f2c6747 | stages/judge.js(stageIndex1) runJudge + _evidenceTd |
+| 6 异常处置节点 | dbce639 | stages/incident.js(stageIndex2) 隔离/归因/指派/整改全链路 |
+| 7 复检+隔离/指派 | b310bcf | stages/reinspection.js(stageIndex3) 录入复检/范围扩展 |
+| 8 放行/拒绝+前置校验 | b0dc153 | stages/release.js(stageIndex4) releaseBatch/rejectBatch/probe checks |
+| 9 报告抽屉渲染 | a38c5bb+fccd0c8 | report.js(mdToDom/jsonBlock/getReport)+batchHead 生成报告入口 |
+| 10 全任务静态守卫 | afc36d5+df52306 | test_workbench_static.py 扩 10 js + 脚本顺序 + window. 前缀守卫 |
+
+### 验证（原始输出，非手写）
+- node --check：ui/api/main/report + 5 stage 共 9 文件语法全 OK
+- node tests/static/test_wb_global.js：9 模块共享单全局无重声明崩、WB.boot() 可运行、各 stage _byIndex 注册、各 API 存在 —— ALL PASS
+- node tests/static/test_wb_api_norm.js：detail 归一 + errText 中文映射 + fetch stub —— ALL PASS
+- uv run pytest tests/ → 261 passed（含 tests/static 3）
+- tests/static/check_serve.py（TestClient）：workbench.html + wb.css/ui.js/api.js/main.js + 结构不变量 + 无原生对话框 —— T1 serve-check passed
+- 后端零 diff：git diff cf07a74..HEAD 仅 app/static/ + tests/ + .gitignore（app/api/ 无我方改动）
+
+### 拒绝与纠偏
+- 原生对话框守卫 substring 'confirm(' 误命中自研函数 _confirm(batch,'confirm') → 改名 _intakeAct，不动守卫（守卫是对的）
+- incident.js 块注释误含 '*/'（责任人*/处置期限*/临时措施）提前闭合注释致运行时 ReferenceError → 改行注释，node 全局测试暴露
+- intake.js 函数名 _confirm 与 forbidden substring 冲突，同法改 _intakeAct
+
+### 翻车与返工
+- T2 关键缺陷：T1 三脚本各自顶层 'const WB' 在浏览器多 <script> 共享全局词法环境下 SyntaxError → 治根挂 window.WB，仅 ui.js 创建（T2 已修）
+- Windows harness 下 uvicorn 子进程不可靠（端口探测 200 后 502/拒连、cua 窗口发现失败）→ 浏览器验收统一 deferred 到 dev 手动；机器侧以 check_serve.py + 静态守卫 + 后端零 diff + 全量 pytest 收口
+
+### 已知遗留
+1. 活浏览器 click-through（4 视图切换 / ?batch= 刷新恢复 / console 清洁）未在本 harness 完成——deferred 到 dev 手动验收
+2. incident 归因三选一当前用 attributeIncident('defer') 取假设再 adopt/reject/defer，与后端单请求三选一契约对齐但前端分两请求；后端端点本身已是三选一，前端拆成「取假设」+「提交归因」两步 UI
+3. report.mdToDom 为轻量解析（标题/列表/段落），未覆盖表格/代码块内联——报告 content_md 若含复杂表格需 T10+ 增强
