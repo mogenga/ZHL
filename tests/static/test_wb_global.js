@@ -14,6 +14,7 @@ const judge = read('stages/judge.js');
 const incident = read('stages/incident.js');
 const reinspection = read('stages/reinspection.js');
 const release = read('stages/release.js');
+const report = read('report.js');
 
 // ---- browser-like DOM shim ----
 function el(id) {
@@ -66,6 +67,7 @@ try {
   vm.runInContext(incident, ctx, { filename: 'incident.js' });
   vm.runInContext(reinspection, ctx, { filename: 'reinspection.js' });
   vm.runInContext(release, ctx, { filename: 'release.js' });
+  vm.runInContext(report, ctx, { filename: 'report.js' });
 } catch (e) { threw = e; }
 assert(threw === null, 'three <script> tags share global without redeclaration crash' + (threw ? ' -> ' + threw.message : ''));
 if (threw) { console.log('\n' + failed + ' FAILED'); process.exit(1); }
@@ -112,6 +114,9 @@ assert(WB.stages._byIndex[4] === WB.stages.release, 'release stage registered at
 assert(typeof WB.api.releaseBatch === 'function', 'WB.api.releaseBatch present (T8)');
 assert(typeof WB.api.rejectBatch === 'function', 'WB.api.rejectBatch present (T8)');
 assert(typeof WB.api.generateReport === 'function', 'WB.api.generateReport present (T8)');
+assert(typeof WB.report === 'object' && typeof WB.report.open === 'function', 'WB.report.open present (T9)');
+assert(typeof WB.api.getReport === 'function', 'WB.api.getReport present (T9)');
+assert(typeof WB._reportDrawer === 'function', 'WB._reportDrawer overridden by report.js (T9)');
 // newBatchForm with no rule versions should disable submit (not throw)
 try {
   WB.state.ruleVersions = null; // force the disabled branch

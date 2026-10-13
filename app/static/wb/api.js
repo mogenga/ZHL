@@ -242,8 +242,14 @@ WB.api = {
       return { ok: true, data: r.data };
     });
   },
-  generateReport(batchId) {
-    return WB.api.request('POST', '/api/batches/' + batchId + '/report').then(function (r) {
+  generateReport(batchId, reportType) {
+    return WB.api.request('POST', '/api/batches/' + batchId + '/report', { report_type: reportType || 'release' }).then(function (r) {
+      if (!r.ok) return { ok: false, error: r.error, data: null };
+      return { ok: true, data: r.data };
+    });
+  },
+  getReport(batchId, reportId) {
+    return WB.api.request('GET', '/api/batches/' + batchId + '/reports/' + reportId).then(function (r) {
       if (!r.ok) return { ok: false, error: r.error, data: null };
       return { ok: true, data: r.data };
     });
