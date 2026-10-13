@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>放行 · 质慧链</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='0.9em' font-size='90'%3E%E8%B4%A8%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+  <div class="page">
+    <h1>放行（第 4 段放行断言）</h1>
+    <p class="subtitle">执行放行断言：逐条列出前提，缺一条即阻断。断言全通过 + 人工批准才放行。</p>
+
+    <div class="card">
+      <h3>发起放行（POST /api/batches/{id}/release）</h3>
+      <div class="form-grid">
+        <div><label for="relBatch">批次 ID（UUID）</label><input type="text" id="relBatch"></div>
+        <div><label for="relBy">批准人 approvedBy（必填，留痕）</label><input type="text" id="relBy" placeholder="质量工程师姓名"></div>
+      </div>
+      <div style="margin-top:12px"><button class="btn" id="doRelease">执行放行断言</button></div>
+      <div id="releaseResult"></div>
+    </div>
+
+    <div class="card">
+      <h3>放行断言逐条说明</h3>
+      <p class="muted">断言是全通过才放行。被拦截时，系统逐条说明未满足的前提（不是笼统的 false）。</p>
+      <ul style="margin:0; padding-left:18px">
+        <li>批次状态 = 待放行（pending_release）</li>
+        <li>最新抽样结论 = Pass（启用抽样时）</li>
+        <li>未关闭严重异常数量 = 0</li>
+        <li>隔离 SN 数量 = 0</li>
+        <li>必需证据齐备 = true</li>
+        <li>严重 CAPA 已验证 = true</li>
+        <li>复检范围覆盖（逐异常）</li>
+      </ul>
+      <p class="note warn" style="margin-bottom:0">批次非 待放行 状态时后端 409；已归档 批次 409（终态）。</p>
+    </div>
+
+    <div class="note todo">
+      <strong>TODO：</strong>「人工拒绝交付（任意非归档 → 已拒绝）」后端接口未实现（无 POST .../reject 路由）。
+      质量工程师主动拒绝交付需走数据库/状态机层，暂不在前端提供入口。
+    </div>
+  </div>
+
+  <script src="common.js"></script>
+  <script>
+    renderTopbar("release.html");
+
+    /* 上下文记忆：URL 参数优先，其次 localStorage（从批次/复检页跳转时已 remember） */
+    const pre = ZHL.prefill("batchId", "batch");
+    if (pre.value) {
+      document.getElementById("relBatch").value = pre.value;
+      if (pre.from === "local") {
+        document.querySelector(".form-grid").insertAdjacentHTML(
+          "afterend", `<div class="note info" style="margin:8px 0">批次 ID 已自动带入上次上下文（${escapeHtml(pre.value)}），可修改。</div>`
+        );
+      }
+    }
+
+    /* 提交按钮防重提交 */
+    const releaseGuard = ZHL.guardSubmit(document.getElementById("doRelease"), "执行放行断言中…");
+    document.getElementById("doRelease").addEventListener("click", () => {
+      releaseGuard.run(async () => {
+        const box = ZHL.mount(document.getElementById("releaseResult"), "执行放行断言中…");
+        const batchId = document.getElementById("relBatch").value.trim();
+        const approvedBy = document.getElementById("relBy").value.trim();
+        if (!batchId) { box.fail(0, "请填写批次 ID。", "无批次上下文：可回首页批次列表点击「进入」，或直接粘贴批次 UUID 后重试。"); return; }
+        if (!approvedBy) { box.fail(0, "批准人为必填（人工担责任）。"); return; }
+
+        const r = await ZHL.request("POST", `/api/batches/${encodeURIComponent(batchId)}/release`, { approved_by: approvedBy }, box);
+        if (!r.ok) return;
+        const d = r.data;
+        // 记住批次上下文，报告页可自动带入
+        ZHL.remember("batch", batchId);
+        const checks = (d.checks || []).map((c) => `
+          <div class="assert-check ${c.passed ? "pass" : "fail"}">
+            <span class="dot"></span>
+            <div>
+              <strong>${escapeHtml(c.name || "check")}</strong>
+              ${c.passed ? '<span class="badge ok">通过</span>' : '<span class="badge err">未通过</span>'}
+              ${c.reason ? `<div class="reason">${escapeHtml(c.reason)}</div>` : ""}
+            </div>
+          </div>`).join("");
+
+        if (d.passed) {
+          box.set(`
+            <div class="note ok">放行断言全通过，批次 <span class="mono">${escapeHtml(d.batch_id)}</span> → <strong>已放行</strong>。
+            批准人：${escapeHtml(approvedBy)}。</div>
+            <div class="card"><h3>逐条断言</h3>${checks}</div>
+            <div class="item-list" style="margin-top:8px">
+              <div class="item-row"><span>放行成功 → 生成报告</span><a class="btn" href="report.html?batchId=${encodeURIComponent(batchId)}">去报告页</a></div>
+              <div class="item-row"><span>查看批次轨迹</span><a class="btn ghost" href="trace.html?batchId=${encodeURIComponent(batchId)}">看轨迹</a></div>
+            </div>`);
+        } else {
+          const failed = (d.checks || []).filter((c) => !c.passed).map((c) => c.name || "check");
+          box.set(`
+            <div class="note err">放行被阻断（断言未全通过，可重试）。未通过项：${failed.map(escapeHtml).join("、") || "—"}。
+            批次仍停留在 ${statusBadge(d.status)}。请补齐前提后重试。</div>
+            <div class="card"><h3>逐条断言</h3>${checks}</div>`);
+        }
+      });
+    });
+  </script>
+</body>
+</html>

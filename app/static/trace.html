@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>任务轨迹 · 质慧链</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='0.9em' font-size='90'%3E%E8%B4%A8%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+  <div class="page">
+    <h1>Agent 任务轨迹</h1>
+    <p class="subtitle">批次的全部任务轨迹：模型提出了什么、系统调用了什么、验证结果、人工操作、开始时间。</p>
+
+    <div class="card">
+      <h3>选择批次</h3>
+      <div class="form-grid">
+        <div><label for="tBatch">批次 ID（UUID）</label><input type="text" id="tBatch"></div>
+      </div>
+      <div style="margin-top:12px"><button class="btn" id="loadTrace">加载轨迹（GET /api/batches/{id}/traces）</button></div>
+      <div id="traceResult"></div>
+    </div>
+
+    <div class="card">
+      <h3>轨迹五问（可复演要求）</h3>
+      <ul style="margin:0; padding-left:18px">
+        <li>模型提出了什么 → skill_name + structured_output</li>
+        <li>系统调用了什么 → plugins_invoked</li>
+        <li>哪条规则通过或失败 → validation_result + failure_reason</li>
+        <li>谁作出了最终决定 → human_action</li>
+        <li>依据的原始数据是什么 → input_ref + 参数摘要</li>
+      </ul>
+      <p class="muted">本接口为只读轨迹时间线，不写库。若批次无任何轨迹，返回空列表。</p>
+    </div>
+  </div>
+
+  <script src="common.js"></script>
+  <script>
+    renderTopbar("trace.html");
+
+    /* 上下文记忆：URL 参数优先，其次 localStorage（从首页/批次页跳转时已 remember） */
+    const pre = ZHL.prefill("batchId", "batch");
+    if (pre.value) {
+      document.getElementById("tBatch").value = pre.value;
+      if (pre.from === "local") {
+        document.querySelector(".form-grid").insertAdjacentHTML(
+          "afterend", `<div class="note info" style="margin:8px 0">批次 ID 已自动带入上次上下文（${escapeHtml(pre.value)}）。</div>`
+        );
+      }
+      loadTrace();
+    }
+
+    document.getElementById("loadTrace").addEventListener("click", loadTrace);
+    if (pre) loadTrace();
+
+    async function loadTrace() {
+      const box = ZHL.mount(document.getElementById("traceResult"), "加载中…");
+      const batchId = document.getElementById("tBatch").value.trim();
+      if (!batchId) { box.fail(0, "请填写批次 ID。"); return; }
+      const r = await ZHL.request("GET", `/api/batches/${encodeURIComponent(batchId)}/traces`, undefined, box);
+      if (!r.ok) return;
+      const rows = r.data;
+      if (!rows.length) { box.set(`<div class="note info">该批次暂无任务轨迹。</div>`); return; }
+
+      const items = rows.map((t) => {
+        const ok = t.validation_result === "pass";
+        const badge = ok
+          ? '<span class="badge ok">pass</span>'
+          : `<span class="badge err">fail</span>`;
+        const fail = t.failure_reason ? `<div class="reason">失败原因：${escapeHtml(t.failure_reason)}</div>` : "";
+        const human = t.human_action ? `<div class="reason">人工操作：${escapeHtml(t.human_action)}</div>` : "";
+        const plugins = (t.plugins_invoked && t.plugins_invoked.length)
+          ? t.plugins_invoked.map((p) => `<span class="badge info" style="margin-right:4px">${escapeHtml(p)}</span>`).join("")
+          : `<span class="muted">无</span>`;
+        const params = t.params_summary ? ZHL.evidenceBlock(t.params_summary) : "";
+        return `
+          <div class="t-item">
+            <div class="t-time" style="white-space:nowrap">${fmtDateTimeCell(t.started_at)}</div>
+            <div class="t-title">${escapeHtml(t.skill_name || "")} ${badge}
+              <span class="muted mono">${escapeHtml(t.task_id || "")}</span>
+            </div>
+            <div style="margin-top:6px">${plugins}</div>
+            ${fail}${human}
+            ${params ? `<details style="margin-top:6px"><summary>参数摘要 / 输入引用</summary>${ZHL.evidenceBlock({ input_ref: t.input_ref, params_summary: t.params_summary, model_version: t.model_version })}</details>` : ""}
+          </div>`;
+      }).join("");
+
+      box.set(`<div class="card"><h3>共 ${rows.length} 条轨迹（按开始时间）</h3><div class="timeline">${items}</div></div>`);
+    }
+  </script>
+</body>
+</html>

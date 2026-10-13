@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>复检 · 质慧链</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='0.9em' font-size='90'%3E%E8%B4%A8%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+  <div class="page">
+    <h1>复检（第 4 段）</h1>
+    <p class="subtitle">创建独立复检记录（不覆盖初检）。复检通过 → 批次待放行；复检失败 → 批次已拒绝。</p>
+
+    <!-- 创建复检 -->
+    <div class="card">
+      <h3>创建复检（POST /api/incidents/{id}/reinspections）</h3>
+      <div class="form-grid">
+        <div><label for="rIncident">异常 ID（UUID）</label><input type="text" id="rIncident" placeholder="从异常详情/列表跳转时自动带入"></div>
+        <div><label for="rInspection">受检 SN 对应的检验记录 ID（UUID，module_inspections）</label>
+          <input type="text" id="rInspection"></div>
+      </div>
+      <div id="rIncidentHint"></div>
+
+      <div style="margin-top:10px">
+        <strong>录入方式</strong>
+        <label style="margin-left:8px"><input type="radio" name="mode" value="form" checked> 表单</label>
+        <label style="margin-left:8px"><input type="radio" name="mode" value="json"> JSON（高级）</label>
+      </div>
+
+      <!-- 表单模式 -->
+      <div id="formMode">
+        <p class="muted" style="margin-top:10px">复检参数（必填，重跑相同规则版本）：</p>
+        <div class="form-grid">
+          <div><label for="rPmax">Pmax（W）</label><input type="number" step="0.001" id="rPmax"></div>
+          <div><label for="rTemp">温度 Temp（℃）</label><input type="number" step="0.01" id="rTemp"></div>
+          <div><label for="rIsc">Isc（A）</label><input type="number" step="0.001" id="rIsc"></div>
+          <div><label for="rVoc">Voc（V）</label><input type="number" step="0.001" id="rVoc"></div>
+          <div><label for="rVm">Vm（V）</label><input type="number" step="0.001" id="rVm"></div>
+          <div><label for="rIm">Im（A）</label><input type="number" step="0.001" id="rIm"></div>
+          <div><label for="rFf">FF</label><input type="number" step="0.0001" id="rFf"></div>
+        </div>
+        <div class="form-grid" style="margin-top:10px">
+          <div>
+            <label for="rResult">结果 result</label>
+            <select id="rResult">
+              <option value="pass">pass（复检通过）</option>
+              <option value="fail">fail（复检失败 → 批次已拒绝）</option>
+            </select>
+          </div>
+          <div><label for="rExecutor">执行人 executor</label><input type="text" id="rExecutor"></div>
+          <div><label for="rAt">执行时间 executedAt（ISO-8601）</label><input type="text" id="rAt" placeholder="2026-10-15T14:00:00"></div>
+          <div>
+            <label for="rScope">范围 scopeType</label>
+            <select id="rScope">
+              <option value="minimal">minimal（最小：异常全部影响 SN，服务端自动算）</option>
+              <option value="expanded">expanded（扩大：须手填 scope_sns 且覆盖最小集）</option>
+              <option value="full_lot">full_lot（整批：须手填 scope_sns 且覆盖最小集）</option>
+            </select>
+          </div>
+        </div>
+        <div style="margin-top:10px">
+          <label for="rScopeSns">范围 SN scope_sns（逗号分隔；scopeType=expanded/full_lot 时必填且须覆盖最小集）</label>
+          <input type="text" id="rScopeSns" placeholder="SN88213, SN88214">
+        </div>
+      </div>
+
+      <!-- JSON 模式（高级） -->
+      <div id="jsonMode" style="display:none;margin-top:10px">
+        <label for="rJson">请求体 JSON（高级，直接控制全部字段）</label>
+        <textarea id="rJson" rows="8" class="mono" placeholder='{"inspection_id":"...","pmax":548.2,"temp":25,"isc":10.5,"voc":48,"vm":40,"im":13,"ff":0.8,"result":"pass","executor":"QA","executed_at":"2026-10-15T14:00:00","scope_type":"minimal","scope_sns":null}'></textarea>
+        <div class="note warn" style="margin-top:6px;margin-bottom:0">JSON 模式须包含 <span class="mono">inspection_id / 七项参数 / result / executor / executed_at</span>；<span class="mono">scope_type / scope_sns</span> 可选（默认 minimal）。</div>
+      </div>
+
+      <div style="margin-top:14px"><button class="btn" id="doRecheck">创建复检</button></div>
+      <div id="recheckResult"></div>
+    </div>
+
+    <!-- 查看复检记录 -->
+    <div class="card">
+      <h3>查看复检记录（GET /api/incidents/{id}/reinspections）</h3>
+      <div class="form-grid">
+        <div><label for="vIncident">异常 ID（UUID）</label><input type="text" id="vIncident"></div>
+      </div>
+      <div style="margin-top:10px"><button class="btn ghost" id="doListRecheck">加载复检记录</button></div>
+      <div id="recheckList"></div>
+    </div>
+
+    <div class="note todo">
+      <strong>TODO：</strong>复检参数的规则重算由后端完成；本页只录入人工读取的新实测值。
+      「重跑相同规则版本」的选择（原版本 / 新版本）后端接口未提供参数，按当前批次固定 rule_version_id 执行。
+    </div>
+  </div>
+
+  <script src="common.js"></script>
+  <script>
+    renderTopbar("recheck.html");
+
+    /* 上下文记忆：URL 参数优先，其次 localStorage（从异常详情/列表跳转时已 remember） */
+    const preInc = ZHL.prefill("incidentId", "incident");
+    const preBatch = ZHL.prefill("batchId", "batch");
+    if (preInc.value) {
+      document.getElementById("rIncident").value = preInc.value;
+      document.getElementById("vIncident").value = preInc.value;
+    }
+    if (preInc.from === "local" || preBatch.from === "local") {
+      const hint = document.getElementById("rIncidentHint");
+      const parts = [];
+      if (preInc.from === "local") parts.push("异常 ID 已自动带入上次上下文");
+      if (preBatch.from === "local") parts.push("批次 ID 已自动带入（" + preBatch.value + "）");
+      hint.innerHTML = `<div class="note info">${escapeHtml(parts.join("；") + "。可修改。")}</div>`;
+    }
+
+    /* 录入模式切换：表单 / JSON */
+    document.querySelectorAll('input[name="mode"]').forEach((r) => {
+      r.addEventListener("change", () => {
+        const isForm = document.querySelector('input[name="mode"]:checked').value === "form";
+        document.getElementById("formMode").style.display = isForm ? "block" : "none";
+        document.getElementById("jsonMode").style.display = isForm ? "none" : "block";
+      });
+    });
+
+    /* 提交按钮防重提交 */
+    const recheckGuard = ZHL.guardSubmit(document.getElementById("doRecheck"), "提交中…");
+    document.getElementById("doRecheck").addEventListener("click", () => {
+      recheckGuard.run(async () => {
+        const box = ZHL.mount(document.getElementById("recheckResult"), "提交中…");
+        const incidentId = document.getElementById("rIncident").value.trim();
+        if (!incidentId) { box.fail(0, "请填写异常 ID（从异常详情/列表跳转时会自动带入）。"); return; }
+
+        let body;
+        const isJson = document.querySelector('input[name="mode"]:checked').value === "json";
+        if (isJson) {
+          const raw = document.getElementById("rJson").value.trim();
+          try { body = JSON.parse(raw); }
+          catch (e) { box.fail(0, "JSON 解析失败：" + String(e.message || e)); return; }
+        } else {
+          const inspectionId = document.getElementById("rInspection").value.trim();
+          if (!inspectionId) { box.fail(0, "请填写受检 SN 对应的检验记录 ID。"); return; }
+          const nums = ["rPmax","rTemp","rIsc","rVoc","rVm","rIm","rFf"].map((id) => ({ id, v: document.getElementById(id).value }));
+          for (const n of nums) if (n.v === "" || isNaN(Number(n.v))) { box.fail(0, "七项复检参数（pmax/temp/isc/voc/vm/im/ff）全部必填且为数值。"); return; }
+          const executor = document.getElementById("rExecutor").value.trim();
+          const executedAt = document.getElementById("rAt").value.trim();
+          if (!executor || !executedAt) { box.fail(0, "执行人与执行时间为必填。"); return; }
+          const scopeType = document.getElementById("rScope").value;
+          let scopeSns = null;
+          const rawSns = document.getElementById("rScopeSns").value;
+          if (rawSns.trim()) scopeSns = rawSns.split(",").map((s) => s.trim()).filter(Boolean);
+          body = {
+            inspection_id: inspectionId,
+            pmax: Number(document.getElementById("rPmax").value),
+            temp: Number(document.getElementById("rTemp").value),
+            isc: Number(document.getElementById("rIsc").value),
+            voc: Number(document.getElementById("rVoc").value),
+            vm: Number(document.getElementById("rVm").value),
+            im: Number(document.getElementById("rIm").value),
+            ff: Number(document.getElementById("rFf").value),
+            result: document.getElementById("rResult").value,
+            executor,
+            executed_at: executedAt,
+            scope_type: scopeType,
+            scope_sns: scopeSns,
+          };
+        }
+
+        const r = await ZHL.request("POST", `/api/incidents/${encodeURIComponent(incidentId)}/reinspections`, body, box);
+        if (r.ok) {
+          const d = r.data;
+          const cls = d.passed ? "ok" : "err";
+          const bid = preBatch.value || "";
+          // 记住异常/批次上下文，跳转时自动带入
+          ZHL.remember("incident", incidentId);
+          if (bid) ZHL.remember("batch", bid);
+          // 流程跳转：pass → 放行；fail → 回批次页（查看状态/重新处置）
+          const jump = d.passed
+            ? `<div class="item-row"><span>复检通过 → 批次待放行</span><a class="btn" href="release.html?batchId=${encodeURIComponent(bid)}">去放行页</a></div>`
+            : `<div class="item-row"><span>复检失败 → 批次已拒绝</span><a class="btn" href="batch.html?batchId=${encodeURIComponent(bid)}">回批次页</a></div>`;
+          box.set(
+            `<div class="note ${cls}">
+               复检已创建，结果 <strong>${escapeHtml(d.result)}</strong>，
+               范围 ${escapeHtml(d.scope_applied)}（覆盖 SN ${d.scope_sns.length} 个）。
+               ${d.passed ? "批次可进入 待放行。" : "批次已 拒绝。"}
+             </div>
+             <div class="item-list">
+               ${jump}
+               <div class="item-row"><span>异常详情</span><a class="btn ghost" href="incident.html?incidentId=${encodeURIComponent(d.incident_id)}${bid ? "&batchId=" + encodeURIComponent(bid) : ""}">打开</a></div>
+             </div>`
+          );
+        }
+      });
+    });
+
+    document.getElementById("doListRecheck").addEventListener("click", async () => {
+      const box = ZHL.mount(document.getElementById("recheckList"), "加载中…");
+      const incidentId = document.getElementById("vIncident").value.trim();
+      if (!incidentId) { box.fail(0, "请填写异常 ID。"); return; }
+      const r = await ZHL.request("GET", `/api/incidents/${encodeURIComponent(incidentId)}/reinspections`, undefined, box);
+      if (!r.ok) return;
+      const rows = r.data;
+      if (!rows.length) { box.set(`<div class="note info">该异常暂无复检记录。</div>`); return; }
+      const items = rows.map((x) => `
+        <div class="item-row">
+          <div>
+            <strong>SN ${escapeHtml(x.sn)}</strong> · 结果 ${decisionBadge(x.result)} · 范围 ${escapeHtml(x.scope_applied)}
+            <div class="meta">${escapeHtml(x.reinspection_id)}</div>
+          </div>
+        </div>`).join("");
+      box.set(`<div class="item-list">${items}</div>`);
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>异常详情 · 质慧链</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='0.9em' font-size='90'%3E%E8%B4%A8%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+  <div class="page">
+    <h1>异常详情 / CAPA（第 3 段 AI 归因 + 第 4 段处置）</h1>
+    <p class="subtitle">查看异常关联 SN 与证据、AI 归因假设（采纳/驳回/修改）、指派责任人与 CAPA 确认。</p>
+
+    <div class="card">
+      <h3>选择异常</h3>
+      <div class="form-grid">
+        <div><label for="xIncident">异常 ID（UUID）</label><input type="text" id="xIncident"></div>
+      </div>
+      <div style="margin-top:12px">
+        <button class="btn" id="loadIncident">加载异常（GET /api/incidents/{id}）</button>
+      </div>
+      <div id="incidentDetail"></div>
+    </div>
+
+    <div class="card" id="capaForm" style="display:none">
+      <h3>指派责任人（POST /api/incidents/{id}/assign）</h3>
+      <p class="muted">异常 新建/已隔离 → 已指派；同时批次 已隔离 → 待处置（单事务）。</p>
+      <div class="form-grid">
+        <div><label for="aOwner">责任人 owner</label><input type="text" id="aOwner" placeholder="质量工程师姓名"></div>
+        <div><label for="aDue">处置时限 dueAt（ISO-8601）</label><input type="text" id="aDue" placeholder="2026-10-15T18:00:00"></div>
+        <div class="field-full"><label for="aContain">临时遏制措施 containmentAction</label>
+          <input type="text" id="aContain" placeholder="如：隔离对应托盘、暂停该物料批号投料"></div>
+      </div>
+      <div style="margin-top:12px"><button class="btn" id="doAssign">指派</button></div>
+      <div id="assignResult"></div>
+    </div>
+
+    <div class="card" id="capaConfirm" style="display:none">
+      <h3>CAPA 确认（POST /api/incidents/{id}/capa）</h3>
+      <p class="muted">异常 已指派 → 待复检；批次 待处置 → 待复检（单事务）。<strong>verified=true 必须存在 复检通过 的记录，否则后端 400。</strong></p>
+      <div class="form-grid">
+        <div class="field-full"><label for="cRoot">确认根因 confirmedRootCause（必填，来自人工采纳的假设或人工填写）</label>
+          <textarea id="cRoot" rows="2"></textarea></div>
+        <div class="field-full"><label for="cFix">纠正措施 correctiveAction（必填，须可验证）</label>
+          <textarea id="cFix" rows="2"></textarea></div>
+        <div>
+          <label><input type="checkbox" id="cVerified" style="width:auto;vertical-align:middle"> 标记措施已验证 verified（需先有 pass 复检记录）</label>
+        </div>
+      </div>
+      <div style="margin-top:12px"><button class="btn" id="doCapa">提交 CAPA 确认</button></div>
+      <div id="capaResult"></div>
+    </div>
+
+    <div class="card" id="recheckLink" style="display:none">
+      <h3>下一步</h3>
+      <div class="item-list">
+        <div class="item-row"><span>创建复检记录（需 待复检 状态）</span><a class="btn ghost" id="nextRecheck" href="recheck.html">去复检页</a></div>
+        <div class="item-row"><span>返回异常列表</span><a class="btn ghost" href="incidents.html">回列表</a></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="common.js"></script>
+  <script>
+    renderTopbar("incident.html");
+
+    let currentIncident = null;
+
+    function prefill() {
+      /* 上下文记忆：URL 参数优先，其次 localStorage（从列表/批次页跳转时已 remember） */
+      const incCtx = ZHL.prefill("incidentId", "incident");
+      const batCtx = ZHL.prefill("batchId", "batch");
+      const iid = incCtx.value;
+      const bid = batCtx.value;
+      if (iid) {
+        document.getElementById("xIncident").value = iid;
+        ZHL.remember("incident", iid); // 记住当前异常，复检页可自动带入
+        if (bid) ZHL.remember("batch", bid);
+        document.getElementById("nextRecheck").href =
+          "recheck.html?incidentId=" + encodeURIComponent(iid) + (bid ? "&batchId=" + encodeURIComponent(bid) : "");
+      }
+      if (incCtx.from === "local" || batCtx.from === "local") {
+        document.querySelector(".form-grid").insertAdjacentHTML(
+          "afterend", `<div class="note info" style="margin:8px 0">已自动带入上次上下文（异常/批次 ID），可修改后点击「加载异常」。</div>`
+        );
+      }
+      if (iid) loadIncident();
+    }
+
+    document.getElementById("loadIncident").addEventListener("click", loadIncident);
+    prefill();
+
+    async function loadIncident() {
+      const box = ZHL.mount(document.getElementById("incidentDetail"), "加载中…");
+      const id = document.getElementById("xIncident").value.trim();
+      if (!id) { box.fail(0, "请填写异常 ID。"); return; }
+      const r = await ZHL.request("GET", `/api/incidents/${encodeURIComponent(id)}`, undefined, box);
+      if (!r.ok) return;
+      const d = r.data;
+      currentIncident = d;
+      ZHL.remember("incident", d.incident_id);
+      if (d.batch_id) ZHL.remember("batch", d.batch_id);
+
+      const hyp = d.root_cause_hypotheses;
+      let hypHtml;
+      if (!hyp) {
+        hypHtml = `<div class="note todo"><strong>TODO：</strong>AI 归因假设接口未实现。后端尚未生成假设（root_cause_hypotheses 为空）。<br>
+        需求 FR-3.2 要求结构化假设排序 + 证据引用 + 置信度；当前请人工填写根因。</div>`;
+      } else {
+        hypHtml = `<h3>AI 归因假设排序</h3>${ZHL.evidenceBlock(hyp)}`;
+      }
+
+      box.set(`
+        <div class="note ${d.status === "closed" ? "ok" : d.status === "new" || d.status === "isolated" ? "warn" : "info"}">
+          异常 <span class="mono">${escapeHtml(d.incident_id)}</span> · 批次 <span class="mono">${escapeHtml(d.batch_id)}</span><br>
+          状态：${statusBadge(d.status, "incident")} · 触发：${escapeHtml(d.trigger_type)} · 严重度：${escapeHtml(d.severity)}
+          ${d.owner ? " · 责任人：" + escapeHtml(d.owner) : ""}
+          ${d.due_at ? " · 时限：" + fmtDateTimeCell(d.due_at) : ""}
+        </div>
+
+        <div class="card" style="margin-bottom:14px">
+          <h3>遏制 / 根因 / 纠正措施</h3>
+          <table>
+            <tr><td>临时遏制措施</td><td>${d.containment_action ? escapeHtml(d.containment_action) : '<span class="muted">未填写</span>'}</td></tr>
+            <tr><td>确认根因</td><td>${d.confirmed_root_cause ? escapeHtml(d.confirmed_root_cause) : '<span class="muted">未确认</span>'}</td></tr>
+            <tr><td>纠正措施</td><td>${d.corrective_action ? escapeHtml(d.corrective_action) : '<span class="muted">未填写</span>'}</td></tr>
+            <tr><td>CAPA 已验证</td><td>${d.capa_verified ? '<span class="badge ok">是</span>' : '<span class="badge">否</span>'}</td></tr>
+          </table>
+        </div>
+
+        <div class="card" style="margin-bottom:14px">${hypHtml}</div>
+
+        <div class="card" style="margin-bottom:14px">
+          <h3>复检记录 ID</h3>
+          <div class="mono">${d.verification_id ? escapeHtml(d.verification_id) : '<span class="muted">尚无复检记录</span>'}</div>
+        </div>
+      `);
+
+      // 根据状态显示操作表单
+      const assignable = ["new", "isolated"].includes(d.status);
+      const capaReady = d.status === "assigned";
+      document.getElementById("capaForm").style.display = assignable ? "block" : "none";
+      document.getElementById("capaConfirm").style.display = capaReady ? "block" : "none";
+      document.getElementById("recheckLink").style.display = ["pending_recheck", "assigned"].includes(d.status) ? "block" : "none";
+
+      document.getElementById("doAssign").addEventListener("click", doAssign);
+      document.getElementById("doCapa").addEventListener("click", doCapa);
+    }
+
+    const assignGuard = ZHL.guardSubmit(document.getElementById("doAssign"), "提交中…");
+    async function doAssign() {
+      assignGuard.run(async () => {
+        const box = ZHL.mount(document.getElementById("assignResult"), "提交中…");
+        const id = document.getElementById("xIncident").value.trim();
+        if (!id) { box.fail(0, "请先加载异常。"); return; }
+        const body = {
+          owner: document.getElementById("aOwner").value.trim(),
+          due_at: document.getElementById("aDue").value.trim(),
+          containment_action: document.getElementById("aContain").value.trim() || null,
+        };
+        if (!body.owner || !body.due_at) { box.fail(0, "责任人与处置时限为必填。"); return; }
+        const r = await ZHL.request("POST", `/api/incidents/${encodeURIComponent(id)}/assign`, body, box);
+        if (r.ok) {
+          box.set(`<div class="note ok">指派成功，异常 → 已指派，批次 → 待处置。</div>`);
+          loadIncident();
+        }
+      });
+    }
+
+    const capaGuard = ZHL.guardSubmit(document.getElementById("doCapa"), "提交中…");
+    async function doCapa() {
+      capaGuard.run(async () => {
+        const box = ZHL.mount(document.getElementById("capaResult"), "提交中…");
+        const id = document.getElementById("xIncident").value.trim();
+        if (!id) { box.fail(0, "请先加载异常。"); return; }
+        const body = {
+          confirmed_root_cause: document.getElementById("cRoot").value.trim(),
+          corrective_action: document.getElementById("cFix").value.trim(),
+          verified: document.getElementById("cVerified").checked,
+        };
+        if (!body.confirmed_root_cause || !body.corrective_action) {
+          box.fail(0, "确认根因与纠正措施为必填。");
+          return;
+        }
+        const r = await ZHL.request("POST", `/api/incidents/${encodeURIComponent(id)}/capa`, body, box);
+        if (r.ok) {
+          const bid = currentIncident ? currentIncident.batch_id : "";
+          box.set(`<div class="note ok">CAPA 已确认，异常与批次 → 待复检。现在可去复检页创建复检记录。</div>
+            <div style="margin-top:10px"><a class="btn" href="recheck.html?incidentId=${encodeURIComponent(id)}&batchId=${encodeURIComponent(bid)}">去创建复检记录</a></div>`);
+          loadIncident();
+        }
+      });
+    }
+  </script>
+</body>
+</html>

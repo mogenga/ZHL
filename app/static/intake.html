@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>数据入场 · 质慧链</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='0.9em' font-size='90'%3E%E8%B4%A8%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+  <div class="page">
+    <h1>数据入场（第 1 段）</h1>
+    <p class="subtitle">向批次送检数据，抽取字段带置信度；低置信字段进人工确认队列，人工确认后才写入正式检验记录。</p>
+
+    <div class="card">
+      <h3>1. 选择批次并送检</h3>
+      <div class="form-grid">
+        <div><label for="iBatch">批次 ID（UUID）</label><input type="text" id="iBatch"></div>
+        <div>
+          <label for="iSource">来源类型 sourceType</label>
+          <select id="iSource">
+            <option value="IV_CSV">IV_CSV（IV 设备 CSV）</option>
+            <option value="OCR_FORM">OCR_FORM（纸质质检单图像）</option>
+            <option value="MANUAL">MANUAL（人工录入）</option>
+            <option value="SIMULATED_DEVICE">SIMULATED_DEVICE（模拟设备，联调用）</option>
+          </select>
+        </div>
+      </div>
+
+      <div style="margin-top:12px">
+        <label>检验数据（JSON 数组，每行一个 SN；字段：sn / pmax / temp / isc / voc / vm / im / ff / appearance_result / captured_at）</label>
+        <textarea id="iData" rows="8" placeholder='[
+  {"sn": "SN88213", "pmax": 534.2, "temp": 25.1, "isc": 13.4, "voc": 48.9, "vm": 41.2, "im": 12.9, "ff": 0.82, "appearance_result": "Pass", "captured_at": "2026-10-08T09:30:00Z"}
+]'></textarea>
+      </div>
+
+      <div style="margin-top:12px; display:flex; gap:10px">
+        <button class="btn" id="sendIntake">送检（POST /api/intake）</button>
+      </div>
+      <div id="intakeResult"></div>
+    </div>
+
+    <div class="card">
+      <h3>2. 人工确认 / 拒绝（低置信批次）</h3>
+      <p class="muted">送检后若返回 <span class="mono">status=pending</span> 与 <span class="mono">low_conf_sns</span>，
+      需在此人工确认或拒绝。确认前批次停在「待入场」，判定接口会报未确认 SN 清单。</p>
+      <div class="form-grid">
+        <div><label for="cTask">任务 ID（= 批次 ID）</label><input type="text" id="cTask"></div>
+        <div>
+          <label for="cAction">动作</label>
+          <select id="cAction">
+            <option value="confirm">confirm（确认入库，可选修改字段）</option>
+            <option value="reject">reject（拒绝摄入）</option>
+          </select>
+        </div>
+      </div>
+      <div style="margin-top:10px">
+        <label>修改字段 fields（可选，JSON 对象；白名单：pmax / temp / isc / voc / vm / im / ff / appearance_result）</label>
+        <textarea id="cFields" rows="3" placeholder='{"temp": 25.4}（留空则不改）'></textarea>
+      </div>
+      <div style="margin-top:12px">
+        <button class="btn" id="doConfirm">提交确认 / 拒绝（POST /api/intake/{id}/confirm）</button>
+      </div>
+      <div id="confirmResult"></div>
+    </div>
+
+    <div class="card">
+      <h3>3. 送检结果说明</h3>
+      <ul style="margin:0; padding-left:18px">
+        <li><span class="mono">status=confirmed</span>：高置信（≥0.8）自动确认，批次进入「待判定」。</li>
+        <li><span class="mono">status=pending</span>：低置信字段已进人工队列，需用第 2 步确认。</li>
+        <li><span class="mono">low_conf_sns</span>：低置信 SN 清单，只核对这些 SN。</li>
+        <li>SN 跨批次冲突 → 400 <span class="mono">cross_batch_sn_conflict</span>，两个批次被阻断（验收样例 4）。</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h3>下一步</h3>
+      <div class="item-row">
+        <span>确认入库后 → 触发判定</span>
+        <a class="btn ghost" id="nextJudge" href="batch.html?batchId=">去批次页</a>
+      </div>
+    </div>
+  </div>
+
+  <script src="common.js"></script>
+  <script>
+    renderTopbar("intake.html");
+
+    // 上下文记忆：URL 参数优先，其次 localStorage（从批次列表「入场」跳转时已 remember）
+    const pre = ZHL.prefill("batchId", "batch");
+    if (pre.value) {
+      document.getElementById("iBatch").value = pre.value;
+      document.getElementById("cTask").value = pre.value;
+      document.getElementById("nextJudge").href = "batch.html?batchId=" + encodeURIComponent(pre.value);
+      if (pre.from === "local") {
+        document.querySelector(".form-grid").insertAdjacentHTML(
+          "afterend", `<div class="note info" style="margin:8px 0">批次 ID 已自动带入上次上下文（${escapeHtml(pre.value)}），可修改。</div>`
+        );
+      }
+    }
+
+    document.getElementById("sendIntake").addEventListener("click", async () => {
+      const box = ZHL.mount(document.getElementById("intakeResult"), "送检中…");
+      const batchId = document.getElementById("iBatch").value.trim();
+      if (!batchId) { box.fail(0, "请填写批次 ID。"); return; }
+
+      let inspections = [];
+      const raw = document.getElementById("iData").value.trim();
+      if (raw) {
+        try { inspections = JSON.parse(raw); }
+        catch (e) { box.fail(0, "检验数据不是合法 JSON 数组：" + String(e)); return; }
+        if (!Array.isArray(inspections)) { box.fail(0, "检验数据必须是 JSON 数组。"); return; }
+      }
+
+      const body = {
+        batch_id: batchId,
+        source_type: document.getElementById("iSource").value,
+        inspections,
+      };
+      const r = await ZHL.request("POST", "/api/intake", body, box);
+      if (r.ok) {
+        const d = r.data;
+        const conf = (d.confidence !== undefined && d.confidence !== null) ? d.confidence : "—";
+        const low = (d.low_conf_sns && d.low_conf_sns.length)
+          ? `<div>低置信 SN（需人工确认）：${d.low_conf_sns.map(escapeHtml).join("、")}</div>`
+          : `<div class="muted">无低置信 SN。</div>`;
+        const extracted = d.extracted_fields && Object.keys(d.extracted_fields).length
+          ? `<details style="margin-top:8px"><summary>抽取字段明细</summary>${ZHL.evidenceBlock(d.extracted_fields)}</details>`
+          : "";
+        box.set(
+          `<div class="note ${d.status === "confirmed" ? "ok" : "warn"}">
+             送检结果：status = <strong>${escapeHtml(d.status)}</strong>，整体置信度 ${escapeHtml(conf)}。${low}
+           </div>` +
+          extracted +
+          `<div class="note info" style="margin-top:8px">任务 ID（= 批次 ID）：<span class="mono">${escapeHtml(d.task_id)}</span>
+             —— 填入第 2 步可人工确认 / 拒绝。</div>`
+        );
+      }
+    });
+
+    document.getElementById("doConfirm").addEventListener("click", async () => {
+      const box = ZHL.mount(document.getElementById("confirmResult"), "提交中…");
+      const taskId = document.getElementById("cTask").value.trim();
+      if (!taskId) { box.fail(0, "请填写任务 ID（= 批次 ID）。"); return; }
+
+      let fields = null;
+      const fRaw = document.getElementById("cFields").value.trim();
+      if (fRaw) {
+        try { fields = JSON.parse(fRaw); }
+        catch (e) { box.fail(0, "fields 不是合法 JSON 对象：" + String(e)); return; }
+      }
+      const body = { action: document.getElementById("cAction").value, fields };
+      const r = await ZHL.request("POST", `/api/intake/${encodeURIComponent(taskId)}/confirm`, body, box);
+      if (r.ok) {
+        const st = r.data.intake_status;
+        box.set(
+          `<div class="note ${st === "confirmed" ? "ok" : "warn"}">
+             已提交，批次检验记录 intake_status = <strong>${escapeHtml(st)}</strong>。
+             ${st === "confirmed" ? "现在可去批次页触发判定。" : "该批数据被拒绝摄入。"}
+           </div>
+           <a class="btn" href="batch.html?batchId=${encodeURIComponent(taskId)}">去批次详情</a>`
+        );
+      }
+    });
+  </script>
+</body>
+</html>
