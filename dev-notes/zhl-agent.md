@@ -785,3 +785,17 @@
 4. **验证**：新增 `tests/static/test_wb_intake_wait.js` 24 条断言（等待窗生命周期/超时切轮询/低置信 pending 出口/4xx 收窗报错/空数据不丢输入/计时器无泄漏）ALL PASS；4 套既有 JS 回归 ALL PASS；pytest 全量 **397 passed**；ruff/black 不涉及（未改 Python）。
 5. **文档**：README JS 测试索引 +1；docs/test/01 §6 已知限制表补 #14。
 6. **dev-notes 路径**：本文件（本节）。
+
+## 2026-10-15 · 自动异常不可见 + 创建表单误导（合并 cd3fac2 后用户反馈）
+
+1. **用户反馈**：「数据入场之后，存在异常问题，自动推进到异常处理，但是需要创建异常（异常件在入场结果显示不直观），需要自己输入受影响组件条码和证据引用，还有『注意：本批已有 1 条未关闭的规则失败异常，提交将再新建一条』这个逻辑是不是不太对？」
+2. **根因（三个，全前端）**：
+   - 自动建异常其实一直在工作（main_chain.batch_transition 同事务 ensure_incident），但合并后的 `_finishWait`（提交成功路径）与 `_sendIntake` 失败分支**漏刷 loadIncidents**——面板停在「尚无异常记录」，用户以为没建、手动再建一张（与 2026-10 的重复单缺陷同型）。
+   - 创建表单要求从零填触发原因/条码/证据，而自动异常在场时多数字段可推导。
+   - 创建表单对「同因未关闭异常」一律提示「提交将再新建一条」——同因异常是**系统自动建的**（判定失败的处置入口就是它）时，这是把人往重复单上推。
+3. **修补（app/static/wb/stages/{intake,incident}.js）**：
+   - `_finishWait` 成功路径补 `WB.loadIncidents()`；批次确已隔离时追加 toast「系统已自动创建异常，请在异常处置节点处理」；`_sendIntake` 失败分支同样补刷。
+   - 创建表单预填：触发原因按批次结论推导（抽样 fail→sample_fail / rule_missing→rule_missing / 其余→rule_fail，与 ensure_incident 触发优先级一致）；受影响条码预填本批判定失败 SN（decision_status=fail）；证据引用 hint 说明通常可留空。
+   - 同因提示分流：同因异常**全是**自动建（incident_auto 轨迹可查）→ 提示「系统自动创建，无需重复创建，回面板处置」，按钮保持「创建异常」；含人工建的才保留「仍要新建」软防呆。updateDup 现读 incidentAutoInfo()（轨迹晚于表单打开到达也能判对，顺带消竞态）。
+4. **验证**：test_wb_incident_dup 新增 C2 组 4 条（自动异常提示分流）+ C3 组 4 条（预填），共 8 条；5 套 JS ALL PASS；pytest 397 passed。C2 组曾因 openCreateForm 清 traces + updateDup 定格 autoMap 双重时序失败，正好暴露实现里的捕获时机问题（已改现读）。
+5. **dev-notes 路径**：本文件（本节）。

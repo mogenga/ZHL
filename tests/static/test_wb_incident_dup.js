@@ -238,6 +238,61 @@ function openCreateForm(list) {
     WB.closeModal();
   }
 
+  // ---- C2. 自动异常在场：提示去处置，不引导再建（2026-10-15 反馈「逻辑不太对」）----
+  // 判定失败 → 后端已同事务自动建异常（incident_auto 轨迹）。此时创建表单的
+  // 同因提示若还说「提交将再新建一条」，是把人往重复单上推。
+  {
+    const autoInc = { incident_id: '44444444-4444-4444-4444-444444444444',
+      batch_id: BATCH_ID, status: 'new', trigger_type: 'rule_fail', severity: 'major' };
+    await openCreateForm([autoInc]);
+    assert(!!WB._modal, 'C2-1: 打开创建表单');
+    // openCreateForm 会清 traces（C 组专用夹具行为），此处打开表单后再设：
+    // 轨迹晚于表单打开到达是真实时序（入场完成→自动建异常→traces 异步刷新），
+    // updateDup 现读 autoMap，触发一次 change 即可用最新轨迹重算
+    WB.state.traces = [{ skill_name: 'incident_auto', validation_result: 'pass',
+      structured_output: { created: true, incident_id: autoInc.incident_id },
+      params_summary: { mapped_sns: ['SN-N-057'] } }];
+    WB._modal.inputs[0].fire('change');
+    await flush(); await flush();
+    assert(hasText(WB._modal.box, '自动创建'), 'C2-2: 自动异常 → 提示「系统自动创建，无需重复创建」');
+    assert(!hasText(WB._modal.box, '再新建一条'), 'C2-3: 不再出现「提交将再新建一条」');
+    assert(WB._modal.submitBtn.textContent === '创建异常', 'C2-4: 按钮保持「创建异常」（不是「仍要新建」）');
+    WB.closeModal();
+    WB.state.traces = [];
+  }
+
+  // ---- C3. 表单预填：失败 SN 预填受影响条码、触发原因按批次结论推导 ----
+  {
+    const failBatch = { batch_id: BATCH_ID, batch_no: 'B-PF', status: 'isolated',
+      sample_result: null,
+      inspections: [
+        { sn: 'SN-F-1', decision_status: 'fail' },
+        { sn: 'SN-F-2', decision_status: 'fail' },
+        { sn: 'SN-P-1', decision_status: 'pass' },
+      ] };
+    WB.state.selected = failBatch; WB.state.batchId = BATCH_ID;
+    WB.state.incidents = []; WB.state.traces = [];
+    WB.api.listIncidents = () => Promise.resolve({ ok: true, data: [] });
+    const panel = WB.stages.incident.render(failBatch, {});
+    findText(panel, '创建异常').fire('click');
+    await flush(); await flush();
+    assert(!!WB._modal, 'C3-1: 打开创建表单');
+    const snsVal = WB._modal.inputs[2].value;
+    assert(snsVal.indexOf('SN-F-1') >= 0 && snsVal.indexOf('SN-F-2') >= 0
+      && snsVal.indexOf('SN-P-1') < 0,
+      'C3-2: 受影响条码预填本批判定失败的 SN（不含 pass 的）');
+    assert(WB._modal.inputs[0].value === 'rule_fail', 'C3-3: 触发原因按结论预判（rule_fail）');
+    WB.closeModal();
+    // 抽样 fail 批次 → 预判 sample_fail
+    const sampleBatch = Object.assign({}, failBatch, { sample_result: 'fail' });
+    WB.state.selected = sampleBatch;
+    const p2 = WB.stages.incident.render(sampleBatch, {});
+    findText(p2, '创建异常').fire('click');
+    await flush(); await flush();
+    assert(WB._modal.inputs[0].value === 'sample_fail', 'C3-4: 抽样结论 fail → 预判 sample_fail');
+    WB.closeModal();
+  }
+
   // ---- C''. 空条码校验失败不关窗、不发请求 ----
   {
     let posted = 0;

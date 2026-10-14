@@ -215,9 +215,10 @@ WB.stages.intake = (function () {
       // 其余才是真失败（409 已入场 / 400 数据问题……），关窗如实报错
       _closeWaitModal();
       WB.toast(WB.errText(e));
-      // 失败也刷新：批次可能已被先前一次超时的提交推进，界面不能停在旧状态
+      // 失败也刷新：批次可能已被先前一次超时的提交推进（含自动建异常），界面不能停在旧状态
       WB._loadDetail(batch.batch_id);
       WB.loadBatches();
+      WB.loadIncidents();
     });
   }
 
@@ -273,6 +274,10 @@ WB.stages.intake = (function () {
     const wasPending = data && data.status === 'pending';
     _closeWaitModal();
     WB.toast('提交成功，批次已推进：' + _progressText(data));
+    // 判定失败 → 后端已同事务自动建异常（app/workflow/main_chain.py
+    // batch_transition → ensure_incident）。异常列表必须跟着刷新，否则异常处置
+    // 面板停在「尚无异常记录」，用户误以为要手动创建（2026-10-15 反馈）。
+    // pending（低置信等确认）不经过判定，无自动异常，无需刷。
     if (wasPending) {
       // 先拉详情再挂结果卡：_loadDetail 的异步回调会整幅重画主区
       WB._loadDetail(batch.batch_id);
@@ -283,7 +288,17 @@ WB.stages.intake = (function () {
     } else {
       WB._loadDetail(batch.batch_id);
       WB.loadBatches();
+      WB.loadIncidents();
       showIntakeResult(batch, data);
+      // 判定未通过时明确告知「异常已自动建好」，别让人去手动补建
+      WB.api.getBatch(batch.batch_id).then(function (r) {
+        if (r.ok && r.data && r.data.status === 'isolated') {
+          // 主 toast（2600ms 自动消失）之后再说这句，避免被覆盖
+          setTimeout(function () {
+            WB.toast('判定未通过：批次已隔离，系统已自动创建异常，请在「异常处置」节点处理');
+          }, 2700);
+        }
+      });
     }
     if (data && data.degraded) {
       WB.toast('已自动追上进度；本次为超时后合成结果，抽取明细可在判定节点「重新判定」查看');

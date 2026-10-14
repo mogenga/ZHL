@@ -354,11 +354,23 @@ WB.stages.incident = (function () {
   /* ---- 创建异常表单（isolated 批次；spec §4 步骤 2）----
      打开前实时拉取本批未关闭异常：同触发原因已有在办异常时行内提示 +
      按钮变「仍要新建」（软防呆，不硬阻断——业务允许多条同因异常）。
-     校验失败不关窗（保留已填输入）。 */
+     校验失败不关窗（保留已填输入）。
+     预填（2026-10-15 反馈「需要自己输入受影响组件条码和证据引用」）：
+     自动异常通常已在场（判定失败同事务创建），手动建单多为补录——
+     触发原因按批次已有结论推导、受影响条码预填本批判定失败的 SN，把
+     「从零填表」变成「核对后提交」。 */
   function createIncidentForm(batch, body) {
     const sns = (batch.inspections || []).map(function (x) { return x.sn; });
+    // 本批判定失败的 SN：判定明细 decision_status=fail 的行
+    const failSns = (batch.inspections || [])
+      .filter(function (x) { return x.decision_status === 'fail'; })
+      .map(function (x) { return x.sn; });
+    // 触发原因预判：抽样结论 fail → sample_fail；规则缺失结论 → rule_missing；
+    // 其余（含判定 fail）→ rule_fail。与 ensure_incident 的触发优先级一致。
+    const trigGuess = batch.sample_result === 'fail' ? 'sample_fail'
+      : (batch.sample_result === 'rule_missing' ? 'rule_missing' : 'rule_fail');
     const fields = [
-      { label: '触发原因', type: 'select', required: true, options: [
+      { label: '触发原因', type: 'select', required: true, value: trigGuess, options: [
         { value: 'rule_fail', label: '规则失败' },
         { value: 'sample_fail', label: '抽样失败' },
         { value: 'appearance_manual', label: '外观人工触发' },
@@ -371,8 +383,12 @@ WB.stages.incident = (function () {
         { value: 'minor', label: '轻微' },
       ] },
       { label: '受影响组件条码（多行，每行一个）', type: 'textarea', rows: 3, required: true,
-        hint: sns.length ? '本批可用：' + sns.join('、') : '按本批组件条码填写' },
-      { label: '证据引用（可空，逗号分隔）', type: 'text' },
+        value: failSns.length ? failSns.join('\n') : '',
+        hint: failSns.length
+          ? '已预填本批判定失败的组件，可增删'
+          : (sns.length ? '本批可用：' + sns.join('、') : '按本批组件条码填写') },
+      { label: '证据引用（可空，逗号分隔）', type: 'text',
+        hint: '通常可留空：判定证据已随批次自动归档，关闭时校验的是异常上的引用' },
     ];
     const inline = WB.h('div', {});
     const dupSlot = WB.h('div', {});
@@ -389,12 +405,26 @@ WB.stages.incident = (function () {
         if (!m) return;
         const trigger = m.inputs[0] ? m.inputs[0].value : null;
         const dup = open.filter(function (i) { return i.trigger_type === trigger; });
+        // 自动异常映射在每次刷新时现读：轨迹可能晚于表单打开到达
+        //（入场完成→自动建异常→traces 异步刷新），定格在回调入口会漏判
+        const autoMap = WB.incidentAutoInfo();
         if (dup.length) {
-          dupSlot.replaceChildren(WB.h('div', { class: 'hint-line', text: '注意：本批已有 ' + dup.length +
-            ' 条未关闭的「' + (WB.TRIG_CN[trigger] || trigger) + '」异常（' +
-            dup.map(function (i) { return String(i.incident_id).slice(0, 8); }).join('、') +
-            '），提交将再新建一条。' }));
-          if (m.submitBtn) m.submitBtn.textContent = '仍要新建';
+          const autoDup = dup.filter(function (i) { return autoMap[String(i.incident_id)]; });
+          if (autoDup.length === dup.length) {
+            // 同因异常全是系统自动建的：判定/抽样失败的处置入口就是它，
+            // 引导去处理而不是再建一张（2026-10-15 反馈「这个逻辑不太对」）。
+            dupSlot.replaceChildren(WB.h('div', { class: 'hint-line',
+              text: '本批的「' + (WB.TRIG_CN[trigger] || trigger) + '」异常（' +
+                dup.map(function (i) { return String(i.incident_id).slice(0, 8); }).join('、') +
+                '）由系统判定失败时自动创建，无需重复创建；关闭本表单回到面板即可处置。' }));
+            if (m.submitBtn) m.submitBtn.textContent = '创建异常';
+          } else {
+            dupSlot.replaceChildren(WB.h('div', { class: 'hint-line', text: '注意：本批已有 ' + dup.length +
+              ' 条未关闭的「' + (WB.TRIG_CN[trigger] || trigger) + '」异常（' +
+              dup.map(function (i) { return String(i.incident_id).slice(0, 8); }).join('、') +
+              '），提交将再新建一条。' }));
+            if (m.submitBtn) m.submitBtn.textContent = '仍要新建';
+          }
         } else {
           dupSlot.replaceChildren();
           if (m.submitBtn) m.submitBtn.textContent = '创建异常';
