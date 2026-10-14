@@ -593,7 +593,9 @@ WB.loadIncidents = function () {
   return WB.api.listIncidents().then(function (res) {
     WB.state.incidents = res.ok ? res.data : [];
     if (WB.state.view === 'incidents') WB.renderLeft();
-    if (!WB.state.batchId) WB._renderCenterAndRight();
+    // 无论是否已选中批次都重渲中栏：详情先到、异常后到的竞态下，
+    // 面板不能停留在「尚无异常记录」（曾致创建表单误显→重复建单）
+    if (!WB.state.detailLoading) WB._renderCenterAndRight();
     return res;
   });
 };

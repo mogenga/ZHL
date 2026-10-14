@@ -33,6 +33,7 @@ const documentStub = {
   createElement: (t) => el(t),
   createTextNode: (t) => ({ nodeType: 3, nodeValue: t }),
   querySelectorAll: () => [],
+  querySelector: () => el('x'),  // main.js 渲染会查 .brand（stub 此前缺失，加载即崩）
   addEventListener(){},
   body: { appendChild(){}, append(){} },
 };

@@ -285,6 +285,83 @@ def test_trace_endpoint_returns_batch_trace_rows(api_client: Any) -> None:
     engine.dispose()
 
 
+def test_trace_endpoint_exposes_structured_output(api_client: Any) -> None:
+    """list_traces 必须回吐 structured_output——工作台靠它把
+    ``incident_auto`` 轨迹映射到异常 id（卡片「自动」标记的依据，
+    2026-10 重复创建缺陷回归）。"""
+    from datetime import UTC, datetime
+
+    from fastapi.testclient import TestClient
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    from app.infra.models import Base, DeliveryBatch, QualityRuleVersion
+    from app.plugins.trace_store import TraceStore
+
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    rule_id = UUID("ab900000-1111-2222-3333-444444444498")
+    batch_id = UUID("ab900000-1111-2222-3333-4444444444bb")
+    session.add(
+        QualityRuleVersion(
+            rule_version_id=rule_id,
+            project_id="P-1",
+            model="JH-550W",
+            name="rv",
+            nameplate_power=550.0,
+            power_tolerance=0.5,
+            parameter_standards={},
+            current_bands={},
+            sample_plan={},
+            effective_at=_TS,
+            version_no=1,
+        )
+    )
+    session.add(
+        DeliveryBatch(
+            batch_id=batch_id,
+            batch_no="B-TRACE-02",
+            project_id="P-1",
+            model="JH-550W",
+            planned_quantity=1,
+            rule_version_id=rule_id,
+            status="isolated",
+        )
+    )
+    TraceStore().record(
+        session,
+        batch_id=batch_id,
+        skill_name="incident_auto",
+        input_ref={"batch_id": str(batch_id)},
+        plugins_invoked=[],
+        params_summary={"trigger_type": "rule_fail", "mapped_sns": ["SN-N-057"]},
+        structured_output={
+            "created": True,
+            "incident_id": "22222222-2222-2222-2222-222222222222",
+        },
+        validation_result="pass",
+        human_action={"action": "auto"},
+        started_at=datetime.now(UTC),
+    )
+    session.commit()
+    app = create_app_with_trace(session_factory=lambda: session, own_session=False)
+    client = TestClient(app)
+    r = client.get(f"/api/batches/{batch_id}/traces")
+    assert r.status_code == 200, r.text
+    rows = r.json()
+    assert len(rows) == 1
+    assert rows[0]["skill_name"] == "incident_auto"
+    so = rows[0].get("structured_output")
+    assert isinstance(so, dict) and so.get("created") is True
+    assert so.get("incident_id") == "22222222-2222-2222-2222-222222222222"
+    session.close()
+    engine.dispose()
+
+
 def test_static_mount_present(api_client: Any) -> None:
     """The rebuilt UI serves ``app/static`` (single-page workbench).
 

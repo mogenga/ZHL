@@ -84,17 +84,19 @@ WB.openModal = function (title, fields, onOk, opts = {}) {
     if (typeof opts.inline === 'string') opts.inline = document.querySelector(opts.inline);
     if (opts.inline) box.append(opts.inline);
   }
+  const okBtn = WB.h('button', { class: 'primary', onclick: () => {
+    const vals = inputs.map((i) => i.type === 'checkbox' ? i.checked : i.value);
+    // onOk 返回 false = 行内校验未过：保留输入不关窗（其余视为放行，兼容既有回调）
+    if (onOk(vals, inputs) === false) return;
+    WB.closeModal();
+  }, text: opts.submitLabel || '确定' });
   box.append(WB.h('div', { class: 'foot' },
     WB.h('button', { onclick: () => WB.closeModal(), text: '取消' }),
-    WB.h('button', { class: 'primary', onclick: () => {
-      const vals = inputs.map((i) => i.type === 'checkbox' ? i.checked : i.value);
-      WB.closeModal();
-      onOk(vals, inputs);
-    }, text: opts.submitLabel || '确定' }),
+    okBtn,
   ));
   document.body.append(ov, box);
   ov.addEventListener('click', (ev) => { if (ev.target === ov) WB.closeModal(); });
-  WB._modal = { ov, box, inputs };
+  WB._modal = { ov, box, inputs, submitBtn: okBtn };
   return WB._modal;
 };
 WB.closeModal = function () {

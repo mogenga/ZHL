@@ -80,3 +80,23 @@ def test_no_bare_dialog_primitives():
 def test_charset_declared():
     html = (ROOT / "workbench.html").read_text(encoding="utf-8")
     assert 'charset="utf-8"' in html
+
+
+def _intake_fn_src(name: str) -> str:
+    """Extract one function body from intake.js by its declaration line."""
+    import re
+
+    src = (ROOT / "wb" / "stages" / "intake.js").read_text(encoding="utf-8")
+    m = re.search(r"function " + re.escape(name) + r"\(.*?\n  \}", src, re.S)
+    assert m, f"intake.js 缺少函数 {name}"
+    return m.group(0)
+
+
+def test_intake_state_advances_refresh_incidents():
+    """批次推进（确认入场/自动确认离开入场）后必须刷新异常列表。
+
+    缺了它，判定失败自动建的异常不会出现在面板上，创建表单在
+    「已有异常」时照常显示，人工再建即产生重复异常（2026-10 反馈）。
+    """
+    for fn in ("_intakeAct", "_pollUntilLeftIntake"):
+        assert "WB.loadIncidents()" in _intake_fn_src(fn), f"intake.js {fn} 未刷新异常列表"

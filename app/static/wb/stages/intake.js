@@ -136,7 +136,10 @@ WB.stages.intake = (function () {
     WB.api.confirmIntake(batch.batch_id, { action: action, fields: null }).then(function (res) {
       if (!res.ok) { WB.toast(WB.errText(res.error)); return; }
       WB.toast(action === 'confirm' ? '已确认入场' : '已拒绝入场，批次仍待入场');
-      // 确认/拒绝后后端图同步推进（判定/抽样）→ 刷新批次跟随新状态（spec §4.3）
+      // 确认/拒绝后后端图同步推进（判定/抽样）→ 刷新批次跟随新状态（spec §4.3）；
+      // 推进到隔离时后端会同事务自动建异常，异常列表必须同步刷新，
+      // 否则面板停留在「尚无异常记录」误导再建（重复单缺陷，2026-10）
+      WB.loadIncidents();
       WB._loadDetail(batch.batch_id);
       WB.loadBatches();
     });
@@ -194,6 +197,8 @@ WB.stages.intake = (function () {
         const st = res.ok && res.data ? res.data.status : null;
         if (st && st !== 'pending_intake') {
           clearInterval(timer);
+          // 离开入场（自动确认→判定→可能隔离+自动建异常）：异常列表一并刷新
+          WB.loadIncidents();
           WB._loadDetail(batch.batch_id);
           WB.loadBatches();
           return;
