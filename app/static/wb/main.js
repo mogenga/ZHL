@@ -398,19 +398,22 @@ WB._ruleActions = function (r) {
 };
 
 WB._changeRuleStatus = function (r, action) {
-  const op = prompt('操作人（operator）：', 'manual');
-  if (op == null) return; // 用户取消
-  const reason = action === 'disable' ? prompt('停用原因（可选）：', '') : null;
-  if (action === 'disable' && reason === null) return; // 取消
-  const body = { operator: op.trim() || 'manual', source: 'manual', reason: (reason != null && reason !== '') ? reason : null };
-  const call = action === 'publish' ? WB.api.publishRuleVersion(r.rule_version_id, body) : WB.api.disableRuleVersion(r.rule_version_id, body);
-  call.then(function (res) {
-    if (!res.ok) { WB.toast(WB.errText(res.error)); return; }
-    WB.toast(action === 'publish' ? '规则版本已发布' : '规则版本已停用');
-    WB.loadRuleVersions().then(function () { if (WB.state.view === 'rules') WB.renderLeft(); });
-    // 批次新建下拉依赖 published 列表，刷新一次
-    WB.loadRuleVersions();
-  });
+  const isDisable = action === 'disable';
+  const fields = [{ label: '操作人（operator）*', type: 'text', value: 'manual', placeholder: '填写操作人', required: true }];
+  if (isDisable) fields.push({ label: '停用原因（可选）', type: 'text', placeholder: '如：版本口径变更 / 抽检不合格率上升', required: false });
+  const title = isDisable ? ('停用规则版本 ' + r.name + ' v' + r.version_no) : ('发布规则版本 ' + r.name + ' v' + r.version_no);
+  WB.openModal(title, fields, function (vals) {
+    const operator = (vals[0] || '').trim() || 'manual';
+    const reason = isDisable ? ((vals[1] || '').trim() || null) : null;
+    if (!operator) { WB.toast('请填写操作人'); return; }
+    const body = { operator: operator, source: 'manual', reason: reason };
+    const call = isDisable ? WB.api.disableRuleVersion(r.rule_version_id, body) : WB.api.publishRuleVersion(r.rule_version_id, body);
+    call.then(function (res) {
+      if (!res.ok) { WB.toast(WB.errText(res.error)); return; }
+      WB.toast(isDisable ? '规则版本已停用' : '规则版本已发布');
+      WB.loadRuleVersions().then(function () { if (WB.state.view === 'rules') WB.renderLeft(); });
+    });
+  }, { submitLabel: isDisable ? '确认停用' : '确认发布' });
 };
 
 WB._ruleEventsDrawer = function (r) {
