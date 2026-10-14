@@ -40,6 +40,16 @@ WB.goHome = function () {
 /* ---- 视图切换（左列四标签）---- */
 WB.switchView = function (name) {
   WB.state.view = name;
+  // 报告视图：切换时拉取当前批次的报告列表（填充 WB.state.reports，左栏渲染直接展示）
+  if (name === 'reports') {
+    WB.state.reports = [];
+    if (WB.state.batchId) {
+      WB.api.listReports(WB.state.batchId).then(function (res) {
+        WB.state.reports = (res.ok ? res.data : []) || [];
+        if (WB.state.view === 'reports') WB.renderLeft();
+      });
+    }
+  }
   WB.renderLeft();
   if (name !== 'batch') WB.state._search = '';
   WB._renderCenterAndRight();
@@ -100,7 +110,10 @@ WB.renderHome = function () {
   const wrap = WB.h('div', {});
   wrap.append(WB.h('div', { class: 'crumb', text: '工作台 / 总览' }));
   const batches = WB.state.batches || [];
-  const inProgress = batches.filter((b) => b.status !== 'archived');
+  // 终态批次：released 与 rejected 都会自动归档（D6a），与已归档同组统计，避免
+  // 侧栏 KPI「在制」与批次列表「进行中」把已到放行/拒绝终态的批次误计为在制
+  const isTerminal = (b) => b.status === 'archived' || b.status === 'released' || b.status === 'rejected';
+  const inProgress = batches.filter((b) => !isTerminal(b));
   const cnt = (s) => batches.filter((b) => b.status === s).length;
   const openInc = (WB.state.incidents || []).filter(function (i) {
     return ['new', 'isolated', 'assigned', 'pending_recheck'].indexOf(i.status) >= 0;
@@ -280,8 +293,9 @@ WB.renderLeft = function () {
     const list = WB.state.batches;
     const q = (WB.state._search || '').trim().toLowerCase();
     const match = (b) => !q || (b.batch_no + b.project_id + b.model).toLowerCase().includes(q);
-    const active = list.filter((b) => match(b) && b.status !== 'archived');
-    const done = list.filter((b) => match(b) && b.status === 'archived');
+    const isTerminal = (b) => b.status === 'archived' || b.status === 'released' || b.status === 'rejected';
+    const active = list.filter((b) => match(b) && !isTerminal(b));
+    const done = list.filter((b) => match(b) && isTerminal(b));
     const item = (b) => WB.h('button', {
       class: 'batch-item' + (b.batch_id === WB.state.batchId ? ' on' : ''),
       onclick: () => WB.selectBatch(b.batch_id),
@@ -290,7 +304,7 @@ WB.renderLeft = function () {
       WB.h('div', { class: 'meta', text: b.project_id + ' · ' + b.model + ' · 计划 ' + b.planned_quantity }));
     pane.append(WB.h('div', { class: 'group-title', text: '进行中（' + active.length + '）' }));
     active.forEach((b) => pane.append(item(b)));
-    pane.append(WB.h('div', { class: 'group-title', text: '已归档（' + done.length + '）' }));
+    pane.append(WB.h('div', { class: 'group-title', text: '已结束（' + done.length + '）' }));
     done.forEach((b) => pane.append(item(b)));
     if (!list.length) pane.append(WB.h('div', { class: 'empty', text: '暂无批次' }));
   } else if (WB.state.view === 'rules') {
@@ -333,7 +347,7 @@ WB.renderLeft = function () {
 /* spec §5 术语对照表 */
 WB.TRIG_CN = { rule_fail: '规则失败', sample_fail: '抽样失败', appearance_manual: '外观人工触发', data_consistency: '数据一致性', rule_missing: '规则缺失' };
 WB.SEV_CN = { critical: '严重', major: '较严重', minor: '轻微' };
-WB.REP_CN = { release: '放行报告', incident: '异常处置报告' };
+WB.REP_CN = WB.REP_CN || { release: '放行报告', incident: '异常处置报告', summary: '批次汇总' };
 WB._onSearch = function (e) {
   WB.state._search = e.target.value;
   if (WB.state.view === 'batch') WB.renderLeft();
@@ -449,8 +463,9 @@ WB._locateBatch = function (i) {
   if (i.batch_id) WB.selectBatch(i.batch_id);
 };
 WB._reportDrawer = function (r) {
+  if (WB.report && WB.report.open) { WB.report.open(r); return; }
   WB.openDrawer((WB.REP_CN || {})[r.report_type] || '报告',
-    '报告号 ' + r.report_id + ' · 版本 v' + r.version + ' · 生成 ' + WB.fmtTime(r.generated_at) + '\n内容渲染见 T9。');
+    '报告号 ' + r.report_id + ' · 版本 v' + r.version + ' · 生成 ' + WB.fmtTime(r.generated_at));
 };
 
 /* ---- 选中批次：接真实 getBatch + traces（spec §1.4 刷新恢复）---- */

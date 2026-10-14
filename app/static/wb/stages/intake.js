@@ -45,6 +45,7 @@ WB.stages.intake = (function () {
       if (err) { WB.toast(err); return; }
       if (!inspections.length) { WB.toast('没有可解析的检测数据行'); return; }
       const fieldsOverride = parseOverrides(overrideStr);
+      _markModalBusy();
       WB.api.submitIntake({
         batch_id: batch.batch_id,
         source_type: source_type,
@@ -52,16 +53,20 @@ WB.stages.intake = (function () {
         fields: fieldsOverride || null,
       }).then(function (res) {
         if (!res.ok) {
+          _unmarkModalBusy();
           WB.toast(WB.errText(res.error));
           // 失败也刷新，避免界面停在旧状态（如批次已推进/已有行）被重复提交
           WB._loadDetail(batch.batch_id);
+          WB.loadBatches();
           return;
         }
+        // 成功：后台可能仍在跑图（判定/抽样），不再一次性等待到底，
+        // 展示初始结果并轮询批次状态直到离开 pending_intake（前端可视化处理进度）
         WB.toast('提交成功，批次已推进：' + _progressText(res.data));
-        // 刷新批次头/流水线/右栏进度，跳到新阶段；再在中栏改写入场结果卡
         WB._loadDetail(batch.batch_id);
         WB.loadBatches();
         showIntakeResult(batch, res.data);
+        _pollUntilLeftIntake(batch);
       });
     }, { submitLabel: '提交送检' });
   }
@@ -162,6 +167,43 @@ WB.stages.intake = (function () {
       }
     }
     return card;
+  }
+
+  /* 提交按钮忙状态：提交中禁用并显示处理进度，防止连点重复提交 */
+  function _markModalBusy() {
+    if (!WB._modal) return;
+    WB._modal._busy = true;
+    const btns = WB._modal.box.querySelectorAll('.foot button');
+    if (btns.length > 1) {
+      btns[1].textContent = '正在提交…';
+      btns[1].disabled = true;
+    }
+  }
+  function _unmarkModalBusy() {
+    if (WB._modal && WB._modal._busy) WB._modal._busy = false;
+  }
+
+  /* 轮询批次状态直到离开 pending_intake（后台图仍在跑判定/抽样）；
+     每次间隔 2s，上限 60 次；离开后最终刷新一次批次详情 + 侧栏。 */
+  function _pollUntilLeftIntake(batch) {
+    let tries = 0;
+    const maxTries = 60;
+    const timer = setInterval(function () {
+      tries++;
+      WB.api.getBatch(batch.batch_id).then(function (res) {
+        const st = res.ok && res.data ? res.data.status : null;
+        if (st && st !== 'pending_intake') {
+          clearInterval(timer);
+          WB._loadDetail(batch.batch_id);
+          WB.loadBatches();
+          return;
+        }
+        if (tries >= maxTries) {
+          clearInterval(timer);
+          WB.toast('批次处理仍在进行中，当前状态：' + (st || '未知'));
+        }
+      });
+    }, 2000);
   }
 
   return { stageIndex: stageIndex, render: render };

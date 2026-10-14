@@ -106,10 +106,14 @@ WB.generateReportForBatch = function (batch) {
   ], function (vals) {
     WB.api.generateReport(batch.batch_id, vals[0]).then(function (res) {
       if (!res.ok) { WB.toast(WB.errText(res.error)); return; }
-      WB.toast('报告已生成' + (res.data.report_type === 'incident' ? '' : ''));
-      // 刷新批次（可能触发自动归档）与报告列表
+      WB.toast('报告已生成');
+      // 刷新批次（可能触发自动归档）与报告列表，并直接打开报告抽屉以呈现内容
       WB._loadDetail(batch.batch_id);
       WB.loadBatches();
+      if (WB.state.view === 'reports') {
+        WB.switchView('reports'); // 重新拉取当前批次报告列表，左栏立即展示
+      }
+      if (WB._reportDrawer) WB._reportDrawer(res.data);
     });
   }, { submitLabel: '生成' });
 };
