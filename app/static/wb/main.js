@@ -107,56 +107,41 @@ WB.renderCenter = function (detail, listitem, panelDom) {
   main.append(panelDom || WB.h('div', { class: 'card empty', text: '该节点无可操作项' }));
 };
 
-/* ---- 报告页（工作台主区）：展示全部批次的报告（全局目录）+ 生成入口 + 查看正文 ---- */
+/* ---- 报告页（工作台主区）：仅展示当前批次拥有的报告 + 生成入口 + 查看正文 ----
+   全部报告列表放在左侧侧栏导航（跨批次），主区保持聚焦当前批次。
+   主区数据从全局 WB.state.reports 按 batch_id 过滤，避免双张请求。 */
 WB._reportPage = function (detail) {
   const card = WB.h('div', { class: 'card stage-panel report-view-page' });
-  card.append(WB.h('h3', { text: '报告' }));
-  card.append(WB.h('div', { class: 'desc', text: '展示所有批次生成的报告；点击「查看正文」在工作台展开对应报告内容' }));
+  card.append(WB.h('h3', { text: '批次报告 · ' + detail.batch_no }));
+  card.append(WB.h('div', { class: 'desc', text: '本批次已生成的报告；点击「查看正文」在工作台展开对应报告内容' }));
   const body = WB.h('div', {});
   card.append(body);
   body.append(WB.h('div', { class: 'hint-line', text: '正在加载报告…' }));
+  // 先用全局列表过滤当前批次；若尚未加载（首屏）则等待 switchView 刚拉好的列表
   WB.api.allReports().then(function (res) {
     body.replaceChildren();
     if (!res.ok) {
       body.append(WB.h('div', { class: 'form-err', text: WB.errText(res.error) || '报告加载失败' }));
       return;
     }
-    const list = res.data || [];
-    WB.state.reports = list;
+    const all = res.data || [];
+    WB.state.reports = all;
+    const list = all.filter(function (r) { return r.batch_id === detail.batch_id; });
     if (!list.length) {
-      body.append(WB.h('div', { class: 'hint-line muted', text: '暂无报告（已放行/已拒绝批次可点击下方生成）' }));
+      body.append(WB.h('div', { class: 'hint-line muted', text: '本批次暂无报告' +
+        (['released', 'rejected'].indexOf(detail.status) >= 0 ? '（可点击下方生成）' : '（放行/拒绝后可生成）') }));
     } else {
-      // 按批次分组：每个批次一个子卡，子卡内列出该批次报告
-      const byBatch = {};
+      body.append(WB.h('div', { class: 'hint-line', style: 'font-weight:600', text: '报告记录（' + list.length + '）' }));
       list.forEach(function (r) {
-        const bid = r.batch_id || '';
-        if (!byBatch[bid]) byBatch[bid] = [];
-        byBatch[bid].push(r);
-      });
-      const batchNos = {};
-      (WB.state.batches || []).forEach(function (b) { batchNos[b.batch_id] = b.batch_no; });
-      const groups = Object.keys(byBatch).sort();
-      body.append(WB.h('div', { class: 'hint-line', style: 'font-weight:600', text: '报告记录（共 ' + list.length + '，' + groups.length + ' 个批次）' }));
-      groups.forEach(function (bid) {
-        const sub = byBatch[bid];
-        const batchLabel = batchNos[bid] || (bid ? bid.slice(0, 8) : '');
-        const groupCard = WB.h('div', { class: 'report-group', style: 'margin:8px 0;padding:10px;border:1px solid var(--line);border-radius:10px' });
-        groupCard.append(WB.h('div', { class: 'hint-line', style: 'font-weight:600;font-size:13px', text: '批次 ' + batchLabel + ' · ' + sub.length + ' 份报告' }));
-        sub.forEach(function (r) {
-          groupCard.append(WB.h('div', { class: 'hint-line' },
-            WB.h('span', { class: 'tag', text: (WB.REP_CN || WB.RPT_CN || {})[r.report_type] || r.report_type || '报告' }),
-            WB.h('span', { class: 'muted', text: ' · 版本 v' + (r.version || 1) + ' · ' + (WB.fmtTime(r.generated_at) || '') }),
-            WB.h('button', { class: 'newbtn', style: 'font-size:12px;padding:1px 8px;margin-left:8px',
-              onclick: function () {
-                if (WB.state.batchId !== r.batch_id) WB.selectBatch(r.batch_id);
-                WB._expandReportInMain(r, WB.state.selected);
-              }, text: '查看正文' })));
-        });
-        body.append(groupCard);
+        body.append(WB.h('div', { class: 'hint-line' },
+          WB.h('span', { class: 'tag', text: (WB.REP_CN || WB.RPT_CN || {})[r.report_type] || r.report_type || '报告' }),
+          WB.h('span', { class: 'muted', text: ' · 版本 v' + (r.version || 1) + ' · ' + (WB.fmtTime(r.generated_at) || '') }),
+          WB.h('button', { class: 'newbtn', style: 'font-size:12px;padding:1px 8px;margin-left:8px',
+            onclick: function () { WB._expandReportInMain(r, detail); }, text: '查看正文' })));
       });
     }
   });
-  // 生成入口：基于当前选中批次
+  // 生成入口：基于当前批次
   const canGen = ['released', 'rejected', 'archived'].indexOf(detail.status) >= 0;
   card.append(WB.h('div', { class: 'actions', style: 'margin-top:12px' },
     canGen
