@@ -127,12 +127,19 @@ def build_router(get_deps: object) -> APIRouter:
         # 500 deep inside the graph; surface it as a structured 400 naming
         # the missing fields, mirroring this route's other B3 responses.
         required = (
-            "sn", "source_type", "captured_at", "pmax", "temp", "isc",
-            "voc", "vm", "im", "ff", "appearance_result",
+            "sn",
+            "source_type",
+            "captured_at",
+            "pmax",
+            "temp",
+            "isc",
+            "voc",
+            "vm",
+            "im",
+            "ff",
+            "appearance_result",
         )
-        missing = sorted(
-            {k for row in rows for k in required if row.get(k) in (None, "")}
-        )
+        missing = sorted({k for row in rows for k in required if row.get(k) in (None, "")})
         if missing:
             raise HTTPException(
                 status_code=400,
@@ -161,9 +168,7 @@ def build_router(get_deps: object) -> APIRouter:
                 from app.plugins.auto_incident import ensure_incident
 
                 row = (
-                    s.scalars(
-                        select(ModuleInspection).where(ModuleInspection.sn == exc.sn)
-                    ).first()
+                    s.scalars(select(ModuleInspection).where(ModuleInspection.sn == exc.sn)).first()
                     if getattr(exc, "sn", None)
                     else None
                 )

@@ -76,12 +76,8 @@ def downgrade() -> None:
     # column also removes the CHECK, but the explicit drop keeps the
     # sequence clear for older PG versions.
     inspector = sa_inspect(bind)
-    constraint_names = {
-        c["name"] for c in inspector.get_unique_constraints("reinspections")
-    }
-    constraint_names |= {
-        c["name"] for c in inspector.get_check_constraints("reinspections")
-    }
+    constraint_names = {c["name"] for c in inspector.get_unique_constraints("reinspections")}
+    constraint_names |= {c["name"] for c in inspector.get_check_constraints("reinspections")}
     for name in ("reinspections_scope_type_check", "ck_reinspections_scope_type"):
         if name in constraint_names:
             op.drop_constraint(name, "reinspections")

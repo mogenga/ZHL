@@ -27,9 +27,9 @@ from fastapi.testclient import TestClient
 from app.infra.models import DeliveryBatch, QualityIncident
 from app.plugins.trace_store import TraceStore
 from tests.e2e.test_sample3_incident_closure import (
-    B1,
     _INS_OK,
     _INS_OODB,
+    B1,
     _client,
     _seed_batch,
 )
@@ -58,7 +58,9 @@ def _isolate(client: TestClient, inc_id: UUID) -> None:
     assert r.status_code == 200, r.text
 
 
-def _assign(client: TestClient, inc_id: UUID, containment_action: str | None = "isolate affected SNs") -> None:
+def _assign(
+    client: TestClient, inc_id: UUID, containment_action: str | None = "isolate affected SNs"
+) -> None:
     r = client.post(
         f"/api/incidents/{inc_id}/assign",
         json={

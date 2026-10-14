@@ -64,7 +64,10 @@ pre {
 }
 pre code { background: none; padding: 0; color: #1f2328; font-size: 13px; }
 /* 宽表格：外层允许横向滚动，不撑破页面 */
-table { border-collapse: collapse; width: 100%; margin: 18px 0; font-size: 14px; display: block; overflow-x: auto; }
+table {
+  border-collapse: collapse; width: 100%; margin: 18px 0;
+  font-size: 14px; display: block; overflow-x: auto;
+}
 th, td { border: 1px solid #d8dee4; padding: 8px 11px; text-align: left; vertical-align: top; }
 th { background: #f2f4f7; font-weight: 600; white-space: nowrap; }
 tr:nth-child(even) td { background: #fafbfc; }
@@ -112,7 +115,7 @@ def embed_images(md_text: str, md_path: Path) -> tuple[str, list[str], list[str]
         mime = mimetypes.guess_type(img_path.name)[0] or "image/png"
         b64 = base64.b64encode(img_path.read_bytes()).decode("ascii")
         embedded.append(src)
-        return f'![{alt}](data:{mime};base64,{b64})'
+        return f"![{alt}](data:{mime};base64,{b64})"
 
     return re.sub(r"!\[([^\]]*)\]\(([^)]+)\)", repl, md_text), embedded, missing
 
@@ -132,9 +135,7 @@ def convert(md_path: Path) -> Path:
 
     DIST.mkdir(parents=True, exist_ok=True)
     out = DIST / (md_path.stem + ".html")
-    out.write_text(
-        HTML_TMPL.format(title=title, css=CSS, body=body), encoding="utf-8"
-    )
+    out.write_text(HTML_TMPL.format(title=title, css=CSS, body=body), encoding="utf-8")
 
     kb = out.stat().st_size / 1024
     print(f"OK  {md_path.name} -> {out.relative_to(ROOT)}  ({kb:.0f} KB, 内嵌 {len(embedded)} 图)")

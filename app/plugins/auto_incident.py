@@ -106,7 +106,9 @@ def ensure_incident(
     # 并发幂等（审查 I-3）：对批次行加锁串行化同批次的并发自动创建——
     # 后到事务在本行上等待，拿到锁后重查幂等，能看见前者已提交的异常。
     # 人工创建端点不做此约束（业务允许多只同触发异常），故不加 DDL 唯一索引。
-    session.query(DeliveryBatch).filter(DeliveryBatch.batch_id == batch_uuid).with_for_update().first()
+    session.query(DeliveryBatch).filter(
+        DeliveryBatch.batch_id == batch_uuid
+    ).with_for_update().first()
     existing = (
         session.query(QualityIncident)
         .filter(

@@ -9,6 +9,7 @@ switching, URL restore) is exercised by the dev at final acceptance.
 
 Run: uv run python tests/static/check_serve.py
 """
+
 from __future__ import annotations
 
 from fastapi.testclient import TestClient
@@ -21,7 +22,9 @@ from app.infra.models import Base
 
 
 def _client() -> TestClient:
-    engine = create_engine("sqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False})
+    engine = create_engine(
+        "sqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}
+    )
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine, future=True)
     return TestClient(create_phase_b_app(session_factory=lambda: factory()))
@@ -34,15 +37,21 @@ def check_page() -> None:
     html = r.text
 
     for marker in [
-        'id="leftPane"', 'id="mainPane"', 'id="rightPane"',
-        'data-view="batch"', 'data-view="rules"',
-        'data-view="incidents"', 'data-view="reports"',
-        'src="/static/wb/ui.js"', 'src="/static/wb/main.js"',
+        'id="leftPane"',
+        'id="mainPane"',
+        'id="rightPane"',
+        'data-view="batch"',
+        'data-view="rules"',
+        'data-view="incidents"',
+        'data-view="reports"',
+        'src="/static/wb/ui.js"',
+        'src="/static/wb/main.js"',
     ]:
         assert marker in html, f"missing {marker}"
 
-    assert html.index('src="/static/wb/ui.js"') < html.index('src="/static/wb/main.js"'), \
-        "ui.js must load before main.js"
+    assert html.index('src="/static/wb/ui.js"') < html.index(
+        'src="/static/wb/main.js"'
+    ), "ui.js must load before main.js"
 
     for sub in ["/static/wb.css", "/static/wb/ui.js", "/static/wb/main.js"]:
         assert client.get(sub).status_code == 200, f"{sub} not served"

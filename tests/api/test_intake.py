@@ -42,6 +42,7 @@ def test_intake_unknown_batch_returns_404() -> None:
     )
     assert r.status_code == 404
 
+
 def test_intake_partial_inspection_row_returns_400() -> None:
     """B3: a legacy partial row ({sn, source_type} only) must surface as a
     structured 400 naming the missing fields, not a KeyError -> 500 inside the
@@ -53,6 +54,7 @@ def test_intake_partial_inspection_row_returns_400() -> None:
     s = sessionmaker(bind=engine)
     client = _make_client(0.9, "SN-I-CONF", ["SN-N-001"], s, s, _ISO_TABLE)
     from tests.api.test_batches import _post_batch
+
     batch = _post_batch(client, planned_quantity=1)
 
     r = client.post(

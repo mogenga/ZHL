@@ -161,11 +161,7 @@ def judge_batch(
     confirmed = [r for r in all_rows if r.intake_status in ("confirmed", "isolated")]
     # §8.2 组件级隔离：isolated 行的数据本身已人工确认（隔离是下游检疫态，
     # 不是数据问题），独立重判端点对已隔离批次仍然可用（验收样例二钉住）。
-    unconfirmed = [
-        r.sn
-        for r in all_rows
-        if r.intake_status not in ("confirmed", "isolated")
-    ]
+    unconfirmed = [r.sn for r in all_rows if r.intake_status not in ("confirmed", "isolated")]
     if unconfirmed:
         raise UnconfirmedSnsError(unconfirmed)
 

@@ -550,9 +550,7 @@ def close_incident_endpoint(incident_id: uuid.UUID, session: SessionDep) -> Inci
             detail={"error": "close_conditions_unmet", "missing": missing},
         )
 
-    inc_res = transition(
-        incident.status, "closed", {"close_conditions_met": True}, kind="incident"
-    )
+    inc_res = transition(incident.status, "closed", {"close_conditions_met": True}, kind="incident")
     if not inc_res.accepted:
         raise HTTPException(
             status_code=409,

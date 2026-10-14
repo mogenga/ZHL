@@ -283,6 +283,6 @@ def test_events_unknown_rule_404() -> None:
     Base.metadata.create_all(eng)
     session = sessionmaker(bind=eng, future=True)()
     client = _client(session)
-    resp = client.get(f"/api/quality-rule-versions/00000000-0000-0000-0000-000000000000/events")
+    resp = client.get("/api/quality-rule-versions/00000000-0000-0000-0000-000000000000/events")
     assert resp.status_code == 404
     session.close()

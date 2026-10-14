@@ -10,10 +10,17 @@ from __future__ import annotations
 from pathlib import Path
 
 WB_FILES = [
-    "workbench.html", "wb.css",
-    "wb/ui.js", "wb/api.js", "wb/main.js", "wb/report.js",
-    "wb/stages/intake.js", "wb/stages/judge.js", "wb/stages/incident.js",
-    "wb/stages/reinspection.js", "wb/stages/release.js",
+    "workbench.html",
+    "wb.css",
+    "wb/ui.js",
+    "wb/api.js",
+    "wb/main.js",
+    "wb/report.js",
+    "wb/stages/intake.js",
+    "wb/stages/judge.js",
+    "wb/stages/incident.js",
+    "wb/stages/reinspection.js",
+    "wb/stages/release.js",
 ]
 ROOT = Path(__file__).resolve().parents[2] / "app" / "static"
 
@@ -30,18 +37,32 @@ def test_api_js_served_by_html():
 
     assert _src_pos("wb/api.js") >= 0
     # 顺序：ui.js → api.js → main.js → 各 stage → report.js
-    order = ["wb/ui.js", "wb/api.js", "wb/main.js",
-             "wb/stages/intake.js", "wb/stages/judge.js", "wb/stages/incident.js",
-             "wb/stages/reinspection.js", "wb/stages/release.js", "wb/report.js"]
+    order = [
+        "wb/ui.js",
+        "wb/api.js",
+        "wb/main.js",
+        "wb/stages/intake.js",
+        "wb/stages/judge.js",
+        "wb/stages/incident.js",
+        "wb/stages/reinspection.js",
+        "wb/stages/release.js",
+        "wb/report.js",
+    ]
     idx = [_src_pos(f) for f in order]
-    assert idx == sorted(idx), f"脚本加载顺序错误：{list(zip(order, idx))}"
+    assert idx == sorted(idx), f"脚本加载顺序错误：{list(zip(order, idx, strict=False))}"
 
 
 def test_no_native_dialogs():
     for f in WB_FILES:
         src = (ROOT / f).read_text(encoding="utf-8")
-        for banned in ("window.alert(", "window.prompt(", "window.confirm(",
-                       "alert(", "prompt(", "confirm("):
+        for banned in (
+            "window.alert(",
+            "window.prompt(",
+            "window.confirm(",
+            "alert(",
+            "prompt(",
+            "confirm(",
+        ):
             assert banned not in src, f"{f} 使用了原生对话框 {banned}"
 
 

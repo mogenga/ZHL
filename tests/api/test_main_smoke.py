@@ -295,7 +295,9 @@ def test_static_mount_present(api_client: Any) -> None:
     caught here."""
     r = api_client.get("/", follow_redirects=False)
     assert r.status_code in (200, 302), f"/ should serve or redirect: {r.status_code}"
-    assert "/static/workbench.html" in r.headers.get("location", ""), "/ should redirect to workbench.html"
+    assert "/static/workbench.html" in r.headers.get(
+        "location", ""
+    ), "/ should redirect to workbench.html"
     r_wb = api_client.get("/static/workbench.html")
     assert r_wb.status_code == 200, f"workbench.html should be served: {r_wb.status_code}"
     r_css = api_client.get("/static/wb.css")
