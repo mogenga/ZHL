@@ -243,7 +243,9 @@ def _attribution_ctx(tmp_path):
         rule_version_id=rule.rule_version_id,
         status="isolated",
     )
-    session.add_all([rule, batch])
+    session.add(rule)
+    session.flush()
+    session.add(batch)
 
     evidence_store = FileEvidenceStore(fixture_dir, db=session)
     # Save the evidence THROUGH the store: populates the in-memory ref table

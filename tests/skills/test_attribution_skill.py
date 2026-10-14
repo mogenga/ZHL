@@ -75,7 +75,11 @@ def sqlite_session() -> Any:
         status="isolated",
         evidence_ids=["EV-ATT-001", "EV-ATT-002"],
     )
-    session.add_all([rule, batch, incident])
+    session.add(rule)
+    session.flush()
+    session.add(batch)
+    session.flush()
+    session.add(incident)
     session.commit()
     yield session
     session.close()

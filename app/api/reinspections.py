@@ -250,6 +250,13 @@ def create_reinspection(
         scope_sns=applied_sns,
     )
     session.add(re_)
+    # 循环外键（reinspections.incident_id → quality_incidents.verification_id
+    # → reinspections，见 001_init.sql §5.1.6 注释）：ORM 的工作单元无法给这个
+    # 环排序，于是默认先发 quality_incidents 的 UPDATE、后发 INSERT——Postgres
+    # 报 fk_incident_verification 违约（SQLite 默认不强制外键，测试因此漏掉）。
+    # 先显式 flush 把复检行落库，再回填 verification_id，UPDATE 就必然在
+    # INSERT 之后。
+    session.flush()
 
     # Write the incident's verification_id back (independent row, module_inspections untouched).
     incident.verification_id = re_.reinspection_id

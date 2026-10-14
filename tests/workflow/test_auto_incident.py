@@ -207,7 +207,11 @@ def test_cross_batch_conflict_creates_consistency_incident() -> None:
         intake_status="confirmed",
         decision_status="pass",
     )
-    session.add_all([rule, batch_a, insp_a])
+    session.add(rule)
+    session.flush()
+    session.add(batch_a)
+    session.flush()
+    session.add(insp_a)
     session.commit()
 
     app = create_unified_app(session_factory=lambda: session)

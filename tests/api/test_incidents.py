@@ -113,7 +113,11 @@ def _seed(
         generated_at=_TS,
         generated_by="test",
     )
-    session.add_all([rule, batch, ins1, ins2, ev])
+    session.add_all([rule, ev])
+    session.flush()
+    session.add(batch)
+    session.flush()
+    session.add_all([ins1, ins2])
 
     incident = QualityIncident(
         incident_id=UUID("bbbbbbbb-1111-2222-3333-444444444407"),
@@ -124,6 +128,7 @@ def _seed(
         status="new",
     )
     session.add(incident)
+    session.flush()
     session.add(IncidentSnLink(incident_id=incident.incident_id, inspection_id=_INSP1))
     session.add(IncidentSnLink(incident_id=incident.incident_id, inspection_id=_INSP2))
 
@@ -146,6 +151,8 @@ def _seed(
             evidence_id=_EV1,
         )
         session.add(re_)
+        # 循环外键：复检行必须先落库再回填 verification_id（同 reinspections.py）
+        session.flush()
         incident.verification_id = re_.reinspection_id
     session.commit()
     return {"incident": incident, "batch": batch, "reinspection_id": _RE1}

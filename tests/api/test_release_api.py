@@ -115,9 +115,6 @@ def _seed(
         rule_version_id=_RULE,
         status="pending_release",
     )
-    ins1 = _mk_ins(session, _INSP1, "SN-A", 550.0)
-    ins2 = _mk_ins(session, _INSP2, "SN-B", 545.0)
-    ins3 = _mk_ins(session, _INSP3, "SN-C", 540.0)
     ev = Evidence(
         evidence_id=_EV1,
         evidence_type="decision_snapshot",
@@ -171,7 +168,15 @@ def _seed(
         corrective_action="replace lead cell",
         capa_verified=incident_capa_verified,
     )
-    session.add_all([rule, batch, ins1, ins2, ins3, ev] + iso_objs + [incident])
+    session.add_all([rule, ev] + iso_objs)
+    session.flush()
+    session.add(batch)
+    session.flush()
+    ins1 = _mk_ins(session, _INSP1, "SN-A", 550.0)
+    ins2 = _mk_ins(session, _INSP2, "SN-B", 545.0)
+    ins3 = _mk_ins(session, _INSP3, "SN-C", 540.0)
+    session.add_all([ins1, ins2, ins3, incident])
+    session.flush()
     if with_conclusion:
         session.add(conclusion)
     session.add(IncidentSnLink(incident_id=_INC, inspection_id=_INSP1))
@@ -200,6 +205,8 @@ def _seed(
             scope_sns=scope,
         )
         session.add(re_)
+        # 循环外键：复检行先落库再回填（同 reinspections.py 生产修复）
+        session.flush()
         incident.verification_id = re_.reinspection_id
     session.commit()
     return {"incident": incident, "batch": batch}

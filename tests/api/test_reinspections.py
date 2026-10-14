@@ -94,8 +94,6 @@ def _seed(
         rule_version_id=_RULE,
         status=batch_status,
     )
-    ins1 = _mk_ins(session, _INSP1, "SN-A", 550.0)
-    ins2 = _mk_ins(session, _INSP2, "SN-B", 545.0)
     ev = Evidence(
         evidence_id=_EV1,
         evidence_type="decision_snapshot",
@@ -114,7 +112,14 @@ def _seed(
         owner="ZHL-QA",
         due_at=_TS,
     )
-    session.add_all([rule, batch, ins1, ins2, ev, incident])
+    session.add_all([rule, ev])
+    session.flush()
+    session.add(batch)
+    session.flush()
+    ins1 = _mk_ins(session, _INSP1, "SN-A", 550.0)
+    ins2 = _mk_ins(session, _INSP2, "SN-B", 545.0)
+    session.add_all([ins1, ins2, incident])
+    session.flush()
     session.add(IncidentSnLink(incident_id=_INC, inspection_id=_INSP1))
     session.add(IncidentSnLink(incident_id=_INC, inspection_id=_INSP2))
     session.commit()
@@ -351,3 +356,42 @@ def test_reinspection_rejected_before_the_incident_is_assigned(api_client: Any) 
     assert resp.status_code == 409, resp.text
     assert resp.json()["detail"]["status"] == "new"
     assert session.query(Reinspection).count() == 0
+
+
+def test_reinspection_insert_and_verification_writeback_are_fk_safe(api_client: Any) -> None:
+    """回归：循环外键顺序（生产 Postgres 500 的根因）。
+
+    ``reinspections.incident_id -> quality_incidents`` 与
+    ``quality_incidents.verification_id -> reinspections`` 互为外键，SQLAlchemy
+    的工作单元无法给这个环排序，默认先 UPDATE quality_incidents 再 INSERT
+    reinspections —— Postgres 直接报 fk_incident_verification 违约。端点必须先
+    flush 复检行再回填 ``verification_id``。
+
+    本用例之所以此前漏网：SQLite 默认不强制外键。``tests/conftest.py`` 现已
+    全局 ``PRAGMA foreign_keys=ON``，所以这条路径在测试里也会按 Postgres 语义
+    失败——删掉端点里的 ``session.flush()``，本用例即红。
+    """
+    client, session, _ = api_client
+    _seed(session)
+    resp = client.post(
+        f"/api/incidents/{_INC}/reinspections",
+        json={
+            "inspection_id": str(_INSP1),
+            "pmax": 550.0,
+            "temp": 25.0,
+            "isc": 10.5,
+            "voc": 0.5,
+            "vm": 48.0,
+            "im": 11.0,
+            "ff": 0.75,
+            "result": "pass",
+            "executor": "ZHL-QA",
+            "executed_at": "2026-06-01T10:00:00Z",
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    re_id = UUID(resp.json()["reinspection_id"])
+    # Both directions of the cycle are satisfied: the reinspection row exists
+    # (so the FK the incident points at resolves) and the incident points at it.
+    assert session.get(Reinspection, re_id) is not None
+    assert session.get(QualityIncident, _INC).verification_id == re_id

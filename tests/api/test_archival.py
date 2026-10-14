@@ -52,7 +52,9 @@ def _batch(session: Any, status: str, batch_no: str = "B-ARCH") -> DeliveryBatch
         rule_version_id=_RULE,
         status=status,
     )
-    session.add_all([rule, b])
+    session.add(rule)
+    session.flush()
+    session.add(b)
     session.commit()
     return b
 

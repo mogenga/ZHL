@@ -79,7 +79,11 @@ def _seed(
         generated_at=_TS,
         generated_by="seed",
     )
-    session.add_all([batch, ins, ev])
+    session.add(ev)
+    session.flush()
+    session.add(batch)
+    session.flush()
+    session.add(ins)
     session.commit()
 
 
@@ -105,6 +109,7 @@ def api_client() -> Any:
             version_no=1,
         )
     )
+    session.flush()
     session.add(
         IsoSamplingRow(
             inspection_type="module",
@@ -142,6 +147,7 @@ def api_client() -> Any:
         capa_verified=True,
     )
     session.add(inc)
+    session.flush()
     session.add(IncidentSnLink(incident_id=_INC, inspection_id=_INSP1))
     session.commit()
     app = create_app(session_factory=lambda: session, own_session=False)
@@ -264,6 +270,7 @@ def test_trace_endpoint_returns_batch_trace_rows(api_client: Any) -> None:
             version_no=1,
         )
     )
+    session.flush()
     session.add(
         DeliveryBatch(
             batch_id=batch_id,
@@ -327,6 +334,7 @@ def test_batch_detail_inspections_expose_inspection_id(api_client: Any) -> None:
             version_no=1,
         )
     )
+    session.flush()
     session.add(
         DeliveryBatch(
             batch_id=batch_id,
@@ -412,6 +420,7 @@ def test_trace_endpoint_exposes_structured_output(api_client: Any) -> None:
             version_no=1,
         )
     )
+    session.flush()
     session.add(
         DeliveryBatch(
             batch_id=batch_id,
@@ -423,6 +432,8 @@ def test_trace_endpoint_exposes_structured_output(api_client: Any) -> None:
             status="isolated",
         )
     )
+    # agent_task_traces.batch_id 是外键：批次必须先落库
+    session.flush()
     TraceStore().record(
         session,
         batch_id=batch_id,

@@ -80,6 +80,8 @@ def _seed(session: Any, sample: dict) -> None:
             version_no=raw["version_no"],
         )
     )
+    # 规则版本先落库（批次引用它的外键；测试已按 Postgres 强制外键）
+    session.flush()
     # B1: the released first batch (terminal; must remain untouched).
     session.add(
         DeliveryBatch(
@@ -94,6 +96,7 @@ def _seed(session: Any, sample: dict) -> None:
             release_decision="released",
         )
     )
+    session.flush()  # 批次先落库，检验行才能引用
     session.add(
         ModuleInspection(
             inspection_id=_INSP_SHARED_1,

@@ -690,3 +690,48 @@
 8. **测试**：新增 `tests/skills/test_raw_source.py`（解析 + FR-1.4 校验门）、`tests/e2e/test_demo_path.py`（原始单据→治理隔离；跨请求归因 HITL 两段式）、归因端点跨请求用例 5 条 + 「模型只调用一次」1 条 + mock 合成回退用例。`tests/workflow/test_incident_subgraph.py` 的 `_initial_state` 改为携带已记录复检结论。
 9. **文档与演示**：`AGENT.md §7.2` 如实改述为「两处图内 interrupt + 放行以 `approved_by` 在 API 层签署」；设计文档 §9.3 增补降级开关与 mock 覆盖范围说明；`.env.example` 增补四个演示开关；`scripts/seed-demo.ps1` 末尾打印完整演示步骤与示例原始 CSV（含 470W 失败行与 `SN-LOW-*` 低置信行两种演示分支）。
 10. **dev-notes 路径**：本文件（本节）。
+
+## 2026-10-15 · 循环外键 500 修复 + 测试外键强制（真 Postgres 验证）
+
+1. **报障**：`POST /api/incidents/{id}/reinspections` 在真 Postgres 上 500：
+   `psycopg.errors.ForeignKeyViolation: fk_incident_verification`，SQL 为
+   `UPDATE quality_incidents SET verification_id=...`，被引用的 `reinspections`
+   行尚不存在。
+2. **根因**：`reinspections.incident_id → quality_incidents` 与
+   `quality_incidents.verification_id → reinspections` 互为外键（001_init.sql
+   §5.1.6 建表时就注明了这个环）。SQLAlchemy 的工作单元无法给环排序，于是
+   先发 `quality_incidents` 的 UPDATE、后发 INSERT E；端点此前依赖"提交时
+   自动排序"，实际拿到的是错误顺序。
+3. **修复**（`app/api/reinspections.py`）：`session.add(re_)` 之后显式
+   `session.flush()` 把复检行落库，再回填 `incident.verification_id`——UPDATE
+   必然排在 INSERT 之后。真 Postgres 复验：复检 201、`verification_id` 正确回填、
+   全链（原始单据→隔离→归因→复检→CAPA→关闭→pending_release）零异常。
+4. **为什么 343 个测试没拦住**：SQLite 默认**不强制外键**（`PRAGMA
+   foreign_keys` 默认 OFF），环上的违约在测试里根本不报。`tests/conftest.py`
+   现在对连接统一开 `PRAGMA foreign_keys=ON`（Postgres 无副作用），并加一条
+   自检 fixture：真的开一条连接读 `PRAGMA foreign_keys`，若监听器被删就当场红。
+   测试从此按 Postgres 语义跑。
+5. **开关一开暴露出的既有 fixture 问题（80 个测试）**：fixture 习惯把父行与
+   子行塞进同一个 `add_all()`，SQLAlchemy 只按字母序/映射序发 INSERT，
+   `delivery_batches` 常排在 `quality_rule_versions` 之前——**这在真 Postgres 上
+   同样会失败**，只是测试用 SQLite 时看不出来。已逐文件改为"父行先
+   add + flush，再 add 子行"：
+   `tests/api/{test_archival,test_incident_attribute,test_incidents,test_main_smoke,
+   test_reinspections,test_release_api,test_release_reject,test_reports}.py`、
+   `tests/e2e/{test_sample3_incident_closure,test_sample4_consistency}.py`、
+   `tests/plugins/test_trace_store.py`（补建被引用的批次行）、
+   `tests/skills/{test_attribution_skill,test_report_skill}.py`、
+   `tests/workflow/{test_auto_incident,test_incident_subgraph}.py`。
+6. **回归测试**：`tests/api/test_reinspections.py::
+   test_reinspection_insert_and_verification_writeback_are_fk_safe`——删掉端点里的
+   `session.flush()` 该用例即红（已实测验证），这是本缺陷的常驻防线。
+7. **验证**：`344 passed`；`ruff` / `black` 全绿；真 Postgres 实跑
+   「建批次 → 原始单据入场 → 判定 Fail 隔离 → isolate/assign → 复检登记(201) →
+   CAPA → close(pending_release)」全程零服务端异常日志。
+8. **顺带发现、未修（需你定夺）**：异常从 `assigned` 态发起复检且 `result=fail`
+   时，端点会 409 `incident_transition_denied`：`INCIDENT_TRANSITIONS` 没有
+   `assigned → rejected` 这条边（只有 `pending_recheck → rejected`），而
+   `REINSPECTABLE_STATUSES` 允许 `assigned` 登记复检。即"未推进到待复检就复检
+   失败"会被状态机拒绝。这是 P0 冻结的边缘定义问题（要么加边、要么收窄可复检态），
+   不是本次 500 的成因，未擅自改动冻结表。
+9. **dev-notes 路径**：本文件（本节）。

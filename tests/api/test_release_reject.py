@@ -49,7 +49,9 @@ def _seed_batch(session: Any, *, status: str = "pending_release") -> DeliveryBat
         rule_version_id=_RULE,
         status=status,
     )
-    session.add_all([rule, batch])
+    session.add(rule)
+    session.flush()
+    session.add(batch)
     session.commit()
     return batch
 

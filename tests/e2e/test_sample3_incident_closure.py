@@ -95,6 +95,8 @@ def _seed_batch(session: Any, sample: dict, batch_no: str) -> None:
         "SN-I-OODB": UUID("ab000000-0000-0000-0000-000000000002"),
     }
     _mk_rule(session, sample)
+    # 规则版本必须先落库：批次/检验行引用它（测试已按 Postgres 强制外键）
+    session.flush()
     session.add(
         DeliveryBatch(
             batch_id=B1,
@@ -107,6 +109,7 @@ def _seed_batch(session: Any, sample: dict, batch_no: str) -> None:
             status=sample["batch"]["status"],
         )
     )
+    session.flush()  # 批次先落库，检验行才能引用
     for ins in sample["inspections"]:  # ModuleInspectionIn dataclasses
         session.add(
             ModuleInspection(

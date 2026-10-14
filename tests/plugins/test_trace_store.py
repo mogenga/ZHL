@@ -34,6 +34,40 @@ def sqlite_session() -> Any:
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine)
     session = factory()
+    # agent_task_traces.batch_id -> delivery_batches.batch_id is a real FK
+    # (enforced in tests since the SQLite PRAGMA was turned on), so the
+    # referenced batch must exist before any trace row is written.
+    from app.infra.models import DeliveryBatch, QualityRuleVersion
+
+    rule_id = uuid.UUID("11111111-2222-3333-4444-555555555501")
+    session.add(
+        QualityRuleVersion(
+            rule_version_id=rule_id,
+            project_id="P-1",
+            model="JH-550W",
+            name="rv-trace",
+            nameplate_power=550.0,
+            power_tolerance=0.03,
+            parameter_standards={},
+            current_bands={},
+            sample_plan={},
+            effective_at=_TS,
+            version_no=1,
+        )
+    )
+    session.flush()
+    session.add(
+        DeliveryBatch(
+            batch_id=_BATCH_UUID,
+            batch_no="B-TRACE-STORE-1",
+            project_id="P-1",
+            model="JH-550W",
+            planned_quantity=1,
+            rule_version_id=rule_id,
+            status="isolated",
+        )
+    )
+    session.commit()
     yield session
     session.close()
     engine.dispose()

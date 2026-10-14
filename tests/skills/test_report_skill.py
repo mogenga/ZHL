@@ -74,7 +74,11 @@ def _seed(session: Any) -> None:
         ff=0.75,
         appearance_result="pass",
     )
-    session.add_all([rule, batch, ins])
+    session.add(rule)
+    session.flush()
+    session.add(batch)
+    session.flush()
+    session.add(ins)
     session.commit()
 
 

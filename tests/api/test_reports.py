@@ -84,7 +84,11 @@ def _seed(
         ff=0.75,
         appearance_result="pass",
     )
-    session.add_all([rule, batch, ins])
+    session.add(rule)
+    session.flush()
+    session.add(batch)
+    session.flush()
+    session.add(ins)
     if with_incident:
         inc = QualityIncident(
             incident_id=UUID("dddddddd-1111-2222-3333-444444444404"),
