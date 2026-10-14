@@ -331,6 +331,38 @@ class SampleEntry:
     selected: bool = True
 
 
+@dataclass(frozen=True)
+class SnIncidentState:
+    """一个 SN 关联异常的 (id, 状态) 摘要（复检闭环判定用）。"""
+
+    incident_id: str
+    status: str
+
+
+@dataclass(frozen=True)
+class SnRemediationView:
+    """第 2 轮抽样结论的逐 SN 输入：判定结论 + 闭环事实。
+
+    装配方（``app/skills/remediation_conclusion.py``）从
+    ``module_inspections`` / ``incident_sn_links`` / ``quality_incidents`` /
+    ``reinspections`` 四张表解析；本 dataclass 让 ``app/domain`` 保持无 DB。
+    """
+
+    sn: str
+    judge_result: str
+    incidents: tuple[SnIncidentState, ...] = ()
+    #: 是否存在 result='pass' 且 scope 覆盖该 SN 的复检记录。
+    reinspection_covered: bool = False
+
+
+@dataclass(frozen=True)
+class RemediationConclusion:
+    """第 2 轮（复检后）抽样结论。``result`` ∈ {pass, fail}。"""
+
+    result: str
+    reason: str
+
+
 # ---------------------------------------------------------------------------
 # Cross-phase interface contracts (AGENT.md §6.2)
 # ---------------------------------------------------------------------------

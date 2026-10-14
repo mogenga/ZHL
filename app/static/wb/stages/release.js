@@ -76,6 +76,34 @@ WB.stages.release = (function () {
       const failed = checks.filter(function (c) { return !c.passed; }).length;
       body.append(WB.h('div', { class: 'hint-line', style: 'font-weight:600', text: failed + ' 项未通过，暂不可放行（校验可重试）' }));
       body.append(box);
+      // 抽样结论阻断时给一条可执行的出路：复检已通过并关闭的批次，结论侧
+      // 可能因历史缺陷没有回写第 2 轮（结论永远停在第 1 轮 fail）。由质量
+      // 工程师显式触发重算；闭环没走完时后台如实回报，界面不制造"已通过"。
+      if (checks.some(function (c) { return c.name === 'sample_passed' && !c.passed; })) {
+        body.append(WB.h('div', { class: 'actions', style: 'margin-top:12px' },
+          WB.h('button', { class: 'primary', onclick: function () { recheck(batch, body); }, text: '重算复检结论' })));
+      }
+    });
+  }
+
+  /* 复检闭环结论重算（POST /api/batches/{id}/recheck，幂等）：
+     闭环成立 → 补写第 2 轮抽样结论并重跑校验；不成立 → 如实回报仍缺复检的 SN。 */
+  function recheck(batch, body) {
+    WB.api.recheckBatch(batch.batch_id).then(function (res) {
+      if (!res.ok) { WB.toast(WB.errText(res.error)); return; }
+      const d = res.data || {};
+      if (d.written) {
+        WB.toast('已补写第 2 轮抽样结论（' + (d.result || '') + '）');
+        runChecks(batch, body);
+      } else if (d.result === 'pass') {
+        WB.toast('第 2 轮抽样结论已在，无需重算');
+        runChecks(batch, body);
+      } else if (d.skipped === 'no_sample_conclusion') {
+        // 该批次没有抽样结论可复检 —— 与"复检没覆盖到位"是两回事，分开说。
+        WB.toast('该批次没有抽样结论，无需重算');
+      } else {
+        WB.toast('复检闭环未走完：' + (d.reason || '复检未覆盖全部不合格 SN'));
+      }
     });
   }
 

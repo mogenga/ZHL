@@ -17,7 +17,13 @@ from __future__ import annotations
 
 import random
 
-from app.domain.types import IsoResult, IsoRow, SampleEntry
+from app.domain.types import (
+    IsoResult,
+    IsoRow,
+    RemediationConclusion,
+    SampleEntry,
+    SnRemediationView,
+)
 
 
 def iso_lookup(
@@ -61,3 +67,46 @@ def freeze_sample(
     rng = random.Random(f"{batch_id}:{seed}")
     sample = sorted(rng.sample(sorted(sns), n))
     return [SampleEntry(sn=sn) for sn in sample]
+
+
+def derive_remediation_conclusion(
+    sample: list[SnRemediationView],
+) -> RemediationConclusion:
+    """第一轮样本判 fail 的 SN 是否都已由复检闭环解除 → 第 2 轮结论。
+
+    判定一个 SN 被解除（discharged）的条件，三条缺一不可：
+
+    1. 该 SN 至少关联一个异常（判 fail 却没有任何异常 = 闭环流程根本没走）；
+    2. 其关联异常**全部**处于终态 ``closed`` —— ``rejected``（复检失败）
+       与 ``scrapped`` 都不算解除，它们恰恰是"没修好"的记录；
+    3. 存在 ``result='pass'`` 的复检记录覆盖该 SN。
+
+    样本为空是 Fail 而不是空通过：没有样本就没有可判通过的结论，与放行
+    断言②「无结论 ⇒ 不通过」同一条 D9 原则（无默默默认放行）。
+    """
+    if not sample:
+        return RemediationConclusion(result="fail", reason="no sampled SN to conclude on")
+
+    undischarged: list[str] = []
+    for row in sample:
+        if row.judge_result == "pass":
+            continue
+        reasons: list[str] = []
+        if not row.incidents:
+            reasons.append("judged fail with no incident linked")
+        else:
+            not_closed = [i for i in row.incidents if i.status != "closed"]
+            if not_closed:
+                named = ", ".join(f"{i.incident_id}({i.status})" for i in not_closed)
+                reasons.append(f"incident not closed: {named}")
+        if not row.reinspection_covered:
+            reasons.append("no passing reinspection covering this SN")
+        if reasons:
+            undischarged.append(f"{row.sn}: {'; '.join(reasons)}")
+
+    if not undischarged:
+        return RemediationConclusion(result="pass", reason="")
+    return RemediationConclusion(
+        result="fail",
+        reason="sample round 2 not discharged — " + "; ".join(undischarged),
+    )

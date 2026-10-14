@@ -32,12 +32,13 @@ from typing import Any
 from uuid import UUID
 
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.api.main import create_app
 from app.domain.state_machine import transition
+from app.domain.types import IsoRow
 from app.infra.models import (
     Base,
     DeliveryBatch,
@@ -51,6 +52,7 @@ from app.infra.models import (
 )
 from app.plugins.attribution import AttributionSkill
 from app.plugins.llm_client import MockLLMClient
+from app.plugins.sampling import run_sampling
 from app.plugins.trace_store import TraceStore
 from tests.fixtures.loader import load_acceptance
 
@@ -369,22 +371,38 @@ def test_sample3_incident_closure_full_chain() -> None:
         assert r.json()["batch_status"] == "pending_release"
         assert session.get(QualityIncident, inc_id).status == "closed"
 
-        # 7) the batch needs a passing sample conclusion for release item 2.
-        session.add(
-            SampleConclusion(
-                conclusion_id=CONC1,
-                batch_id=B1,
-                inspection_type="iv",
-                rule_version_id=RULE,
-                sample_round=1,
-                n=2,
-                ac=0,
-                re=1,
-                result="pass",
-                evidence_id=EV1,
-            )
+        # 7) the batch needs a passing sample conclusion for release item 2 —
+        #    produced by the REAL sampling path, not hand-inserted. (The
+        #    previous version of this test wrote the SampleConclusion row
+        #    directly with the session, which is exactly how the "结论侧没有
+        #    任何人回写" defect stayed invisible: the suite forged the very
+        #    row production could not produce.)
+        sample_result = run_sampling(
+            session,
+            [
+                IsoRow(
+                    inspection_type="iv",
+                    inspection_level="normal",
+                    aql=1.0,
+                    lot_size_min=1,
+                    lot_size_max=100,
+                    n=2,
+                    ac=0,
+                    re=1,
+                )
+            ],
+            B1,
+            inspection_type="iv",
+            aql=1.0,
+            lot_size=sample["batch"]["lot_size"],
+            sns=[insp.sn for insp in sample["inspections"]],
+            seed=str(B1),
         )
         session.commit()
+        assert sample_result["result"] == "pass"
+        assert session.scalars(
+            select(SampleConclusion).where(SampleConclusion.batch_id == B1)
+        ).all()
 
         # 8) release passes all 7 items（闭环修复后 CAPA 门禁前移到 close 的
         #    五条件校验；closed 异常不再参与断言 ⑥。item 7：复检覆盖 = 异常

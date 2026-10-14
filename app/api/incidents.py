@@ -42,6 +42,7 @@ from app.infra.models import (
     Reinspection,
 )
 from app.plugins.trace_store import TraceStore
+from app.skills.remediation_conclusion import materialize_remediation_conclusion
 
 router = APIRouter(prefix="/api/incidents", tags=["incidents"])
 
@@ -627,12 +628,31 @@ def close_incident_endpoint(incident_id: uuid.UUID, session: SessionDep) -> Inci
         batch.status = "pending_release"
         batch_status = "pending_release"
 
+        # 闭环成立 → 补写第 2 轮抽样结论（复检闭环的结论侧回写）。
+        # 不做这一步，抽样 fail 的批次会永远卡在断言②：结论表里只有第 1 轮
+        # 那条 fail，而复检通过/异常关闭都不落任何"结论"事实。闭环不成立时
+        # 本调用不写任何行，断言②继续阻断（D9：无默认放行）。
+        outcome = materialize_remediation_conclusion(session, batch)
+        remediation_trace = {
+            "sample_round": outcome.sample_round,
+            "sample_result": outcome.result,
+            "written": outcome.written,
+            "skipped": outcome.skipped,
+            "reason": outcome.reason,
+        }
+    else:
+        remediation_trace = None
+
     _record_trace(
         session,
         incident,
         "incident_close",
         {},
-        {"incident_status": "closed", "batch_status": batch_status},
+        {
+            "incident_status": "closed",
+            "batch_status": batch_status,
+            "remediation_conclusion": remediation_trace,
+        },
     )
     session.commit()
     session.refresh(incident)

@@ -54,6 +54,7 @@ from app.domain.state_machine import transition
 from app.infra.models import DeliveryBatch, Evidence
 from app.plugins.trace_store import TraceStore
 from app.skills.release_inputs import assert_batch_release
+from app.skills.remediation_conclusion import materialize_remediation_conclusion
 from app.skills.report_skill import ReportSkill
 
 router = APIRouter(prefix="/api/batches", tags=["release"])
@@ -82,6 +83,15 @@ class RejectResponse(BaseModel):
     auto_archived: bool
     reason: str
     report_id: uuid.UUID | None
+
+
+class RecheckResponse(BaseModel):
+    batch_id: uuid.UUID
+    sample_round: int
+    result: str
+    reason: str = ""
+    written: bool
+    skipped: str = ""
 
 
 def get_session() -> Any:
@@ -193,6 +203,66 @@ def release_batch(
         status=batch.status,
         release_decision=batch.release_decision,
         checks=[{"name": c.name, "passed": c.passed, "reason": c.reason} for c in result.checks],
+    )
+
+
+@router.post("/{batch_id}/recheck", response_model=RecheckResponse)
+def recheck_batch(batch_id: uuid.UUID, session: SessionDep) -> RecheckResponse:
+    """复检闭环结论重算：把"复检已通过并关闭"落成第 2 轮抽样结论。
+
+    架构文档 §9.2 早已列出 ``POST /api/batches/{id}/recheck``（复检），但此前
+    只实现了异常级的 ``POST /api/incidents/{id}/reinspections`` —— 复检记录
+    写得进去，结论侧却没人回写，抽样 fail 的批次于是永久卡在放行断言②。
+
+    关闭端点（``incidents.close``）在批次转入 ``pending_release`` 的同一事务里
+    已自动补写；本端点面向**在此之前就已关闭完**的历史批次（补写一次即可），
+    以及需要按需重算的场景。
+
+    幂等：已有第 2 轮结论时 ``written=false`` 并回报既有结果。闭环不成立时
+    只回报推导结果（``result="fail"`` + 指名未解除的 SN），**不写任何结论行**
+    —— 断言②继续阻断，不存在"重算一下就放行"的旁路。
+    """
+    batch = session.get(DeliveryBatch, batch_id)
+    if batch is None:
+        raise HTTPException(status_code=404, detail="batch_not_found")
+
+    # D8: archived is terminal.
+    require_not_archived(batch_id, session)
+    if batch.status != "pending_release":
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "batch_not_pending_release", "status": batch.status},
+        )
+
+    outcome = materialize_remediation_conclusion(session, batch)
+    TraceStore().record(
+        session,
+        task_id=str(uuid.uuid4()),
+        batch_id=batch_id,
+        skill_name="recheck",
+        input_ref={"kind": "batch", "id": batch.batch_no},
+        plugins_invoked=["remediation_conclusion"],
+        params_summary={
+            "sample_round": outcome.sample_round,
+            "written": outcome.written,
+            "skipped": outcome.skipped,
+        },
+        model_version=None,
+        structured_output={"result": outcome.result, "reason": outcome.reason},
+        validation_result="pass" if outcome.result == "pass" else "fail",
+        failure_reason=None if outcome.result == "pass" else outcome.reason,
+        human_action=None,
+        started_at=datetime.now(UTC),
+        finished_at=None,
+    )
+    session.commit()
+    return RecheckResponse(
+        batch_id=batch_id,
+        sample_round=outcome.sample_round,
+        result=outcome.result,
+        reason=outcome.reason,
+        written=outcome.written,
+        skipped=outcome.skipped,
     )
 
 

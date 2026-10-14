@@ -66,6 +66,7 @@ def run_sampling(
     sns: list[str],
     seed: str,
     inspection_level: str = "normal",
+    sample_round: int = 1,
 ) -> dict:
     """Run one sampling round for ``batch_id`` (A6 / Review Focus #5).
 
@@ -73,6 +74,13 @@ def run_sampling(
     rows written (the anomaly is surfaced, never defaulted away).
     Hit -> deterministic freeze (domain ``freeze_sample``), rows persisted,
     conclusion recorded, and the plan parameters returned.
+
+    ``sample_round`` names which round this is (the schema's
+    ``uq_conclusion_unique`` / ``uq_sample_unique`` both carry it, and the
+    release assertion reads the *highest* round). Round 1 is the intake
+    sampling; a later round is a re-sample after remediation. The freeze +
+    idempotency checks below are scoped to the round, so a genuine second
+    round is not silently answered with the first round's verdict.
     """
     iso_result = iso_lookup(
         inspection_type,
@@ -127,15 +135,18 @@ def run_sampling(
         seed,
         selected_at,
         matching_row,
+        sample_round=sample_round,
     )
     selected_sns = [s.sn for s in samples]
     # C4: idempotent re-freeze (same seed + same combo) -> all selected SNs
-    # were already persisted in a prior round, so no new Sample rows came
+    # were already persisted for this round, so no new Sample rows came
     # back. Delegate to _idempotent_refreeze: when a conclusion already
-    # exists it returns the stored result as a short-circuit dict, so we
-    # skip re-running the sample-level verdict; otherwise it returns None
-    # and we fall through to a fresh verdict below.
-    replayed = _idempotent_refreeze(session, batch_id, inspection_type, iso_result, sns, seed)
+    # exists **for this round** it returns the stored result as a
+    # short-circuit dict, so we skip re-running the sample-level verdict;
+    # otherwise it returns None and we fall through to a fresh verdict below.
+    replayed = _idempotent_refreeze(
+        session, batch_id, inspection_type, iso_result, sns, seed, sample_round
+    )
     if replayed is not None:
         return replayed
     if not samples:
@@ -153,7 +164,7 @@ def run_sampling(
             batch_id,
             inspection_type,
             batch_rule_version_id,
-            sample_round=1,
+            sample_round=sample_round,
             n=iso_result.n,
             ac=iso_result.ac,
             re=iso_result.re,
@@ -175,6 +186,7 @@ def _idempotent_refreeze(
     iso_result: IsoResult,
     sns: list[str],
     seed: str,
+    sample_round: int,
 ) -> dict | None:
     """C4 helper for the idempotent re-freeze branch of run_sampling.
 
@@ -183,8 +195,14 @@ def _idempotent_refreeze(
     batch/type/rule/round, return that stored conclusion as a short-circuit
     result dict so the caller does not re-run the sample-level verdict.
     Returns None when the caller must still compute a fresh verdict.
+
+    The lookup is pinned to ``sample_round``: "some round has a conclusion"
+    is not the question — answering it that way hands round 2 the round-1
+    verdict (the stale ``fail`` that used to block release forever).
     """
-    existing = SampleRepository().get_latest_conclusion(session, batch_id, inspection_type)
+    existing = SampleRepository().get_latest_conclusion(
+        session, batch_id, inspection_type, sample_round=sample_round
+    )
     if existing is None:
         return None
     entries = freeze_sample(str(batch_id), len(sns), iso_result, sns, seed)

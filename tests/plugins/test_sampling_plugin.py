@@ -234,3 +234,72 @@ def test_sampling_deterministic_same_seed(session) -> None:
     b2_samples = session.scalars(select(Sample).where(Sample.batch_id == batch2.batch_id)).all()
     assert len(b2_samples) == 10
     assert r2["selected"] == r2b["selected"]
+
+
+def test_sampling_second_round_writes_its_own_conclusion(session) -> None:
+    """复检后的第 2 轮抽样必须落自己的结论行（轮次参数）。
+
+    缺陷：``run_sampling`` 把 ``sample_round`` 写死为 1，且 ``_idempotent_refreeze``
+    一旦查到**任何**结论就直接返回旧结果 —— 于是第 1 轮 fail 之后，无论重跑多少
+    次都只会拿到那条 fail、且不写任何新行，批次永久卡在放行断言②。
+    """
+    sns = [f"SN-{i:03d}" for i in range(10)]
+    batch = _batch_with_sns(session, "B-S-R2", sns)
+    rows = session.scalars(
+        select(ModuleInspection).where(ModuleInspection.batch_id == batch.batch_id)
+    ).all()
+    for i, row in enumerate(rows):
+        row.decision_status = "fail" if i == 0 else "pass"
+    session.flush()
+    first = run_sampling(
+        session, _ISO_TABLE, batch.batch_id, "iv", 1.0, 10, sns, seed=str(batch.batch_id)
+    )
+    session.flush()
+    assert first["result"] == "fail"
+
+    # 复检整改后重跑同一规则版本：这一轮全体 pass。
+    for row in rows:
+        row.decision_status = "pass"
+    session.flush()
+    second = run_sampling(
+        session,
+        _ISO_TABLE,
+        batch.batch_id,
+        "iv",
+        1.0,
+        10,
+        sns,
+        seed=str(batch.batch_id),
+        sample_round=2,
+    )
+    session.flush()
+    assert second["result"] == "pass"
+    conclusions = session.scalars(
+        select(SampleConclusion).order_by(SampleConclusion.sample_round)
+    ).all()
+    assert [(c.sample_round, c.result) for c in conclusions] == [(1, "fail"), (2, "pass")]
+    # 第 2 轮有自己的冻结样本行（按轮次去重，不再被第 1 轮的 (batch, sn) 挡住）。
+    rounds = session.scalars(select(Sample.sample_round)).all()
+    assert sorted(rounds) == [1] * 10 + [2] * 10
+
+
+def test_same_round_rerun_still_short_circuits(session) -> None:
+    """同一轮重放仍是幂等的：返回该轮已存结论，不写重复行。"""
+    sns = [f"SN-{i:03d}" for i in range(10)]
+    batch = _batch_with_sns(session, "B-S-R3", sns)
+    for row in session.scalars(
+        select(ModuleInspection).where(ModuleInspection.batch_id == batch.batch_id)
+    ).all():
+        row.decision_status = "pass"
+    session.flush()
+    first = run_sampling(
+        session, _ISO_TABLE, batch.batch_id, "iv", 1.0, 10, sns, seed=str(batch.batch_id)
+    )
+    session.flush()
+    replay = run_sampling(
+        session, _ISO_TABLE, batch.batch_id, "iv", 1.0, 10, sns, seed=str(batch.batch_id)
+    )
+    session.flush()
+    assert first["result"] == replay["result"] == "pass"
+    conclusions = session.scalars(select(SampleConclusion)).all()
+    assert len(conclusions) == 1

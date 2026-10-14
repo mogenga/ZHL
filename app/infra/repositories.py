@@ -217,6 +217,7 @@ class SampleRepository:
         seed: str,
         selected_at: datetime,
         iso_row: IsoRow,
+        sample_round: int = 1,
     ) -> list[Sample]:
         """Run the domain ``freeze_sample`` and persist the frozen selection.
 
@@ -229,6 +230,12 @@ class SampleRepository:
         up by the sampling plugin (Task 6); the repository stores only the
         ``n`` portion of it via the selection count, and trusts the caller
         for ``ac``/``re`` (which belong to the conclusion, not the sample).
+
+        ``sample_round`` scopes the de-duplication to the round: the existing
+        rows consulted are those of the *same* (batch, type, rule, round) —
+        exactly the ``uq_sample_unique`` key. Otherwise a genuine second
+        round (复检整改后重抽) would be silently swallowed by the first
+        round's ``(batch_id, sn)`` rows and freeze nothing.
         """
         from sqlalchemy import select as _sel
 
@@ -237,7 +244,12 @@ class SampleRepository:
         iso_result = IsoResult(n=iso_row.n, ac=iso_row.ac, re=iso_row.re)
         entries = freeze_sample(str(batch_id), len(sns), iso_result, sns, seed)
         selected = [e.sn for e in entries]
-        existing_stmt = _sel(Sample.sn).where(Sample.batch_id == batch_id)
+        existing_stmt = _sel(Sample.sn).where(
+            Sample.batch_id == batch_id,
+            Sample.inspection_type == inspection_type,
+            Sample.rule_version_id == rule_version_id,
+            Sample.sample_round == sample_round,
+        )
         existing = set(session.scalars(existing_stmt).all())
         created: list[Sample] = []
         for sn in selected:
@@ -247,6 +259,7 @@ class SampleRepository:
                 batch_id=batch_id,
                 inspection_type=inspection_type,
                 rule_version_id=rule_version_id,
+                sample_round=sample_round,
                 sn=sn,
                 seed=seed,
                 selected_at=selected_at,
@@ -287,17 +300,25 @@ class SampleRepository:
         session: Session,
         batch_id: uuid.UUID,
         inspection_type: str,
+        sample_round: int | None = None,
     ) -> SampleConclusion | None:
         """Latest conclusion for ``batch_id`` scoped to one inspection type.
 
         ``inspection_type`` is required: calling without it (the old
         default-``None`` behavior) would compare across inspection types and
         could return a conclusion from the wrong one — no caller relies on
-        that cross-type behavior, so the parameter is not optional."""
+        that cross-type behavior, so the parameter is not optional.
+
+        ``sample_round`` pins the lookup to one round (pass it when decide
+        whether *that* round has already concluded — "any round has a
+        conclusion" is the wrong question and would hand a later round the
+        earlier round's stale verdict)."""
         stmt = select(SampleConclusion).where(
             SampleConclusion.batch_id == batch_id,
             SampleConclusion.inspection_type == inspection_type,
         )
+        if sample_round is not None:
+            stmt = stmt.where(SampleConclusion.sample_round == sample_round)
         stmt = stmt.order_by(SampleConclusion.sample_round.desc())
         return session.scalars(stmt).first()
 

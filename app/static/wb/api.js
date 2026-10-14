@@ -290,6 +290,14 @@ WB.api = {
       return { ok: true, data: r.data };
     });
   },
+  /* 复检闭环结论重算：把「复检已通过并关闭」落成第 2 轮抽样结论。
+     面向修复前就已关闭完、结论侧没回写的历史批次（抽样 fail 永久卡住放行）。 */
+  recheckBatch(batchId) {
+    return WB.api.request('POST', '/api/batches/' + batchId + '/recheck', {}).then(function (r) {
+      if (!r.ok) return { ok: false, error: r.error, data: null };
+      return { ok: true, data: r.data };
+    });
+  },
   rejectBatch(batchId, reason, rejectedBy) {
     return WB.api.request('POST', '/api/batches/' + batchId + '/reject', { reason: reason, rejected_by: rejectedBy }).then(function (r) {
       if (!r.ok) return { ok: false, error: r.error, data: null };
