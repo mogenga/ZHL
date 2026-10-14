@@ -116,6 +116,7 @@ def build_router(get_deps: object) -> APIRouter:
         batch = _load_batch(s, batch_id)
         inspections = [
             {
+                "inspection_id": str(r.inspection_id),
                 "sn": r.sn,
                 "intake_status": r.intake_status,
                 "decision_status": r.decision_status,

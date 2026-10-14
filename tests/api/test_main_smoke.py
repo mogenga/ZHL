@@ -285,6 +285,97 @@ def test_trace_endpoint_returns_batch_trace_rows(api_client: Any) -> None:
     engine.dispose()
 
 
+def test_batch_detail_inspections_expose_inspection_id(api_client: Any) -> None:
+    """get_batch_detail 的 inspections[] 必须含 inspection_id——复检表单靠它
+    把选中的 SN 解析成组件行（缺失则前端必弹「无法解析复检组件」，
+    2026-10 测试反馈的复检卡点）。"""
+    from datetime import datetime, timezone
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    from app.api.batches import build_router as build_batch_router
+    from app.infra.models import (
+        Base,
+        DeliveryBatch,
+        ModuleInspection,
+        QualityRuleVersion,
+    )
+
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    rule_id = UUID("ab900000-1111-2222-3333-444444444497")
+    batch_id = UUID("ab900000-1111-2222-3333-4444444444cc")
+    session.add(
+        QualityRuleVersion(
+            rule_version_id=rule_id,
+            project_id="P-1",
+            model="JH-550W",
+            name="rv",
+            nameplate_power=550.0,
+            power_tolerance=0.5,
+            parameter_standards={},
+            current_bands={},
+            sample_plan={},
+            effective_at=_TS,
+            version_no=1,
+        )
+    )
+    session.add(
+        DeliveryBatch(
+            batch_id=batch_id,
+            batch_no="B-DETAIL-01",
+            project_id="P-1",
+            model="JH-550W",
+            planned_quantity=1,
+            rule_version_id=rule_id,
+            status="pending_recheck",
+        )
+    )
+    insp = ModuleInspection(
+        batch_id=batch_id,
+        sn="SN-N-057",
+        source_type="IV_CSV",
+        captured_at=datetime(2026, 10, 14, tzinfo=timezone.utc),
+        pmax=550.0,
+        temp=25.0,
+        isc=10.5,
+        voc=48.0,
+        vm=40.0,
+        im=13.0,
+        ff=0.8,
+        appearance_result="pass",
+        intake_status="confirmed",
+    )
+    session.add(insp)
+    session.commit()
+
+    # get_batch_detail 只消费 AppDeps.session——最小 stub 即可，不拖起 app.main
+    class _Deps:
+        def __init__(self, s):
+            self.session = s
+
+    app = FastAPI()
+    app.include_router(build_batch_router(lambda: _Deps(session)))
+    client = TestClient(app)
+    r = client.get(f"/api/batches/{batch_id}")
+    assert r.status_code == 200, r.text
+    inspections = r.json()["inspections"]
+    assert len(inspections) == 1
+    assert inspections[0]["sn"] == "SN-N-057"
+    assert inspections[0].get("inspection_id") == str(insp.inspection_id), (
+        "inspections[] 缺 inspection_id，复检表单无法解析组件"
+    )
+    session.close()
+    engine.dispose()
+
+
 def test_trace_endpoint_exposes_structured_output(api_client: Any) -> None:
     """list_traces 必须回吐 structured_output——工作台靠它把
     ``incident_auto`` 轨迹映射到异常 id（卡片「自动」标记的依据，
