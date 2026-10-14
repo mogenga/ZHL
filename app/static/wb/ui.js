@@ -72,8 +72,17 @@ WB.openModal = function (title, fields, onOk, opts = {}) {
     } else if (f.type === 'datetime-local') {
       inp = WB.h('input', { type: 'datetime-local' });
       inp.value = f.value || '';
+    } else if (f.type === 'file') {
+      // 文件字段：取值靠调用方读 input.files（vals 里只会给到浏览器的伪路径），
+      // accept 限定可选类型；变化回调由调用方在 openModal 返回后自行挂。
+      inp = WB.h('input', { type: 'file', ...(f.accept ? { accept: f.accept } : {}) });
     } else {
-      inp = WB.h('input', { type: f.type || 'text', placeholder: f.placeholder || '', ...(f.min != null ? { min: f.min } : {}) });
+      inp = WB.h('input', {
+        type: f.type || 'text',
+        placeholder: f.placeholder || '',
+        ...(f.min != null ? { min: f.min } : {}),
+        ...(f.step != null ? { step: f.step } : {}),
+      });
       inp.value = f.value || '';
     }
     if (f.disabled) inp.disabled = true;

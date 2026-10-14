@@ -180,6 +180,12 @@ new → isolated → assigned → pending_recheck → closed
 
 前端「检测数据」框每行 9 列，缺列或非数字会被前端直接拦下（后端再校验一次，返回 400 `incomplete_inspection`）。
 
+> **两条录入通道等价**（2026-10-15 起）：手工粘贴，或「数据入场」→「**从 CSV 导入**」选文件。
+> 导入通道在前端解析并**先给预览**（有效行数 / SN 列表 / 逐行问题），确认后再提交，
+> 走的是同一个 `inspections[]` 契约。文件要求：9 列同上，表头行可留（形如 `SN,pmax,…` 会被跳过），
+> 编码 UTF-8 或 GBK 均可；**文件内有重复 SN 会在预览里拦下**（后端只查"已入库的同批 SN"，
+> 载荷内重复会撞唯一约束）。弹窗内提供「下载模板」（`/static/templates/inspection_template.csv`，带 BOM，Excel 双击不乱码）。
+
 默认列（除被改变的那一列外，全部取标准值）：`temp=25.0, isc=10.5, voc=48.0, vm=40.0, im=13.0, ff=0.80, appearance=pass`
 
 | 用途 | SN | pmax | im | 外观 |

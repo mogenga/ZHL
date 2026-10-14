@@ -75,6 +75,98 @@ WB.stages.intake = (function () {
     }, { submitLabel: '提交送检' });
   }
 
+  /* ---- 从 CSV 导入（仪器导出的检测数据本来就是 CSV）----
+     流程：选文件 → 前端解析 → 预览行数/SN/问题行 → 确认导入 →
+     与粘贴通道同一个 submitIntake 契约（inspections[]），后端零改动。
+     有错整批不提交（与粘贴通道同策略）：质量数据部分导入比不导入更危险。 */
+  const IMPORT_SOURCE_TYPE = 'IV_CSV';
+  const TEMPLATE_URL = '/static/templates/inspection_template.csv';
+
+  function importForm(batch) {
+    const state = { parsed: null };
+    const preview = WB.h('div', { class: 'import-preview' },
+      WB.h('div', { class: 'hint-line muted', text: '选择文件后在此显示解析预览' }));
+    const inline = WB.h('div', {},
+      WB.h('div', { class: 'hint-line' },
+        WB.h('a', { href: TEMPLATE_URL, download: 'inspection_template.csv', text: '下载模板' }),
+        WB.h('span', { class: 'muted', text: '（9 列表头 + 示例行；外观列填 pass / fail）' })),
+      preview);
+    WB.openModal('从 CSV 导入检测数据', [
+      { label: '选择文件（.csv / .txt；UTF-8 或 GBK）', type: 'file', accept: '.csv,.txt' },
+    ], function () {
+      if (!state.parsed || !state.parsed.rows.length) {
+        WB.toast('请先选择能解析出检测数据的文件');
+        return false;
+      }
+      if (state.parsed.errors.length) {
+        WB.toast('文件中有 ' + state.parsed.errors.length + ' 行问题，请修正后重新导入');
+        return false;
+      }
+      _markModalBusy();
+      const now = new Date().toISOString();
+      const inspections = state.parsed.rows.map((r) => Object.assign(
+        { source_type: IMPORT_SOURCE_TYPE, captured_at: now }, r));
+      WB.api.submitIntake({
+        batch_id: batch.batch_id,
+        source_type: IMPORT_SOURCE_TYPE,
+        inspections: inspections,
+        fields: null,
+      }).then(_onIntakeSubmitted(batch));
+    }, { submitLabel: '确认导入', inline: inline });
+    const input = WB._modal.inputs[0];
+    if (input && input.addEventListener) {
+      input.addEventListener('change', () => _readImportFile(input, state, preview));
+    }
+    _setImportEnabled(false);   // 未选文件时不放行提交（避免空提交/误点）
+  }
+
+  function _readImportFile(input, state, preview) {
+    const file = (input.files || [])[0];
+    if (!file) {
+      state.parsed = null;
+      _renderImportPreview(preview, null, '');
+      _setImportEnabled(false);
+      return;
+    }
+    const fr = new FileReader();
+    fr.onload = function () {
+      const text = decodeCsvBytes(new Uint8Array(fr.result));
+      const parsed = parseInspectionCsv(text);
+      state.parsed = parsed;
+      _renderImportPreview(preview, parsed, file.name);
+      _setImportEnabled(parsed.rows.length > 0 && parsed.errors.length === 0);
+    };
+    fr.readAsArrayBuffer(file);
+  }
+
+  function _renderImportPreview(preview, parsed, fileName) {
+    preview.replaceChildren();
+    if (!parsed) return;
+    preview.append(WB.h('div', { class: 'hint-line' },
+      WB.h('span', { class: 'mono', text: fileName }),
+      WB.h('span', { class: 'muted', text: ' · ' + parsed.rows.length + ' 行有效'
+        + (parsed.errors.length ? '，' + parsed.errors.length + ' 行有问题' : '')
+        + (parsed.skippedHeader ? '（已跳过表头行）' : '') })));
+    if (parsed.sns.length) {
+      const head = parsed.sns.slice(0, 10);
+      preview.append(WB.h('div', { class: 'hint-line' },
+        WB.h('span', { class: 'muted', text: 'SN：' + head.join('、')
+          + (parsed.sns.length > head.length ? ' 等共 ' + parsed.sns.length + ' 条' : '') })));
+    }
+    if (parsed.errors.length) {
+      const list = WB.h('div', { class: 'form-err' });
+      parsed.errors.slice(0, 8).forEach((e) => list.append(WB.h('div', { text: e })));
+      if (parsed.errors.length > 8) {
+        list.append(WB.h('div', { text: '…还有 ' + (parsed.errors.length - 8) + ' 行问题' }));
+      }
+      preview.append(list);
+    }
+  }
+
+  function _setImportEnabled(on) {
+    if (WB._modal && WB._modal.submitBtn) WB._modal.submitBtn.disabled = !on;
+  }
+
   /* 提交回调：成功/失败都刷新详情，避免界面停在旧状态 */
   function _onIntakeSubmitted(batch) {
     return function (res) {
@@ -102,6 +194,74 @@ WB.stages.intake = (function () {
     var next = pending ? '人工确认入场' : ((WB.NEXT_LABEL || {})[pending ? 'pending_judge' : 'pending_judge'] || '');
     if (pending) return '批次待处理：待人工确认入场→判定';
     return '已自动确认入场，批次转待判定，下一步：' + (WB.NEXT_LABEL['pending_judge'] || '查看判定');
+  }
+
+  /* ---- CSV 解析（纯函数：无 DOM、无时钟）----
+     列契约与「已结构化数据（逐列粘贴）」完全一致：
+       SN,pmax,temp,isc,voc,vm,im,ff,外观
+     - 表头行**仅当**首行形如 sn,pmax,… 时跳过，数据行不会被误判（首列是 SN-xxx）
+     - 行号按文件原样（含表头）计数，便于在 Excel 里定位
+     - 每个问题行都进 errors 且不产出该行；是否拦住提交由调用方决定
+       （当前策略：有错整批不提交，与粘贴通道一致）
+     - 文件内重复 SN 也在此拦下：后端只查"已入库的同批 SN"，载荷内重复会撞
+       uq_inspection 变成 500，而不是可读的 400（app/api/intake.py 的重复防护
+       只覆盖 existing_sns） */
+  const CSV_COLS = ['sn', 'pmax', 'temp', 'isc', 'voc', 'vm', 'im', 'ff', 'appearance_result'];
+
+  function parseInspectionCsv(text) {
+    const out = { rows: [], sns: [], errors: [], skippedHeader: false, dataLines: 0 };
+    const raw = String(text == null ? '' : text).replace(/^﻿/, '');
+    const seen = {};
+    raw.split(/\r?\n/).forEach(function (line, idx) {
+      const n = idx + 1;
+      const s = line.trim();
+      if (!s) return;
+      const parts = s.split(/[，,]/).map(function (x) { return x.trim(); });
+      if (idx === 0 && parts[0].toLowerCase() === 'sn'
+        && parts.some(function (p) { return p.toLowerCase() === 'pmax'; })) {
+        out.skippedHeader = true;
+        return;
+      }
+      out.dataLines++;
+      if (parts.length !== 9) {
+        out.errors.push('第 ' + n + ' 行：应为 9 列，当前 ' + parts.length + ' 列');
+        return;
+      }
+      const row = { sn: parts[0] };
+      for (let i = 1; i <= 7; i++) {
+        const v = Number(parts[i]);
+        if (parts[i] === '' || Number.isNaN(v)) {
+          out.errors.push('第 ' + n + ' 行：' + CSV_COLS[i] + ' 不是数字（' + parts[i] + '）');
+          return;
+        }
+        row[CSV_COLS[i]] = v;
+      }
+      if (parts[8] !== 'pass' && parts[8] !== 'fail') {
+        out.errors.push('第 ' + n + ' 行：外观须为 pass/fail（当前 ' + parts[8] + '）');
+        return;
+      }
+      row.appearance_result = parts[8];
+      if (seen[row.sn]) {
+        out.errors.push('第 ' + n + ' 行：SN ' + row.sn + ' 在文件内重复（第 ' + seen[row.sn] + ' 行已出现）');
+        return;
+      }
+      seen[row.sn] = n;
+      out.rows.push(row);
+      out.sns.push(row.sn);
+    });
+    return out;
+  }
+
+  /* 文件字节 → 文本：UTF-8 优先（TextDecoder 默认剥 BOM），解出替换字符时回退
+     GBK —— 中文 Windows 上 Excel 导出的 CSV 默认就是 GBK，按 UTF-8 读会整片乱码。 */
+  function decodeCsvBytes(bytes) {
+    const utf8 = new TextDecoder('utf-8').decode(bytes);
+    if (utf8.indexOf('�') < 0) return utf8;
+    try {
+      const gbk = new TextDecoder('gbk').decode(bytes);
+      if (gbk.indexOf('�') < 0) return gbk;
+    } catch (e) { /* 环境无 gbk 解码器：保留 UTF-8 结果，问题行由预览指出 */ }
+    return utf8;
   }
 
   function parseOverrides(s) {
@@ -202,7 +362,10 @@ WB.stages.intake = (function () {
     const body = WB.h('div', {});
     card.append(body);
     if (batch.status === 'pending_intake') {
-      body.append(WB.h('button', { class: 'primary', onclick: () => submitForm(batch), text: '提交送检数据' }));
+      // 两条入口共用同一次提交：手工粘贴（原样）与文件导入（仪器导出的 CSV）
+      body.append(WB.h('div', { class: 'actions' },
+        WB.h('button', { class: 'primary', onclick: () => submitForm(batch), text: '提交送检数据' }),
+        WB.h('button', { onclick: () => importForm(batch), text: '从 CSV 导入' })));
       body.append(WB.h('div', { class: 'hint-line', text: '提交后展示置信度与低置信清单；确认/拒绝入口随之出现' }));
     } else {
       // 降级：组件条码 + 入场状态（§1.3 边界；置信度不重建）
@@ -259,7 +422,13 @@ WB.stages.intake = (function () {
     }, 2000);
   }
 
-  return { stageIndex: stageIndex, render: render };
+  // parseInspectionCsv / decodeCsvBytes 导出以便单测（纯函数，不碰 DOM）
+  return {
+    stageIndex: stageIndex,
+    render: render,
+    parseInspectionCsv: parseInspectionCsv,
+    decodeCsvBytes: decodeCsvBytes,
+  };
 })();
 
 WB.stages._byIndex[0] = WB.stages.intake;

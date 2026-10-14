@@ -589,7 +589,8 @@ WB.newBatchForm = function () {
     { label: '批次号', type: 'text', placeholder: '如 B-20261013-001', required: true },
     { label: '项目', type: 'text', placeholder: '项目标识', required: true },
     { label: '型号', type: 'text', placeholder: '如 JH-550W', required: true },
-    { label: '计划数量', type: 'text', placeholder: '≥1', required: true, min: 1 },
+    // 数字输入：浏览器自带上下箭头（加减），并约束步进与下限
+    { label: '计划数量', type: 'number', placeholder: '≥1', required: true, min: 1, step: 1 },
     {
       label: '规则版本', type: 'select', options: options, required: true,
       disabled: submitDisabled,
@@ -599,12 +600,20 @@ WB.newBatchForm = function () {
     const batch_no = (vals[0] || '').trim();
     const project_id = (vals[1] || '').trim();
     const model = (vals[2] || '').trim();
-    const planned = parseInt((vals[3] || '').trim(), 10);
     const rule_version_id = vals[4];
-    if (!batch_no || !project_id || !model || !rule_version_id || !planned || planned < 1) {
-      WB.toast('请填写全部必填项（计划数量 ≥1）');
-      return;
+    if (!batch_no || !project_id || !model || !rule_version_id) {
+      WB.toast('请填写批次号、项目、型号与规则版本');
+      return false;   // 保留输入不关窗
     }
+    // 严格按整数校验，不做 parseInt 式静默截断：number 输入框仍可能给出
+    // '1.5' / '1e3' / '' 这类值，而后端契约是 int（Field(ge=1)）——
+    // 旧实现 parseInt('12abc') === 12 会把非法输入直接建成批次。
+    const plannedRaw = (vals[3] || '').trim();
+    if (!/^\d+$/.test(plannedRaw) || parseInt(plannedRaw, 10) < 1) {
+      WB.toast('计划数量需填正整数（≥1）');
+      return false;
+    }
+    const planned = parseInt(plannedRaw, 10);
     WB.api.createBatch({
       batch_no: batch_no, project_id: project_id, model: model,
       rule_version_id: rule_version_id, planned_quantity: planned,
