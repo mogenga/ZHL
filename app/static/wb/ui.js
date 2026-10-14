@@ -14,6 +14,9 @@ WB.h = function h(tag, attrs, ...kids) {
       if (v == null) continue;
       if (k === 'class') e.className = v;
       else if (k === 'text') e.textContent = v;
+      /* innerHTML 不是反射属性：走 setAttribute('innerHTML',…) 只会挂一个惰性
+         innerhtml 特性、元素内容仍为空，必须直接赋 IDL 属性才解析 HTML */
+      else if (k === 'innerHTML') e.innerHTML = v;
       else if (k.startsWith('on')) e.addEventListener(k.slice(2), v);
       else if (k === 'dataset') Object.assign(e.dataset, v);
       else if (k === 'disabled' || k === 'checked' || k === 'multiple') e[k] = !!v;
