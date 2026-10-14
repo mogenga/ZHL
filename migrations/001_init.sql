@@ -20,7 +20,7 @@ CREATE TYPE batch_status AS ENUM (
 CREATE TYPE release_decision AS ENUM ('released', 'rejected', 'undecided');
 CREATE TYPE source_type AS ENUM ('OCR_FORM', 'IV_CSV', 'MANUAL', 'SIMULATED_DEVICE');
 CREATE TYPE appearance_result AS ENUM ('pass', 'fail');
-CREATE TYPE intake_status AS ENUM ('pending', 'confirmed', 'rejected');
+CREATE TYPE intake_status AS ENUM ('pending', 'confirmed', 'isolated', 'rejected');
 CREATE TYPE decision_status AS ENUM ('pending', 'pass', 'fail', 'rule_missing');
 CREATE TYPE trigger_type AS ENUM ('rule_fail', 'sample_fail', 'appearance_manual', 'data_consistency', 'rule_missing');
 CREATE TYPE severity AS ENUM ('critical', 'major', 'minor');

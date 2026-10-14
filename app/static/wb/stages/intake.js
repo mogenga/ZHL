@@ -57,9 +57,21 @@ WB.stages.intake = (function () {
           WB._loadDetail(batch.batch_id);
           return;
         }
+        WB.toast('提交成功，批次已推进：' + _progressText(res.data));
+        // 刷新批次头/流水线/右栏进度，跳到新阶段；再在中栏改写入场结果卡
+        WB._loadDetail(batch.batch_id);
+        WB.loadBatches();
         showIntakeResult(batch, res.data);
       });
     }, { submitLabel: '提交送检' });
+  }
+
+  /* 发饌进度提示：处理状态 + 下一步动作（依 WB.ST_CN / WB.NEXT_LABEL） */
+  function _progressText(data) {
+    var pending = data && data.status === 'pending';
+    var next = pending ? '人工确认入场' : ((WB.NEXT_LABEL || {})[pending ? 'pending_judge' : 'pending_judge'] || '');
+    if (pending) return '批次待处理：待人工确认入场→判定';
+    return '已自动确认入场，批次转待判定，下一步：' + (WB.NEXT_LABEL['pending_judge'] || '查看判定');
   }
 
   function parseOverrides(s) {
@@ -86,6 +98,10 @@ WB.stages.intake = (function () {
   }
   function _renderIntakeBody(body, batch, data) {
     body.replaceChildren();
+    // 顶部流程进度提示（使用者不需看后台日志即可知批次当前处于哪一步）
+    body.append(WB.h('div', { class: 'hint-line', style: 'font-weight:600' },
+      WB.h('span', { class: 'tag ' + (data.status === 'confirmed' ? 'tag-pass' : 'tag-warn'),
+        text: _progressText(data) })));
     const conf = data.confidence != null ? Math.round(data.confidence * 100) + '%' : '—';
     const stTxt = data.status === 'confirmed' ? '已自动确认入场' : '待人工确认';
     body.append(WB.h('div', { class: 'hint-line' },
