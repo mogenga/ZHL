@@ -115,16 +115,16 @@ WB.stages.intake = (function () {
     }, { submitLabel: '确认导入', inline: inline });
     const input = WB._modal.inputs[0];
     if (input && input.addEventListener) {
-      input.addEventListener('change', () => _readImportFile(input, state, preview));
+      input.addEventListener('change', () => _readImportFile(input, state, preview, batch));
     }
     _setImportEnabled(false);   // 未选文件时不放行提交（避免空提交/误点）
   }
 
-  function _readImportFile(input, state, preview) {
+  function _readImportFile(input, state, preview, batch) {
     const file = (input.files || [])[0];
     if (!file) {
       state.parsed = null;
-      _renderImportPreview(preview, null, '');
+      _renderImportPreview(preview, null, '', batch);
       _setImportEnabled(false);
       return;
     }
@@ -133,13 +133,13 @@ WB.stages.intake = (function () {
       const text = decodeCsvBytes(new Uint8Array(fr.result));
       const parsed = parseInspectionCsv(text);
       state.parsed = parsed;
-      _renderImportPreview(preview, parsed, file.name);
+      _renderImportPreview(preview, parsed, file.name, batch);
       _setImportEnabled(parsed.rows.length > 0 && parsed.errors.length === 0);
     };
     fr.readAsArrayBuffer(file);
   }
 
-  function _renderImportPreview(preview, parsed, fileName) {
+  function _renderImportPreview(preview, parsed, fileName, batch) {
     preview.replaceChildren();
     if (!parsed) return;
     preview.append(WB.h('div', { class: 'hint-line' },
@@ -147,6 +147,19 @@ WB.stages.intake = (function () {
       WB.h('span', { class: 'muted', text: ' · ' + parsed.rows.length + ' 行有效'
         + (parsed.errors.length ? '，' + parsed.errors.length + ' 行有问题' : '')
         + (parsed.skippedHeader ? '（已跳过表头行）' : '') })));
+    // 计划数量 vs 实际行数：计划数量是抽样方案的 lot size 输入
+    // （main_chain._lot_size 拿它查 ISO 表 → n/ac/re），行数才是实际入库并被
+    // 判定的组件数——两者不校验、不比对，错配会静默按错误的批量抽样（还可能
+    // 让报告里的 n 与实际只数不符）。这里**只提示、不阻断**：不改判定语义。
+    const planned = Number(batch && batch.planned_quantity);
+    if (parsed.rows.length > 0 && Number.isFinite(planned) && planned > 0
+      && planned !== parsed.rows.length) {
+      preview.append(WB.h('div', { class: 'hint-line' },
+        WB.h('span', { class: 'tag tag-warn', text: '计划数量不一致' }),
+        WB.h('span', { class: 'muted', text: ' CSV 有 ' + parsed.rows.length
+          + ' 行，批次计划数量 ' + planned + '：抽样方案（n/ac/re）按计划数量计算，'
+          + '请确认哪边填错' })));
+    }
     if (parsed.sns.length) {
       const head = parsed.sns.slice(0, 10);
       preview.append(WB.h('div', { class: 'hint-line' },
@@ -350,9 +363,10 @@ WB.stages.intake = (function () {
     WB.api.confirmIntake(batch.batch_id, { action: action, fields: null }).then(function (res) {
       if (!res.ok) { WB.toast(WB.errText(res.error)); return; }
       WB.toast(action === 'confirm' ? '已确认入场' : '已拒绝入场，批次仍待入场');
-      // 确认/拒绝后批次不再停在 pending_intake，即时结果卡已完成使命；
-      // 留着会在下个节点面板下面再挂一张「入场结果」（renderCenter 的
-      // 展示条件是批次仍在 pending_intake，但 reject 后仍满足，需显式清）。
+      // 确认/拒绝后即时结果卡已完成使命，在此显式清除。
+      // 卡片寿命现在**只**由生命周期决定（renderCenter 不再按批次状态过滤，
+      // 否则自动确认那条路看不到卡片）——这里的清除就是它唯一的结束点之一，
+      // 与换批次（selectBatch）、回总览（goHome）并列。
       WB.state.intakeResult = null;
       // 确认/拒绝后后端图同步推进（判定/抽样）→ 刷新批次跟随新状态（spec §4.3）；
       // 推进到隔离时后端会同事务自动建异常，异常列表必须同步刷新，

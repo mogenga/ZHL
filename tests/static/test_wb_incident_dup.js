@@ -797,6 +797,81 @@ function openCreateForm(list) {
     assert(sent === null, 'Q2: 有错误行时整批不提交');
   }
 
+  // ---- R. 导入预览：行数与批次计划数量不一致 → 非阻断提示（2026-10-15）----
+  // 计划数量是抽样方案的 lot size 输入（main_chain._lot_size 拿它查 ISO 表 →
+  // n/ac/re），而 CSV 行数决定实际入库并被判定的组件数；两者不校验、不比对，
+  // 错配完全静默（还可能导致报告里的 n 与实际只数不符）。故在此提示，
+  // 但**不阻断提交**——不改判定语义，只让人看见。
+  {
+    const csv = 'SN,pmax,temp,isc,voc,vm,im,ff,外观\n'
+      + 'SN-P-001,550.0,25.0,10.5,48.0,40.0,13.0,0.80,pass\n'
+      + 'SN-P-002,548.0,25.0,10.5,48.0,40.0,13.0,0.80,pass\n';
+    const bytes = new TextEncoder().encode(csv);
+    const openImport = async function (planned) {
+      const b = { batch_id: BATCH_ID, batch_no: 'B-5', status: 'pending_intake',
+        planned_quantity: planned };
+      WB.state.selected = b; WB.state.batchId = BATCH_ID;
+      findText(WB.stages.intake.render(b, {}), '从 CSV 导入').fire('click');
+      const fileInput = WB._modal.inputs[0];
+      fileInput.files = [{ name: 'mismatch.csv', _bytes: bytes.buffer }];
+      fileInput.fire('change');
+      await flush(); await flush();
+      return WB._modal.box;
+    };
+
+    const same = await openImport(2);
+    assert(!hasText(same, '计划数量'), 'R1: 行数与计划数量一致 → 不打扰');
+
+    const diff = await openImport(20);
+    assert(hasText(diff, '计划数量'), 'R2: 不一致 → 出现提示');
+    assert(hasText(diff, '2 行') && hasText(diff, '20'), 'R3: 提示里行数与计划数量都在');
+
+    let sent = null;
+    WB.api.submitIntake = function (body) {
+      sent = body;
+      return Promise.resolve({ ok: true, data: { status: 'pending', confidence: 0.9 } });
+    };
+    const okBtn = findText(diff, '确认导入');
+    assert(!!okBtn && !okBtn.disabled, 'R4: 提示不阻断「确认导入」');
+    okBtn.fire('click');
+    await flush(); await flush();
+    assert(!!sent && sent.inspections.length === 2, 'R5: 仍照常提交（仅提示）');
+
+    const unknown = await openImport(undefined);
+    assert(!hasText(unknown, '计划数量'), 'R6: 无从比对（无计划数量）时不误报');
+  }
+
+  // ---- S. 自动确认后「入场结果」卡片仍要显示（2026-10-15 反馈：算漏）----
+  // 展示条件原先多带一个 detail.status === 'pending_intake'。可自动确认
+  // （置信度 ≥0.8，app/api/intake.py:336）会让批次提交后立刻转 pending_judge，
+  // 于是**最常走的那条路**反而看不到置信度/低置信清单/逐组件抽取值——而走查
+  // 文档 C1 第 3 步要测试员看的就是这张卡，验收夹具的 0.85 又正落在自动确认区。
+  // 结束条件改由生命周期唯一决定：换批次(main.js:557)、回总览(:41)、
+  // 确认/拒绝入场(intake.js:369) 三处都会清 intakeResult。
+  {
+    const OTHER = '99999999-9999-9999-9999-999999999999';
+    const pending = { batch_id: BATCH_ID, batch_no: 'B-5', status: 'pending_judge' };
+    WB.state.view = 'batch';
+    WB.state.selected = pending; WB.state.batchId = BATCH_ID;
+    WB.state.intakeResult = { batch_id: BATCH_ID,
+      data: { status: 'confirmed', confidence: 0.85, low_conf_sns: [] } };
+    WB._renderCenterAndRight();
+    assert(hasText(byId.mainPane, '入场结果'), 'S1: 已转判定的批次仍显示入场结果卡片');
+    assert(hasText(byId.mainPane, '置信度'), 'S2: 卡片内容（置信度）一并可见');
+
+    // 换批次 → 不得把上一批的结果带过去
+    WB.state.selected = { batch_id: OTHER, batch_no: 'B-9', status: 'pending_intake' };
+    WB.state.batchId = OTHER;
+    WB._renderCenterAndRight();
+    assert(!hasText(byId.mainPane, '入场结果'), 'S3: 别的批次不显示上一批的入场结果');
+
+    // 确认/拒绝后（显式清除）→ 不再显示；卡片寿命由生命周期决定，不靠状态过滤
+    WB.state.selected = pending; WB.state.batchId = BATCH_ID;
+    WB.state.intakeResult = null;
+    WB._renderCenterAndRight();
+    assert(!hasText(byId.mainPane, '入场结果'), 'S4: 确认/拒绝清除后即消失');
+  }
+
   console.log(failed === 0 ? '\nALL PASS' : '\n' + failed + ' FAILED');
   process.exit(failed === 0 ? 0 : 1);
 })().catch(function (e) { console.error('FATAL:', e); process.exit(1); });

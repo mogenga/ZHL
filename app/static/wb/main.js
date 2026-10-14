@@ -117,8 +117,12 @@ WB.renderCenter = function (detail, listitem, panelDom) {
   }
   main.append(panelDom || WB.h('div', { class: 'card empty', text: '该节点无可操作项' }));
   // 送检即时结果：跟随渲染周期走，异步 detail 刷新不再把它抹掉。
-  // 仅在当前节点确实是数据入场时展示——批次推进后信息已由节点面板承载。
-  if (WB.state.intakeResult && detail.status === 'pending_intake' && WB.state.intakeResult.batch_id === detail.batch_id) {
+  // 卡片寿命由**生命周期**唯一决定，不再按批次状态过滤——自动确认
+  // （置信度 ≥0.8，app/api/intake.py:336）会让批次提交后立刻转 pending_judge，
+  // 按状态过滤会把最常走的那条路排除掉（看不到置信度/低置信清单/逐组件抽取值，
+  // 而走查文档 C1 第 3 步要看的正是这张卡）。清除发生在三处：换批次
+  // （selectBatch）、回总览（goHome）、确认/拒绝入场（intake.js 的 _intakeAct）。
+  if (WB.state.intakeResult && WB.state.intakeResult.batch_id === detail.batch_id) {
     WB.stages.intake.appendResultCard(main, WB.state.intakeResult.data);
   }
 };
