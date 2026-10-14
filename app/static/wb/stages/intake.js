@@ -64,6 +64,41 @@ WB.stages.intake = (function () {
         showIntakeResult(batch, res.data);
       });
     }, { submitLabel: '提交送检' });
+    // 快速填入：IV 设备导出的 CSV 每行一条（浏览器解析为结构化行，后端零改动）；
+    // 演示场景提供示例数据一键填入。
+    const box = modal && modal.box;
+    if (box) {
+      const ta = box.querySelector('textarea');
+      const taRow = ta ? ta.closest('.form-row') : null;
+      if (taRow) {
+        const fileInput = WB.h('input', {
+          type: 'file', accept: '.csv,.txt', style: 'font-size:12px',
+          onchange: function (ev) {
+            const f = ev.target.files && ev.target.files[0];
+            if (!f) return;
+            const reader = new FileReader();
+            reader.onload = function () {
+              ta.value = String(reader.result || '').replace(/^\uFEFF/, '').trim();
+              const n = ta.value.split(/\r?\n/).filter(Boolean).length;
+              WB.toast('已载入 ' + f.name + '（' + n + ' 行）');
+            };
+            reader.readAsText(f, 'utf-8');
+          },
+        });
+        const exampleBtn = WB.h('button', { onclick: function () {
+          const lines = [];
+          for (let i = 1; i <= 3; i++) {
+            lines.push('SN-DEMO-' + String(i).padStart(3, '0') + ',550.0,25.0,10.5,48.0,40.0,13.0,0.80,pass');
+          }
+          ta.value = lines.join('\n');
+        }, text: '填入示例（3 条合格）' });
+        taRow.parentNode.insertBefore(
+          WB.h('div', { class: 'form-row' },
+            WB.h('label', { text: '快速填入' }),
+            fileInput, exampleBtn),
+          taRow);
+      }
+    }
   }
 
   /* 发饌进度提示：处理状态 + 下一步动作（依 WB.ST_CN / WB.NEXT_LABEL） */
