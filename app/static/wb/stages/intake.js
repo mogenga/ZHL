@@ -225,8 +225,8 @@ WB.stages.intake = (function () {
      mode 透传自 _sendIntake：raw（AI 逐行抽取，慢）与 structured（秒级）文案不同。 */
   function _openWaitModal(batch, mode) {
     const tip = WB.h('div', { class: 'hint-line', text: mode === 'structured'
-      ? '正在提交结构化数据，通常几秒内完成…'
-      : '正在提交送检数据（AI 逐行抽取，真模型约 10 秒/行）…' });
+      ? '正在提交结构化数据…'
+      : '正在提交送检数据…' });
     const elapsed = WB.h('div', { class: 'hint-line muted', text: '' });
     // 复用 .modal 的居中/置顶样式（box 需 z-index 高过 mask，否则被遮罩盖住）
     const box = WB.h('div', { class: 'modal on' },
@@ -492,8 +492,8 @@ WB.stages.intake = (function () {
           ...(submitting ? { disabled: true } : {}) })));
       body.append(WB.h('div', { class: 'hint-line', text: submitting
         ? (WB.state.intakeSubmittingMode === 'structured'
-          ? '提交中：结构化数据入库，通常几秒内完成，请勿关闭页面'
-          : '提交中：AI 逐行抽取（真模型约 10 秒/行），请勿关闭页面')
+          ? '提交中：结构化数据入库，请勿关闭页面'
+          : '提交中：AI 逐行抽取，请勿关闭页面')
         : '提交后展示置信度与低置信清单；确认/拒绝入口随之出现' }));
     } else {
       // 降级：组件条码 + 入场状态（§1.3 边界；置信度不重建）
