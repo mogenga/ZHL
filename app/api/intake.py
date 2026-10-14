@@ -136,6 +136,33 @@ def build_router(get_deps: object) -> APIRouter:
             # graph's intake node propagates it, and this route translates it
             # into the B3 error response (400 + conflicting SN).
             s.rollback()
+            # §8.1 异常事件自动创建：冲突即数据一致性异常，挂在被占用批次上
+            # （自动路径不产生孤儿异常；创建失败不影响 400 响应）。
+            try:
+                import re as _re
+
+                from app.plugins.auto_incident import ensure_incident
+
+                m = _re.search(r"SN '([^']+)' already", str(exc))
+                sn = m.group(1) if m else None
+                row = (
+                    s.scalars(
+                        select(ModuleInspection).where(ModuleInspection.sn == sn)
+                    ).first()
+                    if sn
+                    else None
+                )
+                if row is not None:
+                    ensure_incident(
+                        s,
+                        batch_id=row.batch_id,
+                        trigger_type="data_consistency",
+                        severity="critical",
+                        affected_sns=[row.sn],
+                    )
+                    s.commit()
+            except Exception:  # noqa: BLE001 — 自动建异常失败不改变 400 语义
+                s.rollback()
             raise HTTPException(
                 status_code=400,
                 detail={"reason": "cross_batch_sn_conflict", "error": str(exc)},

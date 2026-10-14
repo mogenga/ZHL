@@ -45,6 +45,7 @@ from langgraph.types import interrupt
 from app.domain.state_machine import transition
 from app.domain.types import IsoRow
 from app.infra.models import AgentTaskTrace, DeliveryBatch, QualityRuleVersion
+from app.plugins.auto_incident import ensure_incident
 from app.plugins.sampling import run_sampling
 from app.skills.extract import extract_inspection_data
 from app.skills.judge import RuleNotEffective, judge_batch
@@ -252,7 +253,10 @@ def build_main_chain_graph(
         session.flush()
         return {
             "decision": result,
-            "evidence_ids": [str(e) for e in (state.get("evidence_ids") or [])],
+            "evidence_ids": [
+                *(str(e) for e in (state.get("evidence_ids") or [])),
+                *([result["decision_evidence_id"]] if result.get("decision_evidence_id") else []),
+            ],
         }
 
     def sample_node(state: BatchWorkflowState) -> dict:
@@ -304,6 +308,34 @@ def build_main_chain_graph(
         batch = session.get(DeliveryBatch, uuid.UUID(state["batch_id"]))
         if batch is not None:
             batch.status = target
+
+        # §8.1 异常事件自动创建（P0 缺口 #2）：批次进入隔离时同事务创建
+        # 异常。触发优先级：规则缺失 > 判定 Fail（affected=fail_sns，精确
+        # 到组件）> 抽样 Fail（affected=全批 SN；判定 Fail 时抽样必然同源
+        # 失败，只建一只 rule_fail，不重复建）。
+        if target == "isolated" and batch is not None:
+            sample_result = sample.get("result")
+            fail_sns = list(decision.get("fail_sns") or [])
+            if decision.get("result") == "rule_missing" or sample_result == "rule_missing":
+                trigger = "rule_missing"
+                affected: list[str] = list(inspect_repo.get_batch_sns(session, batch.batch_id))
+            elif fail_sns:
+                trigger = "rule_fail"
+                affected = fail_sns
+            elif sample_result == "fail":
+                trigger = "sample_fail"
+                affected = list(inspect_repo.get_batch_sns(session, batch.batch_id))
+            else:
+                trigger = "rule_fail"
+                affected = list(inspect_repo.get_batch_sns(session, batch.batch_id))
+            ensure_incident(
+                session,
+                batch_id=batch.batch_id,
+                trigger_type=trigger,
+                severity="major",
+                affected_sns=affected,
+                evidence_ids=list(state.get("evidence_ids") or []),
+            )
         trace = AgentTaskTrace(
             batch_id=uuid.UUID(state["batch_id"]),
             input_ref={"batch_id": state["batch_id"]},

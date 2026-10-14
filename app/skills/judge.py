@@ -204,7 +204,7 @@ def judge_batch(
         "rule_version_id": str(rule_version_id),
         "rule_snapshot": _snapshot_to_storable(rule_snapshot),
     }
-    evidence.save(
+    ev = evidence.save(
         "decision_snapshot",
         {"kind": "batch", "id": str(batch_id)},
         content=json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8"),
@@ -215,4 +215,6 @@ def judge_batch(
         "counts": counts,
         "fail_sns": fail_sns,
         "per_sn": per_sn,
+        # §8.1 自动创建异常时引用判定快照证据（构造上真实存在）
+        "decision_evidence_id": str(getattr(ev, "evidence_id", ev)),
     }
