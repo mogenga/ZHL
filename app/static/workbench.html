@@ -3,22 +3,22 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>批次工作台 · 质慧链光伏检验数字化平台</title>
+<title>质慧链</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/wb.css">
+<link rel="stylesheet" href="/static/wb.css?v=20261014c">
 </head>
 <body>
 <div class="frame">
   <div class="topbar">
-    <div class="brand"><span class="logo">质</span>质慧链 · 批次工作台</div>
+    <div class="brand"><span class="logo">质</span>质慧链</div>
     <span class="env">光伏检验数字化平台</span>
-    <button id="newBatchBtn" style="margin-left:auto">＋ 新建批次</button>
   </div>
 
   <div class="body">
     <!-- 左：四视图切换 -->
     <aside class="col left" id="leftPane">
+      <button id="newBatchBtn" class="newbtn" style="margin-bottom:8px">＋ 新建批次</button>
       <div class="ltabs" role="tablist">
         <button data-view="batch" class="on">批次</button>
         <button data-view="rules">规则库</button>
@@ -47,14 +47,14 @@
 </aside>
 <div class="toast" id="toast" role="status"></div>
 
-<script src="/static/wb/ui.js"></script>
-<script src="/static/wb/api.js"></script>
-<script src="/static/wb/main.js"></script>
-<script src="/static/wb/stages/intake.js"></script>
-<script src="/static/wb/stages/judge.js"></script>
-<script src="/static/wb/stages/incident.js"></script>
-<script src="/static/wb/stages/reinspection.js"></script>
-<script src="/static/wb/stages/release.js"></script>
-<script src="/static/wb/report.js"></script>
+<script src="/static/wb/ui.js?v=20261014c"></script>
+<script src="/static/wb/api.js?v=20261014c"></script>
+<script src="/static/wb/main.js?v=20261014c"></script>
+<script src="/static/wb/stages/intake.js?v=20261014c"></script>
+<script src="/static/wb/stages/judge.js?v=20261014c"></script>
+<script src="/static/wb/stages/incident.js?v=20261014c"></script>
+<script src="/static/wb/stages/reinspection.js?v=20261014c"></script>
+<script src="/static/wb/stages/release.js?v=20261014c"></script>
+<script src="/static/wb/report.js?v=20261014c"></script>
 </body>
 </html>

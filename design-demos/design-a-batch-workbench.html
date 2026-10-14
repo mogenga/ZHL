@@ -1,0 +1,490 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>方案A · 批次工作台 — 光伏检验数字化平台</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#f3f5f8; --panel:#ffffff; --line:#e3e8ef; --ink:#1c2534; --ink2:#5b6675; --ink3:#8b95a5;
+  --accent:#0b5cad; --accent-soft:#e8f1fa; --ok:#0e8a5f; --ok-soft:#e5f5ee;
+  --warn:#b26a00; --warn-soft:#fdf3e2; --bad:#c0392b; --bad-soft:#fbe9e7;
+  --mono:'IBM Plex Mono',ui-monospace,Consolas,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Noto Sans SC','PingFang SC','Microsoft YaHei',sans-serif;background:var(--bg);color:var(--ink);font-size:14px;line-height:1.55}
+button{font:inherit;cursor:pointer;border:1px solid var(--line);background:#fff;border-radius:8px;padding:6px 14px;color:var(--ink)}
+button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.mono{font-family:var(--mono)}
+
+/* ---- frame ---- */
+.frame{display:grid;grid-template-rows:auto 1fr auto;height:100vh}
+.topbar{display:flex;align-items:center;gap:16px;padding:10px 20px;background:#fff;border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:10px;font-weight:700}
+.brand .logo{width:26px;height:26px;border-radius:7px;background:linear-gradient(135deg,#0b5cad,#12a3a8);display:grid;place-items:center;color:#fff;font-size:13px}
+.topbar .env{font-size:12px;color:var(--ink3);border:1px solid var(--line);border-radius:99px;padding:2px 10px}
+.demo-note{margin-left:auto;font-size:12px;color:var(--warn);background:var(--warn-soft);border-radius:8px;padding:4px 12px}
+
+.body{display:grid;grid-template-columns:280px 1fr 320px;min-height:0}
+.col{min-height:0;overflow:auto;padding:16px}
+
+/* ---- 左列 ---- */
+.left{border-right:1px solid var(--line);background:#fff}
+.search{width:100%;border:1px solid var(--line);border-radius:8px;padding:7px 12px;font:inherit;background:var(--bg)}
+.group-title{margin:16px 0 8px;font-size:12px;color:var(--ink3);letter-spacing:.05em}
+.batch-item{width:100%;text-align:left;border:1px solid transparent;background:none;border-radius:10px;padding:10px 12px;margin-bottom:6px}
+.batch-item:hover{background:var(--bg)}
+.batch-item.on{border-color:var(--accent);background:var(--accent-soft)}
+.batch-item .no{font-family:var(--mono);font-size:13px;font-weight:500;display:flex;justify-content:space-between;align-items:center}
+.batch-item .meta{font-size:12px;color:var(--ink2);margin-top:2px}
+.chip{display:inline-block;font-size:11px;border-radius:99px;padding:1px 8px;white-space:nowrap}
+.st-pending_intake{background:var(--warn-soft);color:var(--warn)}
+.st-pending_judge{background:#e8f1fa;color:var(--accent)}
+.st-pending_release{background:#eae4f7;color:#6b46b8}
+.st-isolated,.st-disposing,.st-pending_recheck{background:var(--bad-soft);color:var(--bad)}
+.st-released{background:var(--ok-soft);color:var(--ok)}
+.st-rejected{background:#ececec;color:var(--ink2)}
+.st-archived{background:#ececec;color:var(--ink3)}
+
+/* ---- 中栏 ---- */
+.center{background:var(--bg)}
+.crumb{font-size:12px;color:var(--ink3);margin-bottom:10px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px 20px;margin-bottom:14px}
+.bhead{display:flex;flex-wrap:wrap;gap:8px 24px;align-items:baseline}
+.bhead h2{font-family:var(--mono);font-size:18px}
+.bhead .muted{color:var(--ink2);font-size:13px}
+.kv{display:flex;gap:28px;flex-wrap:wrap;margin-top:10px}
+.kv .k{font-size:12px;color:var(--ink3)}
+.kv .v{font-family:var(--mono);font-size:14px}
+
+/* 流水线 */
+.pipe{display:flex;align-items:flex-start;margin-top:20px;position:relative}
+.pipe::before{content:'';position:absolute;top:15px;left:7%;right:7%;height:2px;background:var(--line)}
+.stage{position:relative;flex:1;text-align:center;background:none;border:none;padding:0}
+.stage .dot{width:32px;height:32px;border-radius:50%;margin:0 auto 6px;display:grid;place-items:center;background:#fff;border:2px solid var(--line);color:var(--ink3);position:relative;z-index:1;font-size:13px}
+.stage.done .dot{border-color:var(--ok);background:var(--ok-soft);color:var(--ok)}
+.stage.cur .dot{border-color:var(--accent);background:var(--accent);color:#fff;box-shadow:0 0 0 4px var(--accent-soft)}
+.stage .lbl{font-size:12px;color:var(--ink2)}
+.stage.cur .lbl{color:var(--accent);font-weight:700}
+.stage:disabled{cursor:default}
+.stage:not(:disabled):hover .lbl{color:var(--accent)}
+
+/* 节点面板 */
+.stage-panel h3{font-size:15px;margin-bottom:4px}
+.stage-panel .desc{color:var(--ink2);font-size:13px;margin-bottom:14px}
+.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}
+.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.primary:hover{filter:brightness(1.08)}
+.danger{background:#fff;border-color:var(--bad);color:var(--bad)}
+table{width:100%;border-collapse:collapse;font-size:13px;margin-top:10px}
+th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line)}
+th{color:var(--ink3);font-weight:500;font-size:12px}
+td.num{font-family:var(--mono)}
+.muted{color:var(--ink3)}
+.tag{font-size:11px;border-radius:6px;padding:1px 7px}
+.tag-pass{background:var(--ok-soft);color:var(--ok)}
+.tag-fail{background:var(--bad-soft);color:var(--bad)}
+.tag-warn{background:var(--warn-soft);color:var(--warn)}
+
+/* ---- 右栏 ---- */
+.right{border-left:1px solid var(--line);background:#fff}
+.tl{list-style:none;margin-top:6px}
+.tl li{position:relative;padding:0 0 18px 20px}
+.tl li::before{content:'';position:absolute;left:4px;top:6px;width:7px;height:7px;border-radius:50%;background:var(--accent)}
+.tl li::after{content:'';position:absolute;left:7px;top:16px;bottom:0;width:1px;background:var(--line)}
+.tl li:last-child::after{display:none}
+.tl .t{font-size:12px;color:var(--ink3);font-family:var(--mono)}
+.tl .e{font-size:13px}
+.mini-kpi{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}
+.mini-kpi .box{border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+.mini-kpi .n{font-family:var(--mono);font-size:18px;font-weight:500}
+.mini-kpi .l{font-size:12px;color:var(--ink3)}
+
+/* 弹窗 */
+.mask{position:fixed;inset:0;background:rgba(20,28,40,.35);display:none}
+.drawer{position:fixed;top:0;right:-420px;width:400px;height:100vh;background:#fff;box-shadow:-8px 0 30px rgba(0,0,0,.12);transition:right .25s ease;display:flex;flex-direction:column}
+.drawer.open{right:0}
+.mask.on{display:block}
+.drawer header{display:flex;justify-content:space-between;align-items:center;padding:16px 20px;border-bottom:1px solid var(--line);font-weight:700}
+.drawer .bd{padding:16px 20px;overflow:auto}
+
+.toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(20px);background:#1c2534;color:#fff;border-radius:10px;padding:10px 20px;font-size:13px;opacity:0;transition:.25s;pointer-events:none}
+.toast.on{opacity:1;transform:translateX(-50%)}
+.modal{position:fixed;top:50%;left:50%;transform:translate(-50%,-46%) scale(.98);width:440px;max-width:92vw;background:#fff;border-radius:16px;box-shadow:0 20px 60px rgba(0,0,0,.25);padding:20px 22px;opacity:0;pointer-events:none;transition:.2s;z-index:11}
+.modal.on{opacity:1;pointer-events:auto;transform:translate(-50%,-50%)}
+.modal h3{font-size:16px;margin-bottom:14px}
+.field{margin-bottom:12px}
+.field label{display:block;font-size:12px;color:var(--ink3);margin-bottom:4px}
+.field input,.field select,.field textarea{width:100%;border:1px solid var(--line);border-radius:8px;padding:8px 10px;font:inherit;box-sizing:border-box}
+.newbtn{width:100%;background:var(--accent);border-color:var(--accent);color:#fff;font-weight:500;margin-bottom:10px}
+.ltabs{display:flex;gap:6px;margin-bottom:10px}
+.ltabs button{flex:1;padding:6px 0;font-size:12px;border-radius:8px;justify-content:center}
+.ltabs button.on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent);font-weight:500}
+
+.footer{display:flex;gap:12px;align-items:center;padding:10px 20px;background:#fff;border-top:1px solid var(--line)}
+@media(max-width:1100px){.body{grid-template-columns:240px 1fr}.right{display:none}}
+@media(max-width:760px){.body{grid-template-columns:1fr}.left{display:none}}
+</style>
+</head>
+<body>
+<div class="frame">
+  <div class="topbar">
+    <div class="brand"><span class="logo">质</span>质量链 · 光伏检验数字化平台</div>
+    <span class="env">方案 A · 批次工作台</span>
+    <span class="demo-note">纯前端 Demo · 数据为模拟</span>
+  </div>
+
+  <div class="body">
+    <!-- 左列：批次/规则库/异常/报告 -->
+    <aside class="col left">
+      <button class="newbtn" onclick="openNewBatch()">＋ 新建批次</button>
+      <div class="ltabs">
+        <button class="on" data-t="batch">批次</button>
+        <button data-t="rules">规则库</button>
+        <button data-t="incidents">异常</button>
+        <button data-t="reports">报告</button>
+      </div>
+      <div id="batchPane">
+        <input class="search" id="search" placeholder="搜索批次号 / 项目 / 型号" aria-label="搜索批次">
+        <div class="group-title" id="gActive">进行中（0）</div>
+        <div id="listActive"></div>
+        <div class="group-title" id="gDone">已完结（0）</div>
+        <div id="listDone"></div>
+      </div>
+      <div id="subPane" style="display:none"></div>
+    </aside>
+
+    <!-- 中栏 -->
+    <main class="col center" id="main"></main>
+
+    <!-- 右栏 -->
+    <aside class="col right">
+      <div style="font-weight:700;margin-bottom:4px">批次轨迹</div>
+      <div style="font-size:12px;color:var(--ink3)">每一步操作留痕</div>
+      <ul class="tl" id="timeline"></ul>
+      <div style="font-weight:700;margin-top:8px">关键指标</div>
+      <div class="mini-kpi" id="kpis"></div>
+    </aside>
+  </div>
+
+  <div class="footer">
+    <span style="font-size:12px;color:var(--ink3)">质量链 · 让每一件组件的检验过程可追溯</span>
+  </div>
+</div>
+
+<div class="mask" id="mask"></div>
+<aside class="drawer" id="drawer" aria-label="详情抽屉">
+  <header><span id="drawerTitle">详情</span><button id="drawerClose" aria-label="关闭">✕</button></header>
+  <div class="bd" id="drawerBody"></div>
+</aside>
+<div class="toast" id="toast" role="status"></div>
+
+<script>
+/* ============ 模拟数据 ============ */
+const BATCHES=[
+ {id:'b1',no:'DEMO-20261013-001',project:'PRJ-DEMO',model:'GLM-72C',planned:26,actual:26,rule:'P-TEST-GLM-72C 测试型号 v2 [已发布]',status:'pending_judge',
+  events:[['10-13 08:36','创建批次，绑定规则版本 v2'],['10-13 09:02','送检数据入场，智能抽取置信度 0.97'],['10-13 09:05','人工确认入场通过'],['10-13 09:10','判定已触发，等待结果回传']],
+  kpis:[['实际数量','26'],['一次性通过率','96.2%'],['异常','1'],['在库时间','6.5h']]},
+ {id:'b2',no:'DIAG-1',project:'P-DEFAULT',model:'JH-550W',planned:5,actual:5,rule:'P-TEST-JH-550W 测试型号 v2 [已发布]',status:'pending_intake',
+  events:[['10-13 17:49','创建批次，绑定规则版本 v2'],['10-13 17:50','送检数据已提交，等待人工确认']],
+  kpis:[['实际数量','0'],['入场确认','待办'],['异常','0'],['在库时间','0.5h']]},
+ {id:'b3',no:'B-V-1',project:'P-DEFAULT',model:'JH-550W',planned:2,actual:2,rule:'P-TEST-JH-550W 测试型号 v2 [已发布]',status:'isolated',
+  events:[['10-13 09:32','创建批次'],['10-13 10:00','数据入场确认'],['10-13 10:15','判定完成：2 件规则失败'],['10-13 10:16','批次进入隔离，异常-0031 已创建'],['10-13 11:00','异常已指派责任人 王工，限期 48 小时']],
+  kpis:[['实际数量','2'],['隔离数','2'],['异常','1'],['复检','未开始']]},
+ {id:'b4',no:'B-V-2',project:'P-DEFAULT',model:'JH-550W',planned:2,actual:2,rule:'P-TEST-JH-550W 测试型号 v2 [已发布]',status:'pending_recheck',
+  events:[['10-13 09:32','创建批次'],['10-13 10:00','数据入场确认'],['10-13 10:15','判定完成：1 件外观人工触发'],['10-13 10:40','隔离 + 指派 李工'],['10-13 14:20','整改措施已填报，措施确认，转入复检']],
+  kpis:[['实际数量','2'],['待复检','1'],['整改措施','已确认'],['在库时间','11h']]},
+ {id:'b5',no:'111',project:'111',model:'1111',planned:10,actual:10,rule:'P-TEST-JH-550W 测试型号 v2 [已发布]',status:'pending_release',
+  events:[['10-13 18:36','创建批次'],['10-13 18:40','数据入场'],['10-13 18:42','判定完成：全部通过'],['10-13 18:45','转入待放行，等待放行断言 + 人工批准']],
+  kpis:[['实际数量','10'],['通过率','100%'],['异常','0'],['待办','放行审批']]},
+ {id:'b6',no:'B-0928-R2',project:'PRJ-HUAI',model:'GLM-66C',planned:18,actual:18,rule:'P-TEST-GLM-66C v1 [已发布]',status:'released',done:true,
+  events:[['10-09 08:10','创建批次'],['10-09 09:00','入场 + 判定通过'],['10-09 15:30','放行断言通过，张三批准放行'],['10-09 15:40','报告-2026-0917 生成']],
+  kpis:[['放行数','18'],['报告','已生成'],['异常','0'],['归档','待归档']]},
+ {id:'b7',no:'B-0921-X',project:'PRJ-HUAI',model:'GLM-66C',planned:12,actual:12,rule:'P-TEST-GLM-66C v1 [已发布]',status:'rejected',done:true,
+  events:[['10-02 10:00','创建批次'],['10-02 11:00','判定：3 件严重失败'],['10-03 09:00','复检未通过 → 整批拒绝'],['10-03 09:10','赵六执行人工拒绝，批次归档']],
+  kpis:[['拒绝原因','复检未通过'],['异常','3'],['报告','已生成'],['归档','是']]},
+];
+const STAGES=['数据入场','判定','异常处置','复检','放行','报告'];
+const STAGE_DESC=[
+ '送检数据提交后由智能抽取服务识别，需人工确认或拒绝入场。',
+ '基于绑定规则版本执行规则判定 + 抽样判定，产出通过/失败结论。',
+ '失败批次进入隔离；异常需指派责任人、填报整改措施。',
+ '对指定的复检范围（隔离组件）执行独立复检，通过后方可解除。',
+ '放行断言校验（全部通过 + 抽样通过），需人工批准。',
+ '生成放行/拒绝报告，批次归档留痕。'];
+const STAGE_OF={pending_intake:0,pending_judge:1,isolated:2,disposing:2,pending_recheck:3,pending_release:4,released:5,rejected:5,archived:5};
+const NEXT_LABEL={pending_intake:'确认入场',pending_judge:'触发判定',isolated:'指派责任人',disposing:'填报整改措施',pending_recheck:'创建复检记录',pending_release:'批准放行',released:'归档批次',rejected:'归档批次',archived:'—'};
+const ST_CN={pending_intake:'待入场',pending_judge:'待判定',isolated:'已隔离',disposing:'处置中',pending_recheck:'待复检',pending_release:'待放行',released:'已放行',rejected:'已拒绝',archived:'已归档'};
+const EL=id=>document.getElementById(id);
+function h(tag,attrs,...kids){const e=document.createElement(tag);if(attrs)for(const[k,v]of Object.entries(attrs)){if(k==='class')e.className=v;else if(k==='text')e.textContent=v;else if(k.startsWith('on'))e.addEventListener(k.slice(2),v);else e.setAttribute(k,v)}
+const add=c=>{if(c==null)return;if(Array.isArray(c)){c.forEach(add);return}e.append(c.nodeType?c:document.createTextNode(c))};kids.forEach(add);return e}
+function chip(st){const s=h('span',{class:'chip st-'+st});s.textContent=ST_CN[st]||st;return s}
+let cur=BATCHES[0];
+function toast(msg){const t=EL('toast');t.textContent=msg;t.classList.add('on');clearTimeout(t._h);t._h=setTimeout(()=>t.classList.remove('on'),2200)}
+
+/* ---- 左列表 ---- */
+function renderList(){
+ EL('listActive').replaceChildren();EL('listDone').replaceChildren();
+ const q=EL('search').value.trim().toLowerCase();
+ let na=0,nd=0;
+ for(const b of BATCHES){
+  if(q&&!(b.no+b.project+b.model).toLowerCase().includes(q))continue;
+  const it=h('button',{class:'batch-item'+(b.id===cur.id?' on':''),onclick:()=>{cur=b;viewStage=null;render()}},
+    h('div',{class:'no'},h('span',{text:b.no}),chip(b.status)),
+    h('div',{class:'meta',text:b.project+' · '+b.model+' · 计划 '+b.planned}));
+  (b.done?EL('listDone'):EL('listActive')).append(it);
+  b.done?nd++:na++;
+ }
+ EL('gActive').textContent='进行中（'+na+'）';
+ EL('gDone').textContent='已完结（'+nd+'）';
+}
+
+/* ---- 中间工作区 ---- */
+let viewStage=null;
+function renderMain(){
+ const b=cur;const cs=STAGE_OF[b.status];
+ if(viewStage==null)viewStage=cs;
+ const stageBtns=STAGES.map((s,i)=>h('button',{class:'stage'+(i<viewStage?' done':'')+(i===viewStage?' cur':''),disabled:i>cs,onclick:()=>{viewStage=i;renderMain()}},
+  h('div',{class:'dot',text:i<viewStage?'✓':String(i+1)}),h('div',{class:'lbl',text:s})));
+ const main=EL('main');main.replaceChildren();
+ main.append(h('div',{class:'crumb',text:'工作台 / 批次 / '+b.no}));
+ main.append(h('div',{class:'card'},
+  h('div',{class:'bhead'},h('h2',{text:b.no}),chip(b.status),h('span',{class:'muted',text:b.project+' · '+b.model}),
+   h('span',{class:'muted mono',style:'margin-left:auto;font-size:12px',text:'规则: '+b.rule})),
+  h('div',{class:'kv'},
+   h('div',{},h('div',{class:'k',text:'计划数量'}),h('div',{class:'v',text:b.planned})),
+   h('div',{},h('div',{class:'k',text:'实际数量'}),h('div',{class:'v',text:b.actual})),
+   h('div',{},h('div',{class:'k',text:'流程位置'}),h('div',{class:'v',text:STAGES[cs]})),
+   h('div',{},h('div',{class:'k',text:'下一步'}),h('div',{class:'v',text:NEXT_LABEL[b.status]}))),
+  h('div',{class:'pipe'},stageBtns)));
+ main.append(stagePanel(b,viewStage,cs));
+}
+function ab(label,cls){return h('button',{class:cls||'',onclick:()=>doAction(label)},label)}
+function judgeRows(b){
+ const R={'B-V-1':[['SN-0021','不合格','隐裂 EL'],['SN-0022','不合格','功率低于档位']],
+  'B-V-2':[['SN-0031','不合格','外观划伤'],['SN-0032','合格','—']],
+  'DEMO-20261013-001':[['SN-0301','合格','550.1W'],['SN-0302','合格','549.8W'],['SN-0303','不合格','功率低于档位']]};
+ return R[b.no]||[['SN-0021','合格','功率 549.6W'],['SN-0022','合格','功率 550.2W']];
+}
+function hasFail(b){return judgeRows(b).some(r=>r[1]==='不合格')}
+function stagePanel(b,st,cs){
+ const locked=st!==cs||b.status==='archived';
+ const tb=h('table');const acts=h('div',{class:'actions'});
+ const row=(...c)=>tb.append(h('tr',{},c));
+ const th=(...ts)=>tb.append(h('tr',{},ts.map(t=>h('th',{text:t}))));
+ const wait=txt=>row(h('td',{class:'muted',text:txt}));
+ if(st===0){
+  th('送检任务','抽取置信度','状态');
+  const w=b.status==='pending_intake';
+  row(h('td',{class:'num',text:'送检-3091'}),h('td',{class:'num',text:'0.97'}),
+   h('td',{},h('span',{class:'tag '+(w?'tag-warn':'tag-pass'),text:w?'待确认':'已确认'})));
+  if(!locked&&w)acts.append(ab('确认入场','primary'),ab('查看送检原始数据'),ab('拒绝入场','danger'));
+ }else if(st===1){
+  if(cs<1)wait('未开始，等待数据入场。');
+  else if(b.status==='pending_judge'){
+   th('判定项','规则','结果');
+   row(h('td',{text:'EL 图像 + 功率档位'}),h('td',{class:'num',text:'v2 · 14 条'}),h('td',{},h('span',{class:'tag tag-warn',text:'待触发'})));
+   acts.append(ab('触发判定','primary'),ab('查看规则版本'),ab('手动创建异常'));
+  }else{
+   th('组件条码','判定','备注');
+   judgeRows(b).forEach(r=>row(h('td',{class:'num',text:r[0]}),
+    h('td',{},h('span',{class:'tag '+(r[1]==='合格'?'tag-pass':'tag-fail'),text:r[1]})),h('td',{text:r[2]})));
+  }
+ }else if(st===2){
+  if(cs<2)wait('未触发，等待判定结果。');
+  else{
+   th('异常号','触发原因','严重度','状态','责任');
+   const disp=b.status==='isolated'?'待指派':b.status==='disposing'?'整改措施填报中':b.status==='pending_recheck'?'整改措施已确认':'已闭环';
+   row(h('td',{class:'num',text:'异常-0031'}),h('td',{text:'规则失败'}),
+    h('td',{},h('span',{class:'tag '+(disp==='已闭环'?'tag-pass':'tag-fail'),text:'较严重'})),h('td',{text:disp}),h('td',{text:disp==='待指派'?'—':'王工 · 限期 48 小时'}));
+   if(!locked&&b.status==='isolated')acts.append(ab('指派责任人','primary'));
+   if(!locked&&b.status==='disposing')acts.append(ab('填报整改措施','primary'),ab('查看整改措施'));
+  }
+ }else if(st===3){
+  if(cs<3)wait('未开始，等待异常处置完成。');
+  else if(b.status==='pending_recheck'){
+   th('复检记录','复检范围','进度');
+   row(h('td',{class:'num',text:'待创建'}),h('td',{class:'num',text:'SN-0021~0024'}),h('td',{text:'0/4'}));
+   if(!locked)acts.append(ab('创建复检记录','primary'),ab('录入复检结果'));
+  }else if(cs>3){
+   th('复检记录','复检范围','结果');
+   row(h('td',{class:'num',text:'复检-1013'}),h('td',{class:'num',text:'SN-0021~0024'}),h('td',{},h('span',{class:'tag tag-pass',text:'4/4 合格'})));
+  }else wait('待复检。');
+ }else if(st===4){
+  if(cs<4)wait('未开始，等待前置环节。');
+  else if(b.status==='pending_release'){
+   th('放行断言','结果','详情');
+   row(h('td',{text:'全检通过'}),h('td',{},h('span',{class:'tag tag-pass',text:'通过'})),h('td',{class:'num',text:b.planned+'/'+b.planned}));
+   row(h('td',{text:'抽检通过'}),h('td',{},h('span',{class:'tag tag-pass',text:'通过'})),h('td',{class:'num',text:'抽样 3/3'}));
+   if(!locked)acts.append(ab('批准放行','primary'),ab('拒绝批次','danger'));
+  }else if(b.status==='rejected'){
+   row(h('td',{},h('span',{class:'tag tag-fail',text:'已拒绝'})),h('td',{text:'复检未通过 / 人工拒绝'}));
+  }else if(cs>4){
+   row(h('td',{},h('span',{class:'tag tag-pass',text:'准予放行'})),h('td',{text:'断言通过 + 人工批准'}));
+  }
+ }else{
+  if(cs<5)wait('放行后生成报告。');
+  else{
+   th('报告','结论','签署','操作');
+   row(h('td',{class:'num',text:'报告-2026-1013'}),
+    h('td',{},h('span',{class:'tag '+(b.status==='rejected'?'tag-fail':'tag-pass'),text:b.status==='rejected'?'拒绝放行':'准予放行'})),
+    h('td',{text:b.status==='rejected'?'赵六':'张三'}),
+    h('td',{},h('button',{onclick:()=>doAction('查看报告')},h('span',{text:'查看'}))));
+   if(!locked&&b.status!=='archived')acts.append(ab('归档批次','primary'));
+  }
+ }
+ const wrap=h('div',{class:'card stage-panel'},
+  h('h3',{text:(st===cs?'当前节点：':'历史节点：')+STAGES[st]}),
+  h('div',{class:'desc',text:STAGE_DESC[st]}),tb);
+ if(locked)wrap.append(h('div',{class:'actions'},h('button',{onclick:()=>{viewStage=cs;renderMain()},text:'返回当前节点'})));
+ else wrap.append(acts);
+ return wrap;
+}
+/* ---- 动作与状态机流转 ---- */
+const now=()=>{const d=new Date();const p=n=>String(n).padStart(2,'0');return p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes())};
+function doAction(label){
+ const b=cur;
+ const go=(status,msg)=>{b.status=status;viewStage=STAGE_OF[status];b.events.push([now(),msg]);render();toast(msg)};
+ switch(label){
+  case '确认入场':go('pending_judge','送检数据入场确认通过，进入判定');break;
+  case '拒绝入场':go('rejected','人工拒绝入场，批次关闭');break;
+  case '触发判定':go(hasFail(b)?'isolated':'pending_release',hasFail(b)?'判定完成：存在不合格件，批次隔离并创建异常-0031':'判定完成：全部通过，转入待放行');break;
+  case '查看规则版本':openDrawer('规则版本 v2','14 条判定条目 · 已发布 · 3 个批次在用');break;
+  case '手动创建异常':toast('已创建异常（演示）');break;
+  case '指派责任人':openModal('指派责任人 · 异常-0031',[{label:'责任人',type:'text',value:'王工'},{label:'处置期限（小时）',type:'select',options:['24','48','72']}],v=>go('disposing','异常-0031 已指派 '+v[0]+'，限期 '+v[1]+' 小时'));break;
+  case '填报整改措施':openModal('填报整改措施 · 异常-0031',[{label:'整改措施描述',type:'textarea',value:'更换接线盒，并扩大抽检至同批次全部组件'}],()=>go('pending_recheck','整改措施已填报并确认，转入复检'));break;
+  case '查看整改措施':openDrawer('整改措施','更换接线盒并扩大抽检 · 责任人：王工 · 限期 48 小时');break;
+  case '创建复检记录':openModal('创建复检记录',[{label:'复检范围（组件条码）',type:'text',value:'SN-0021~0024'}],v=>go('pending_release','复检-1013 创建并通过 '+v[0]+'，转入待放行'));break;
+  case '录入复检结果':go('pending_release','复检通过，转入待放行');break;
+  case '批准放行':openModal('批准放行',[{label:'批准人',type:'text',value:'张三'}],v=>go('released',v[0]+' 批准放行，可生成报告并归档'));break;
+  case '拒绝批次':go('rejected','人工拒绝放行，批次关闭');break;
+  case '查看报告':openDrawer('报告-2026-1013','放行结论：'+(b.status==='rejected'?'拒绝放行':'准予放行')+' · 判定摘要 · 异常关闭记录 · 签署栏');break;
+  case '归档批次':go('archived','批次归档，内容转为只读');break;
+  case '查看送检原始数据':openDrawer('送检原始数据','入库组件条码明细 / 工单截图 / 抽取字段对照');break;
+  default:toast(label+'（演示）');
+ }
+}
+/* ---- 表单弹窗 ---- */
+let modalEls=null;
+function closeModal(){if(modalEls){modalEls.forEach(x=>x.remove());modalEls=null}}
+function openModal(title,fields,onOk){
+ const ov=h('div',{class:'mask on'});ov.onclick=e=>{if(e.target===ov)closeModal()};
+ const box=h('div',{class:'modal on'});
+ const inputs=[];
+ box.append(h('h3',{text:title}));
+ fields.forEach(f=>{
+  let inp;
+  if(f.type==='select'){inp=h('select');(f.options||[]).forEach(o=>inp.append(h('option',{text:o})))}
+  else if(f.type==='textarea'){inp=h('textarea',{rows:'3'});inp.value=f.value||''}
+  else{inp=h('input',{type:'text'});inp.value=f.value||''}
+  inputs.push(inp);
+  box.append(h('div',{class:'field'},h('label',{text:f.label}),inp));
+ });
+ box.append(h('div',{style:'display:flex;gap:10px;justify-content:flex-end;margin-top:6px'},
+  h('button',{onclick:closeModal,text:'取消'}),
+  h('button',{class:'primary',onclick:()=>{const vals=inputs.map(i=>i.value);closeModal();onOk(vals)},text:'确定'})));
+ document.body.append(ov,box);modalEls=[ov,box];
+}
+function openNewBatch(){
+ openModal('新建批次',[
+  {label:'批次号',type:'text',value:'B-'+Math.floor(Math.random()*9000+1000)},
+  {label:'项目',type:'text',value:'P-DEFAULT'},
+  {label:'型号',type:'text',value:'JH-550W'},
+  {label:'计划数量',type:'text',value:'10'},
+  {label:'规则版本',type:'select',options:['P-TEST-JH-550W 测试型号 v2 [已发布]','P-TEST-GLM-72C 测试型号 v2 [已发布]','P-TEST-GLM-66C v1 [已发布]']}],
+  v=>{const nb={id:'b'+Date.now(),no:v[0],project:v[1],model:v[2],planned:+v[3]||0,actual:0,rule:v[4],status:'pending_intake',
+   events:[[now(),'创建批次，绑定规则 '+v[4]]],kpis:[['实际数量','0'],['入场确认','待办'],['异常','0'],['在库时间','0h']]};
+   BATCHES.unshift(nb);cur=nb;viewStage=null;render();toast('批次 '+v[0]+' 已创建，进入数据入场节点')});
+}
+
+/* ---- 右栏 ---- */
+function renderRight(){
+ EL('timeline').replaceChildren();
+ for(const[t,e]of cur.events)EL('timeline').append(h('li',{},h('div',{class:'t',text:t}),h('div',{class:'e',text:e})));
+ EL('kpis').replaceChildren();
+ for(const[l,n]of cur.kpis)EL('kpis').append(h('div',{class:'box'},h('div',{class:'n',text:n}),h('div',{class:'l',text:l})));
+}
+
+/* ---- 抽屉 ---- */
+function openDrawer(title,body){
+ EL('drawerTitle').textContent=title;EL('drawerBody').replaceChildren();
+ for(const line of body.split(' · '))EL('drawerBody').append(h('p',{style:'margin-bottom:8px',text:line}));
+ EL('drawer').classList.add('open');EL('mask').classList.add('on');
+}
+EL('drawerClose').onclick=()=>{EL('drawer').classList.remove('open');EL('mask').classList.remove('on')};
+EL('mask').onclick=EL('drawerClose').onclick;
+EL('search').addEventListener('input',renderList);
+
+/* ---- 左列多视图：规则库 / 异常 / 报告 ---- */
+const RULES=[
+ {id:'P-TEST-JH-550W 测试型号 v2',ver:'v2',items:14,state:'已发布',used:'3 个批次在用'},
+ {id:'P-TEST-GLM-72C 测试型号 v2',ver:'v2',items:14,state:'已发布',used:'1 个批次在用'},
+ {id:'P-TEST-GLM-66C v1',ver:'v1',items:11,state:'已发布',used:'2 个批次在用'},
+ {id:'P-TEST-JH-550W 测试型号 v3',ver:'v3',items:16,state:'草稿',used:'未发布'},
+];
+const INCIDENTS=[
+ {id:'异常-0031',batch:'DEMO-20261013-001',sev:'较严重',cause:'规则失败',state:'处置中',owner:'王工 · 限期 48 小时'},
+ {id:'异常-0028',batch:'B-0921-X',sev:'严重',cause:'抽样失败',state:'复检中',owner:'李工'},
+ {id:'异常-0027',batch:'B-0921-X',sev:'较严重',cause:'规则失败',state:'已关闭',owner:'李工'},
+];
+const REPORTS=[
+ {id:'报告-2026-0917',batch:'B-0928-R2',verdict:'准予放行',by:'张三',date:'10-09 15:40'},
+ {id:'报告-2026-0902',batch:'B-0921-X',verdict:'拒绝放行',by:'赵六',date:'10-03 09:10'},
+];
+let ltab='batch';
+document.querySelectorAll('.ltabs button').forEach(b=>b.addEventListener('click',()=>{
+ ltab=b.dataset.t;
+ document.querySelectorAll('.ltabs button').forEach(x=>x.classList.toggle('on',x===b));
+ EL('batchPane').style.display=ltab==='batch'?'':'none';
+ EL('subPane').style.display=ltab==='batch'?'none':'';
+ renderSub();
+}));
+function subItem(title,meta,chipText,chipCls,onclick){
+ return h('button',{class:'batch-item',onclick},
+  h('div',{class:'no'},h('span',{text:title}),h('span',{class:'chip '+(chipCls||''),text:chipText})),
+  h('div',{class:'meta',text:meta}));
+}
+function renderSub(){
+ const pane=EL('subPane');pane.replaceChildren();
+ if(ltab==='rules'){
+  pane.append(h('div',{class:'group-title',text:'规则版本 · 点击查看判定条目'}));
+  RULES.forEach(r=>pane.append(subItem(r.id,'版本 '+r.ver+' · '+r.items+' 条 · '+r.used,r.state,r.state==='已发布'?'st-released':'st-pending_intake',
+   ()=>r.state==='草稿'
+    ?openModal('发布规则版本',[{label:'规则版本',type:'text',value:r.id+' '+r.ver}],()=>{r.state='已发布';r.used='新发布';toast('「'+r.id+'」已发布');renderSub()})
+    :openDrawer(r.id,'判定条目 '+r.items+' 条（节选）：EL 隐裂检测（阻断）· 功率档位匹配（阻断）· 外观缺陷分级（记录）· 绝缘性能（阻断）· 状态：'+r.state))));
+ }else if(ltab==='incidents'){
+  pane.append(h('div',{class:'group-title',text:'异常 · 点击定位批次'}));
+  INCIDENTS.forEach(i=>pane.append(subItem(i.id,i.batch+' · '+i.cause+' · '+i.owner,i.state,i.state==='已关闭'?'st-released':'st-isolated',
+   ()=>{const b=BATCHES.find(x=>x.no===i.batch);if(b){cur=b;viewStage=null;switchTab('batch');render();toast('已定位到批次 '+b.no)}else toast('该批次已归档（演示）')})));
+ }else{
+  pane.append(h('div',{class:'group-title',text:'报告 · 点击查看'}));
+  REPORTS.forEach(r=>pane.append(subItem(r.id,r.batch+' · 签署 '+r.by+' · '+r.date,r.verdict,r.verdict==='准予放行'?'st-released':'st-rejected',
+   ()=>openDrawer(r.id,'结论：'+r.verdict+' · 签署人：'+r.by+' · 生成时间：'+r.date+' · 含判定摘要与异常关闭记录'))));
+ }
+}
+function switchTab(t){
+ ltab=t;
+ document.querySelectorAll('.ltabs button').forEach(x=>x.classList.toggle('on',x.dataset.t===t));
+ EL('batchPane').style.display=t==='batch'?'':'none';
+ EL('subPane').style.display=t==='batch'?'none':'';
+ if(t!=='batch')renderSub();
+}
+function render(){
+ if(ltab==='batch')renderList();else renderSub();
+ renderMain();renderRight();
+}
+render();
+
+/* ---- 提交选型 ---- */
+window.submitToClaude=window.submitToClaude||function(payload){
+ const txt=JSON.stringify(payload,null,2);
+ if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(txt).then(()=>toast('选型已复制到剪贴板，请粘贴回对话')).catch(()=>toast(txt))}
+ else toast(txt);
+};
+const btn=h('button',{class:'primary',onclick:()=>submitToClaude({skill:'html-design-prototypes',kind:'design-selection',data:{design:'A 批次工作台',chosen:true},version:1})},'选它：提交方案 A');
+document.querySelector('.footer').append(btn);
+</script>
+</body>
+</html>

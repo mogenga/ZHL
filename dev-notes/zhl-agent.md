@@ -619,3 +619,23 @@
 1. 活浏览器 click-through（4 视图切换 / ?batch= 刷新恢复 / console 清洁）未在本 harness 完成——deferred 到 dev 手动验收
 2. incident 归因三选一当前用 attributeIncident('defer') 取假设再 adopt/reject/defer，与后端单请求三选一契约对齐但前端分两请求；后端端点本身已是三选一，前端拆成「取假设」+「提交归因」两步 UI
 3. report.mdToDom 为轻量解析（标题/列表/段落），未覆盖表格/代码块内联——报告 content_md 若含复杂表格需 T10+ 增强
+
+## 2026-10-14 · Plan B 收口（/ 入口指向 workbench + 删旧平铺 MPA）
+
+### 关键原话
+- 用户：「执行 B，旧的 9 个平铺页面删掉」——显式授权破「后端零 diff」约束（路由 + 删旧页）。
+
+### 关键产出（commit d84f26a）
+- app/api/main.py：GET / 重定向 /static/index.html → /static/workbench.html（唯一后端非 static 改动）
+- 删除 12 个旧文件：index/batch/incident/incidents/intake/recheck/release/report/state/trace.html + common.js + style.css（仅旧页引用，workbench 自包含于 wb/）
+- 测试/脚本同步：test_main_smoke.py（静态断言改 workbench.html + wb.css/ui.js + / 的 Location 强断言）、test_workbench.py（serves_index→serves_workbench）、test_unified_session_injection.py（docstring）、restart-app.ps1（完成提示指 /）
+
+### 验证（原始输出）
+- uv run pytest tests/ → 261 passed
+- 实跑 8001（uvicorn --reload 自动重载）：/ → 302 Location=/static/workbench.html → 200；/static/index.html → 404
+
+### 拒绝与纠偏
+- 范围纪律：本次破约束限于「路由 + 删旧页」（用户显式授权）。docs/superpowers 历史文档里对旧页的文字引用未擅改（属留痕，非运行代码）；后续再碰 app/ 非 static 需重新单独授权。
+
+### 翻车与返工
+- PowerShell 5.1 下 uv run python -c 多行 CJK 字符串反复解析报错 → 改临时 _tmp_*.py 脚本文件替换后删（dev-notes 既有做法）。

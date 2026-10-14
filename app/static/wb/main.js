@@ -29,6 +29,13 @@ WB._readUrl = function () {
   const u = WB._url();
   WB.state.batchId = u.searchParams.get('batch');
 };
+/* 回到工作台总览：清除选中批次与 URL 参数 */
+WB.goHome = function () {
+  WB.state.viewStage = null;
+  WB.state.selected = null;
+  WB.state.traces = [];
+  WB.setBatch(null);
+};
 
 /* ---- 视图切换（左列四标签）---- */
 WB.switchView = function (name) {
@@ -46,6 +53,12 @@ WB._bindLeftTabs = function () {
   });
   const nb = WB.el('newBatchBtn');
   if (nb) nb.addEventListener('click', WB._onNewBatch);
+  // 点击左上角品牌 Logo 回到总览
+  const brand = document.querySelector('.brand');
+  if (brand) {
+    brand.style.cursor = 'pointer';
+    brand.addEventListener('click', WB.goHome);
+  }
 };
 
 /* ---- 节点面板调度：WB.stages._byIndex[stageIndex] → 面板 DOM（T4+ 各阶段模块自注册）---- */
@@ -67,13 +80,66 @@ WB.renderCenter = function (detail, listitem, panelDom) {
     return;
   }
   if (!detail) {
-    main.append(WB.h('div', { class: 'crumb', text: '工作台 / 批次' }));
-    main.append(WB.h('div', { class: 'card empty', text: '从左侧选择批次开始工作' }));
+    main.append(WB.renderHome());
     return;
   }
-  main.append(WB.h('div', { class: 'crumb', text: '工作台 / 批次 / ' + detail.batch_no }));
+  main.append(WB.h('div', { class: 'crumb' },
+    WB.h('a', { href: '#', onclick: (e) => { e.preventDefault(); WB.goHome(); }, text: '工作台' }),
+    ' / 批次 / ' + detail.batch_no));
   main.append(WB.batchHead(detail, listitem));
   main.append(panelDom || WB.h('div', { class: 'card empty', text: '该节点无可操作项' }));
+};
+
+/* ---- 工作台总览（未选中批次时的默认首页）---- */
+WB.NEXT_LABEL = {
+  pending_intake: '确认入场', pending_judge: '查看判定', isolated: '创建异常',
+  disposing: '填报整改措施', pending_recheck: '录入复检', pending_release: '批准放行',
+  released: '生成报告', rejected: '生成报告', archived: '—',
+};
+WB.renderHome = function () {
+  const wrap = WB.h('div', {});
+  wrap.append(WB.h('div', { class: 'crumb', text: '工作台 / 总览' }));
+  const batches = WB.state.batches || [];
+  const inProgress = batches.filter((b) => b.status !== 'archived');
+  const cnt = (s) => batches.filter((b) => b.status === s).length;
+  const openInc = (WB.state.incidents || []).filter(function (i) {
+    return ['new', 'isolated', 'assigned', 'pending_recheck'].indexOf(i.status) >= 0;
+  }).length;
+  const kpiBox = (n, label) => WB.h('div', { class: 'box' },
+    WB.h('div', { class: 'n', text: String(n) }),
+    WB.h('div', { class: 'l', text: label }));
+  wrap.append(WB.h('div', { class: 'card' },
+    WB.h('div', { class: 'bhead' }, WB.h('h2', { text: '工作台总览' })),
+    WB.h('div', { class: 'mini-kpi', style: 'margin-top:14px;display:grid;grid-template-columns:repeat(4,1fr);gap:10px' },
+      kpiBox(inProgress.length, '在制批次'),
+      kpiBox(cnt('pending_intake'), '待入场'),
+      kpiBox(cnt('pending_release'), '待放行'),
+      kpiBox(openInc, '未关闭异常'))));
+
+  // 待办：进行中批次按下一步动作列出，点击直达
+  const todoCard = WB.h('div', { class: 'card' },
+    WB.h('h3', { text: '待办批次', style: 'font-size:15px;margin-bottom:4px' }),
+    WB.h('div', { class: 'desc', style: 'color:var(--ink2);font-size:13px', text: '按当前进展排列，点击批次继续处理' }));
+  const todo = inProgress
+    .filter((b) => b.status !== 'draft')
+    .sort((a, b) => WB.stageOfStatus(a.status) - WB.stageOfStatus(b.status));
+  if (todo.length) {
+    todo.forEach((b) => {
+      todoCard.append(WB.h('button', { class: 'batch-item', onclick: () => WB.selectBatch(b.batch_id) },
+        WB.h('div', { class: 'no' }, WB.h('span', { text: b.batch_no }), WB.chip(b.status)),
+        WB.h('div', { class: 'meta' },
+          WB.h('span', { text: b.project_id + ' · ' + b.model + ' · 计划 ' + b.planned_quantity + '　' }),
+          WB.h('span', { style: 'color:var(--accent)', text: '下一步：' + (WB.NEXT_LABEL[b.status] || '—') }))));
+    });
+  } else {
+    todoCard.append(WB.h('div', { class: 'empty', text: '暂无进行中的批次' }));
+  }
+  wrap.append(todoCard);
+
+  wrap.append(WB.h('div', { class: 'card', style: 'display:flex;gap:10px;align-items:center' },
+    WB.h('span', { class: 'muted', style: 'font-size:13px', text: '要开始一次新的交付检验：' }),
+    WB.h('button', { class: 'newbtn', style: 'width:auto;padding:6px 18px;margin:0', onclick: WB._onNewBatch, text: '＋ 新建批次' })));
+  return wrap;
 };
 
 /* ---- 批次头（批次号/状态/项目/型号/计划数量/规则版本名；不显示实际数量，spec §3.3）---- */
@@ -128,6 +194,15 @@ WB._listItem = function () {
 WB.renderRight = function (detail) {
   const rp = WB.el('rightPane');
   rp.replaceChildren();
+  if (!detail) {
+    rp.append(WB.h('div', { style: 'font-weight:700', text: '工作台总览' }));
+    rp.append(WB.h('div', { style: 'font-size:12px;color:var(--ink3)', text: '选择批次后查看其轨迹与指标' }));
+    rp.append(WB.h('ul', { class: 'tl' },
+      WB.h('li', {},
+        WB.h('div', { class: 't', text: ' ' }),
+        WB.h('div', { class: 'e', text: '左侧「待办批次」可直接进入' }))));
+    return;
+  }
   rp.append(WB.h('div', { style: 'font-weight:700', text: '批次轨迹' }));
   rp.append(WB.h('div', { style: 'font-size:12px;color:var(--ink3)', text: '每一步操作留痕' }));
   rp.append(WB.h('ul', { class: 'tl' }, WB.renderTimeline(WB.state.traces || [])));
@@ -370,6 +445,8 @@ WB.loadBatches = function () {
     else { WB.state.batches = []; /* 行内错误由 renderLeft 读取 */ }
     WB.state.batchesError = res.ok ? null : res.error;
     WB.renderLeft();
+    // 总览首页的 KPI 依赖列表数据：数据到达后若未选中批次则重渲染首页
+    if (!WB.state.batchId) WB._renderCenterAndRight();
     return res;
   });
 };
@@ -385,6 +462,7 @@ WB.loadIncidents = function () {
   return WB.api.listIncidents().then(function (res) {
     WB.state.incidents = res.ok ? res.data : [];
     if (WB.state.view === 'incidents') WB.renderLeft();
+    if (!WB.state.batchId) WB._renderCenterAndRight();
     return res;
   });
 };
