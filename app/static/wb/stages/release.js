@@ -6,14 +6,15 @@
 
 WB.stages.release = (function () {
   const stageIndex = 4;
+  // 与后台 assert_release 七项检查命中对齐（app/domain/release.py）
   const CHECK_CN = {
-    sample_pass: '抽样结论通过',
-    no_open_incidents: '无未关闭异常',
-    isolated_sns_disposed: '隔离组件已处置',
-    evidence_complete: '证据齐备',
-    capa_verified: '整改已验证',
-    reinspection_covered: '复检覆盖充分',
-    iso_values_ok: 'ISO 值达标',
+    state: '批次处于待放行',
+    sample_passed: '抽样结论通过',
+    no_open_critical_incident: '无未关闭严重异常',
+    no_isolated_sn: '隔离组件已处置',
+    all_evidence_present: '必需证据齐备',
+    all_capa_verified: '整改措施已验证',
+    reinspection_scope_covered: '复检范围覆盖充分',
   };
 
   function render(batch, listitem) {
@@ -32,9 +33,14 @@ WB.stages.release = (function () {
         WB.h('button', { class: 'danger', onclick: function () { rejectModal(batch, body); }, text: '拒绝本批' })));
     } else {
       // 终态回看
-      const st = WB.ST_CN[batch.status] || batch.status;
+      const archived = batch.status === 'archived';
+      const stTxt = archived ? '已拒绝并归档' : (WB.ST_CN[batch.status] || batch.status);
+      const cls = batch.status === 'released' ? 'tag-pass' : (archived ? '' : 'tag-fail');
       body.append(WB.h('div', { class: 'hint-line' },
-        WB.h('span', { class: 'tag ' + (batch.status === 'released' ? 'tag-pass' : batch.status === 'archived' ? '' : 'tag-fail'), text: st })));
+        WB.h('span', { class: 'tag ' + cls, text: stTxt })));
+      // 终态提示：终态批次的异常数与报告数（用户看得见关联数据，避免「无异常、无报告」的误论）
+      body.append(WB.h('div', { class: 'hint-line muted' },
+        WB.h('span', { text: '关联异常：' + ((batch.incidents || []).length || '暂无') })));
       _loadReports(batch, body);
     }
     return card;
@@ -112,15 +118,32 @@ WB.stages.release = (function () {
 
   function _loadReports(batch, body) {
     WB.api.listReports(batch.batch_id).then(function (res) {
-      if (!res.ok || !res.data.length) return;
       const box = WB.h('div', { style: 'margin-top:8px' });
-      box.append(WB.h('div', { class: 'hint-line', text: '报告记录：' }));
+      if (!res.ok) {
+        box.append(WB.h('div', { class: 'hint-line muted', text: WB.errText(res.error) || '报告加载失败' }));
+        body.append(box);
+        return;
+      }
+      if (!res.data.length) {
+        box.append(WB.h('div', { class: 'hint-line muted', text: '暂无报告记录' }));
+        body.append(box);
+        return;
+      }
+      const incCount = (batch.incidents || []).length;
+      box.append(WB.h('div', { class: 'hint-line', text: '报告记录（' + res.data.length + '）' + (incCount ? ' · 关联异常 ' + incCount : '') }));
       res.data.forEach(function (r) {
         box.append(WB.h('div', { class: 'hint-line' },
           WB.h('span', { class: 'tag', text: (WB.RPT_CN[r.report_type] || r.report_type || '报告') }),
-          WB.h('span', { class: 'muted', text: ' · ' + (WB.fmtTime(r.created_at) || '') })));
+          WB.h('span', { class: 'muted', text: ' · 版本 v' + (r.version || 1) + ' · ' + (WB.fmtTime(r.generated_at || r.created_at) || '') }),
+          WB.h('button', { class: 'newbtn', style: 'font-size:12px;padding:1px 8px;margin-left:8px', onclick: function () { _viewReport(batch, r); }, text: '查看' })));
       });
       body.append(box);
+    });
+  }
+  function _viewReport(batch, r) {
+    WB.api.getReport(batch.batch_id, r.report_id).then(function (res) {
+      if (!res.ok) { WB.toast(WB.errText(res.error)); return; }
+      WB.openDrawer((WB.RPT_CN[r.report_type] || r.report_type) + ' v' + r.version, WB.h('pre', { text: res.data.content_md || JSON.stringify(res.data.content_json || {}, null, 2), style: 'white-space:pre-wrap;font-size:13px' }));
     });
   }
 

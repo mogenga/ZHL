@@ -157,7 +157,7 @@ def _isolated_sns(session: Any, batch_id: uuid.UUID) -> list[str]:
 
 
 def _required_evidence(
-    session: Any, batch_id: uuid.UUID, incident_ids: list[str]
+    session: Any, batch_id: uuid.UUID, incident_ids: list[str], batch: DeliveryBatch
 ) -> list[EvidenceView]:
     """The release gate's evidence set: every piece of evidence the batch's
     incidents + sample conclusions reference."""
@@ -170,6 +170,26 @@ def _required_evidence(
     for c in concls:
         if c.evidence_id:
             evidence_ids.add(str(c.evidence_id))
+    # Decision snapshots anchor the release gate: one is written per judging
+    # run of THIS batch (graph judge/sampling node; object_ref.id == the
+    # batch uuid). Without them the all-pass path (no open incident, no
+    # sample-conclusion evidence link) would leave the required set empty and
+    # all_evidence_present would block the release forever.
+    # Cross-DB scoping: query decision snapshots by type, then filter to
+    # this batch in Python. object_ref may be a JSON string (SQLite) or a
+    # dict (jsonb-dialect ORM load); normalize before matching.
+    import json as _json
+
+    for ev in session.query(Evidence).filter(Evidence.evidence_type == "decision_snapshot").all():
+        ref = ev.object_ref
+        if isinstance(ref, (str, bytes)):
+            try:
+                ref = _json.loads(ref)
+            except Exception:
+                ref = {}
+        ref_id = str((ref or {}).get("id") or "")
+        if ref_id in (str(batch.batch_id), batch.batch_no or ""):
+            evidence_ids.add(str(ev.evidence_id))
     # Resolve to EvidenceView rows (only those that actually exist).
     views: list[EvidenceView] = []
     for eid in sorted(evidence_ids):
@@ -347,7 +367,7 @@ def release_batch(
         sample=sample,
         incidents=incident_views,
         isolated_sns=_isolated_sns(session, batch_id),
-        evidence=_required_evidence(session, batch_id, open_ids),
+        evidence=_required_evidence(session, batch_id, open_ids, batch),
         capa=_capa_views(session, incident_views),
         reinspection_scopes=reinspection_scopes,
         iso_table=iso_table,
@@ -372,6 +392,7 @@ def release_batch(
             generated_by=payload.approved_by,
         )
         session.add(release_ev)
+        session.flush()  # 先把证据行落库，release_evidence_id 外键才指向存在的证据
         batch.release_evidence_id = release_ev.evidence_id
         batch.status = "released"
         batch.release_decision = "released"
