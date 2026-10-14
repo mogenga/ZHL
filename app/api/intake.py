@@ -120,6 +120,24 @@ def build_router(get_deps: object) -> APIRouter:
             {**row, "source_type": row.get("source_type", body.source_type)}
             for row in body.inspections
         ]
+        # B3: every inspection row must carry the measured columns the
+        # repository's create_inspections reads verbatim (captured_at + 7 e-
+        # params + appearance_result). A partial row (e.g. the legacy frontend
+        # that sent only {sn, source_type}) would otherwise raise KeyError ->
+        # 500 deep inside the graph; surface it as a structured 400 naming
+        # the missing fields, mirroring this route's other B3 responses.
+        required = (
+            "sn", "source_type", "captured_at", "pmax", "temp", "isc",
+            "voc", "vm", "im", "ff", "appearance_result",
+        )
+        missing = sorted(
+            {k for row in rows for k in required if row.get(k) in (None, "")}
+        )
+        if missing:
+            raise HTTPException(
+                status_code=400,
+                detail={"reason": "incomplete_inspection", "missing_fields": missing},
+            )
         # JSON payloads carry captured_at as an ISO-8601 string; the ORM
         # expects a datetime (B3: marshal at the boundary, not in domain).
         for row in rows:

@@ -15,8 +15,9 @@ WB.stages.intake = (function () {
         { value: 'OCR_FORM', label: '表单识别' },
         { value: 'MANUAL', label: '人工录入' },
       ] },
-      { label: '检测数据（每行一条，含组件条码）', type: 'textarea', rows: 6,
-        placeholder: 'SN-001,23.5,62.1,...\nSN-002,24.0,61.8,...', required: true },
+      { label: '检测数据（每行一条，9 列：SN,pmax,temp,isc,voc,vm,im,ff,外观）', type: 'textarea', rows: 10,
+        placeholder: 'SN-N-001,550.0,25.0,10.5,48.0,40.0,13.0,0.80,pass\nSN-N-002,548.0,25.0,10.5,48.0,40.0,13.0,0.80,pass',
+        required: true },
       { label: '人工覆盖字段（可选）', type: 'text', placeholder: 'pmax=24.1, appearance_result=pass' },
     ];
     WB.openModal('提交送检数据', fields, function (vals) {
@@ -24,9 +25,25 @@ WB.stages.intake = (function () {
       const raw = (vals[1] || '').trim();
       const overrideStr = (vals[2] || '').trim();
       if (!raw) { WB.toast('请填写检测数据'); return; }
-      // 多行 → inspections[]；仅保留可解析行（SN 为第一列）
-      const inspections = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
-        .map((l) => { const sn = l.split(',')[0].trim(); return { sn: sn, source_type: source_type }; });
+      // 多行 → inspections[]；每行必须含 9 列（SN + 7 电参 + 外观），缺列/非数报错
+      const cols = ['sn', 'pmax', 'temp', 'isc', 'voc', 'vm', 'im', 'ff', 'appearance_result'];
+      const inspections = [];
+      let err = null;
+      raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).forEach((line) => {
+        const parts = line.split(/[，,]/).map((x) => x.trim());
+        if (parts.length !== 9) { err = err || ('行「' + line + '」应为 9 列，当前 ' + parts.length + ' 列'); return; }
+        const row = { sn: parts[0], source_type: source_type, captured_at: new Date().toISOString() };
+        for (let i = 1; i <= 7; i++) {
+          const v = Number(parts[i]);
+          if (parts[i] === '' || Number.isNaN(v)) { err = err || ('行「' + line + '」第 ' + (i + 1) + ' 列非数字：' + parts[i]); return; }
+          row[cols[i]] = v;
+        }
+        if (parts[8] !== 'pass' && parts[8] !== 'fail') { err = err || ('行「' + line + '」外观须为 pass/fail：' + parts[8]); return; }
+        row.appearance_result = parts[8];
+        inspections.push(row);
+      });
+      if (err) { WB.toast(err); return; }
+      if (!inspections.length) { WB.toast('没有可解析的检测数据行'); return; }
       const fieldsOverride = parseOverrides(overrideStr);
       WB.api.submitIntake({
         batch_id: batch.batch_id,
