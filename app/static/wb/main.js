@@ -40,16 +40,7 @@ WB.goHome = function () {
 /* ---- 视图切换（左列四标签）---- */
 WB.switchView = function (name) {
   WB.state.view = name;
-  // 报告视图：切换时拉取当前批次的报告列表（填充 WB.state.reports，左栏渲染直接展示）
-  if (name === 'reports') {
-    WB.state.reports = [];
-    if (WB.state.batchId) {
-      WB.api.listReports(WB.state.batchId).then(function (res) {
-        WB.state.reports = (res.ok ? res.data : []) || [];
-        if (WB.state.view === 'reports') WB.renderLeft();
-      });
-    }
-  }
+  // 报告视图：主区由 WB._reportPage 自行拉取当前批次报告列表；左侧栏仅导航
   WB.renderLeft();
   if (name !== 'batch') WB.state._search = '';
   WB._renderCenterAndRight();
@@ -97,7 +88,51 @@ WB.renderCenter = function (detail, listitem, panelDom) {
     WB.h('a', { href: '#', onclick: (e) => { e.preventDefault(); WB.goHome(); }, text: '工作台' }),
     ' / 批次 / ' + detail.batch_no));
   main.append(WB.batchHead(detail, listitem));
+  if (WB.state.view === 'reports') {
+    // 报告页在工作台主区展示（批次报告列表 + 查看详情 + 生成入口），不在左侧栏
+    main.append(WB._reportPage(detail));
+    return;
+  }
   main.append(panelDom || WB.h('div', { class: 'card empty', text: '该节点无可操作项' }));
+};
+
+/* ---- 报告页（工作台主区）：当前批次全部报告 + 生成入口 + 查看详情 ---- */
+WB._reportPage = function (detail) {
+  const card = WB.h('div', { class: 'card stage-panel' });
+  card.append(WB.h('h3', { text: '批次报告 · ' + detail.batch_no }));
+  card.append(WB.h('div', { class: 'desc', text: '本批次已生成的报告；点击「查看」打开报告正文' }));
+  const body = WB.h('div', {});
+  card.append(body);
+  body.append(WB.h('div', { class: 'hint-line', text: '正在加载报告…' }));
+  WB.api.listReports(detail.batch_id).then(function (res) {
+    body.replaceChildren();
+    if (!res.ok) {
+      body.append(WB.h('div', { class: 'form-err', text: WB.errText(res.error) || '报告加载失败' }));
+      return;
+    }
+    const list = res.data || [];
+    if (!list.length) {
+      body.append(WB.h('div', { class: 'hint-line muted', text: '暂无报告' +
+        (['released', 'rejected'].indexOf(detail.status) >= 0 ? '（可点击下方生成）' : '（放行/拒绝后可生成）') }));
+    } else {
+      const rows = list.map(function (r) {
+        return WB.h('div', { class: 'hint-line' },
+          WB.h('span', { class: 'tag', text: (WB.REP_CN || {})[r.report_type] || r.report_type || '报告' }),
+          WB.h('span', { class: 'muted', text: ' · 版本 v' + (r.version || 1) + ' · ' + (WB.fmtTime(r.generated_at) || '') }),
+          WB.h('button', { class: 'newbtn', style: 'font-size:12px;padding:1px 8px;margin-left:8px',
+            onclick: function () { WB._reportDrawer(r); }, text: '查看' }));
+      });
+      body.append(WB.h('div', { class: 'hint-line', style: 'font-weight:600', text: '报告记录（' + list.length + '）' }));
+      rows.forEach(function (row) { body.append(row); });
+    }
+  });
+  // 生成入口：终态批次（已放行/已拒绝/已归档）可生成或重新生成
+  const canGen = ['released', 'rejected', 'archived'].indexOf(detail.status) >= 0;
+  card.append(WB.h('div', { class: 'actions', style: 'margin-top:12px' },
+    canGen
+      ? WB.h('button', { class: 'primary', onclick: function () { WB.generateReportForBatch(detail); }, text: '生成报告' })
+      : WB.h('span', { class: 'muted', text: '报告可在放行/拒绝后生成' })));
+  return card;
 };
 
 /* ---- 工作台总览（未选中批次时的默认首页）---- */
@@ -335,13 +370,16 @@ WB.renderLeft = function () {
       WB.h('div', { class: 'meta', text: (i.batch_id ? i.batch_id.slice(0, 8) : '') + ' · ' + (WB.TRIG_CN[i.trigger_type] || i.trigger_type) + ' · ' + (WB.SEV_CN[i.severity] || i.severity) }))));
     if (!(WB.state.incidents || []).length) pane.append(WB.h('div', { class: 'empty', text: '暂无异常' }));
   } else {
-    pane.append(WB.h('div', { class: 'group-title', text: '报告列表' }));
-    (WB.state.reports || []).forEach((r) => pane.append(WB.h('button', { class: 'batch-item', onclick: () => WB._reportDrawer(r) },
-      WB.h('div', { class: 'no' },
-        WB.h('span', { text: (r.report_id || '').slice(0, 8) }),
-        WB.h('span', { class: 'chip st-' + (r.report_type === 'incident' ? 'rejected' : 'released'), text: (WB.REP_CN || {})[r.report_type] || r.report_type })),
-      WB.h('div', { class: 'meta', text: (r.batch_no || (r.batch_id || '').slice(0, 8)) + ' · v' + r.version + ' · ' + WB.fmtTime(r.generated_at) }))));
-    if (!(WB.state.reports || []).length) pane.append(WB.h('div', { class: 'empty', text: '暂无报告' }));
+    // 报告页已移至工作台主区（WB._reportPage）；左侧栏仅保留批次导航，
+    // 此处给出定位提示，避免用户以为报告列表在这里
+    if (WB.state.batchId) {
+      pane.append(WB.h('div', { class: 'hint-line muted', text: '报告页在工作台主区展示（' +
+        (WB.state.selected ? WB.state.selected.batch_no : '当前批次') +
+        '）；点击右侧批次或总览进入查看。' }));
+      pane.append(WB.h('div', { class: 'empty', text: '暂无报告入口——请选中批次后在工作台查看/生成报告' }));
+    } else {
+      pane.append(WB.h('div', { class: 'empty', text: '先选择批次，报告页将展示在工作台' }));
+    }
   }
 };
 /* spec §5 术语对照表 */
