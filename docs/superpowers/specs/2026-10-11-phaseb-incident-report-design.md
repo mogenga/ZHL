@@ -210,6 +210,7 @@ checks = [
 - 前置条件：异常已有复检记录（`verification_id` 非空）且复检结果为 `pass`；不满足时 `verified` 拒绝置位（400 列出未满足项）
 - `verified = true` 时写 `quality_incidents.capa_verified = true`（L2 新增列），供 `assert_release` 的 `check_all_capa_verified` 读取
 - 复检 pass 是人工确认的前置条件之一，但**不自动推导** verified（L3 语义：措施有效是独立人工判断）
+  - **2026-10-15 修订**：`verified` 改为在**复检通过时由系统自动置位**（`app/api/reinspections.py`），界面不再要求操作员从复检节点倒回异常处置节点手动补勾。理由：上面的 L3 前置条件（必须先有通过复检）本就使该标记无法承载独立判断——它只是对"复检已通过"的重述，而多一次来回点击不产生新信息。人工仍可在 `/capa` 显式置 `false` 否决；最终签署仍是 `POST /close`（确认关闭异常），界面上该动作跟随复检节点——录完复检就地签署，操作链路只向后推进，不倒回异常处置节点。
 
 **约束**：
 - 创建异常时 `affected_sns` 非空，经 `incident_sn_links` 写关联行（Phase 0 D4 表结构）

@@ -65,9 +65,19 @@ class IncidentAssign(BaseModel):
 
 
 class IncidentCapa(BaseModel):
+    """整改措施填报/更正。三个可选字段的缺省语义是**不改**，不是"清空"。
+
+    - ``containment_action``（临时措施）：指派时可填，但指派端点只接受
+      ``isolated``（见 assign 的状态门），而 close 硬要求它非空 —— 指派时漏填
+      必须有补救入口，否则该异常永远关不掉、批次永远放不了行（2026-10-15）。
+    - ``verified`` 缺省 ``None`` = 保持原值：复检通过后该标记由系统自动置位，
+      局部更新（如只补临时措施）不得把它悄悄刷成 false。
+    """
+
     confirmed_root_cause: str
     corrective_action: str
-    verified: bool = False
+    verified: bool | None = None
+    containment_action: str | None = None
 
 
 class IncidentOut(BaseModel):
@@ -431,6 +441,19 @@ def assign_incident(
     return _to_out(incident)
 
 
+def _apply_optional_capa_fields(incident: QualityIncident, payload: IncidentCapa) -> None:
+    """写两个**可缺省**字段，缺省 = 不改（见 ``IncidentCapa`` 的语义说明）。
+
+    ``verified`` 缺省时保持原值：复检通过后它由系统自动置位，若这里按
+    pydantic 默认值写 false，只补临时措施的一次更新就会把已验证洗掉，
+    关闭条件重新变缺——前端漏传一个字段就复发卡死。
+    """
+    if payload.verified is not None:
+        incident.capa_verified = payload.verified
+    if payload.containment_action is not None:
+        incident.containment_action = payload.containment_action.strip()
+
+
 @router.post("/{incident_id}/capa", response_model=IncidentOut)
 def incident_capa(
     incident_id: uuid.UUID, payload: IncidentCapa, session: SessionDep
@@ -459,12 +482,16 @@ def incident_capa(
         require_not_archived(incident.batch_id, session)
         incident.confirmed_root_cause = payload.confirmed_root_cause
         incident.corrective_action = payload.corrective_action
-        incident.capa_verified = payload.verified
+        _apply_optional_capa_fields(incident, payload)
         _record_trace(
             session,
             incident,
             "incident_capa",
-            {"verified": payload.verified, "update": True},
+            {
+                "verified": payload.verified,
+                "containment_action": payload.containment_action,
+                "update": True,
+            },
             {"incident_status": "pending_recheck"},
         )
         session.commit()
@@ -494,7 +521,7 @@ def incident_capa(
     # in-memory fields set.
     incident.confirmed_root_cause = payload.confirmed_root_cause
     incident.corrective_action = payload.corrective_action
-    incident.capa_verified = payload.verified
+    _apply_optional_capa_fields(incident, payload)
     incident.status = "pending_recheck"
     batch.status = "pending_recheck"
 

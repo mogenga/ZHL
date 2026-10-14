@@ -263,7 +263,19 @@ def create_reinspection(
 
     passed = payload.result == "pass"
 
-    if not passed:
+    if passed:
+        # 复检通过 = 整改措施经复检验证有效（§5.4「待复检 → 待放行：复检通过
+        # 且措施有效」）→ 在此自动置 capa_verified。
+        #
+        # 它不是新增的"自动放行"：L3 门禁本来就规定 verified=true 必须先有通过
+        # 的复检记录（app/api/incidents.py），也就是说这个标记从来只是对「复检
+        # 已通过」的重述，不是一支独立判断。此前它要操作员从复检节点倒回异常
+        # 处置节点手动补勾 —— 一步不产生新信息的手续（2026-10-15 反馈）。
+        #
+        # 真正的最终签署仍是 close（确认关闭异常，五条件校验）——本行只是把
+        # 复检已经证实的事实落到标记上，人工依然可在 /capa 显式改为 false 否决。
+        incident.capa_verified = True
+    else:
         # result=fail -> incident + batch both transition to rejected (single tx).
         inc_res = transition(incident.status, "rejected", {}, kind="incident")
         if not inc_res.accepted:
@@ -288,7 +300,13 @@ def create_reinspection(
         incident.batch_id,
         incident_id,
         {"reinspection_id": str(re_.reinspection_id), "result": payload.result},
-        {"scope_expansion": is_expansion, "scope_type": payload.scope_type},
+        {
+            "scope_expansion": is_expansion,
+            "scope_type": payload.scope_type,
+            # 复检通过时本端点自动置位 capa_verified：轨迹里留痕，事后能分清
+            # 这个标记是"复检自动落位"还是"人工 /capa 显式声明"。
+            "capa_verified": passed,
+        },
     )
     session.flush()
     session.commit()

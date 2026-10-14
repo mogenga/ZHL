@@ -146,8 +146,8 @@ C4/C5 另预置一条 `level=full, aql=0.65, lot=1–100, n=2/ac=0/re=1`（供 i
 | 2 | 异常节点「隔离」 | 无（直接点） | 异常→`isolated` |
 | 3 | 异常节点「指派」 | 责任人=`ZHL-QA`、处置期限=日期、临时措施=隔离该组件 | 异常→`assigned`，批次→`disposing` |
 | 4 | 流水线「复检」节点 | 复检组件=`SN-I-OODB`、结果=`通过`、Pmax=`550.0`/Temp=`25.0`/Isc=`10.5`/Voc=`48.0`/Vm=`40.0`/Im=`13.0`/Ff=`0.80`、执行人=`ZHL-QA`、执行时间=当前、范围=`最小集` | 复检 201 `passed:true`，批次→`pending_recheck` |
-| 5 | 异常节点「CAPA 确认」 | 确认根因=电芯虚焊致 Impp 漂移、纠正措施=更换主电芯、勾选「已验证」 | 批次→`pending_recheck` |
-| 6 | 异常节点「关闭」 | 无（点） | 异常→`closed`，批次→`pending_release` |
+| 5 | 异常节点「CAPA 确认」 | 确认根因=电芯虚焊致 Impp 漂移、纠正措施=更换主电芯（「已验证」由复检通过自动置位，无需勾选） | 批次→`pending_recheck` |
+| 6 | **复检节点**「确认关闭异常」 | 无（点） | 异常→`closed`，批次→`pending_release`；关闭后该卡片从复检列表消失 |
 | 7 | 放行节点 | 批准人=`ZHL-ENG`，点「确认放行」 | 7 项全 ✓，批次→`released` |
 | 8 | 报告 tab「生成」 | 放行报告 | 报告 v1 + 批次→`archived` |
 
@@ -166,7 +166,7 @@ C4/C5 另预置一条 `level=full, aql=0.65, lot=1–100, n=2/ac=0/re=1`（供 i
 
 ### C6 关闭五条件缺失（逐条指名）
 
-异常停在「待复检」时反复点「关闭」，看右侧提示逐条缺失：
+在**复检节点**的异常卡片内点「确认关闭异常」，看卡片内逐条列出缺失项：
 
 | 缺什么 | 理想反馈（detail.missing） |
 | --- | --- |
@@ -177,6 +177,14 @@ C4/C5 另预置一条 `level=full, aql=0.65, lot=1–100, n=2/ac=0/re=1`（供 i
 | 没证据引用 | `original_decision_evidence` |
 
 全缺时一次性列出全部。
+
+> 2026-10-15 起界面只保留可达成的前置条件：未录复检时**不给**关闭入口（无复检必
+> 缺 `reinspection_record`），而「已验证」由复检通过自动置位——因此 `reinspection_record`
+> 与 `capa_verified` 两行只能经 API / 异常数据触发，仍由 `tests/e2e/test_closure.py`
+> 逐条覆盖。界面可复现的是 `capa_fields` / `containment_action` / `original_decision_evidence`，
+> 且前两项都能在**复检卡片**用「补填整改措施」就地补齐——被阻断不等于死路
+> （`containment_action` 只在指派时可填、指派端点又不接受非 `isolated` 状态，
+> 补填入口缺失时该异常永远关不掉）。
 
 ### C7 多异常批次联动
 

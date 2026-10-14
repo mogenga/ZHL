@@ -35,19 +35,40 @@ WB.stages.reinspection = (function () {
 
   function recheckCard(i, batch) {
     const wrap = WB.h('div', { class: 'card', style: 'margin-top:12px' });
+    const hasRe = !!i.verification_id;
     wrap.append(WB.h('div', { class: 'bhead' },
       WB.h('span', { class: 'mono', text: String(i.incident_id).slice(0, 8) }),
       WB.chip(i.status, 'inc-' + i.status),
-      WB.h('span', { class: 'muted', text: '待复检' })));
+      WB.h('span', { class: 'muted', text: i.capa_verified
+        ? '复检已录入 · 整改措施已验证'
+        : (hasRe ? '复检已录入' : '待复检') })));
     // 灵性修改：渲染仅显示卡片与「录入复检」按钮，点击才弹模态（对齐 incident.js）。
     // 旧逻辑在任何 _renderCenterAndRight 时重入 render 都会无条件 openModal，
     // 导致「频繁弹出录入复检」。
     const err = WB.h('div', {});
+    const slot = WB.h('div', {});
+    const fail = function (msg) { slot.replaceChildren(WB.h('div', { class: 'form-err', text: msg })); };
+    const done = function (msg) {
+      slot.replaceChildren(WB.h('div', { class: 'hint-line', text: msg }));
+      WB.loadIncidents().then(function () { WB._loadDetail(batch.batch_id); WB.loadBatches(); });
+    };
+    // 关闭动作就地完成（2026-10-15 反馈：链路只往后推，不倒回异常处置节点）：
+    // 录完复检的下一步就是关闭，签署完这张卡自然从列表消失。复检记录已存在时
+    // 关闭为主操作、补录复检降为次操作；否则只给录入（关闭必然缺复检记录）。
+    const onRe = function () { _buildForm(i, batch, err); };
     const actions = WB.h('div', { class: 'actions' },
-      WB.h('button', { class: 'primary', onclick: function () {
-        _buildForm(i, batch, err);
-      }, text: '录入复检' }),
-      err);
+      hasRe ? WB.h('button', { class: 'primary', onclick: function () {
+        WB.stages.incident.closeIncidentFlow(i, batch, slot, done, fail);
+      }, text: '确认关闭异常' }) : null,
+      WB.h('button', hasRe
+        ? { onclick: onRe, text: '补录复检' }
+        : { class: 'primary', onclick: onRe, text: '录入复检' }),
+      // 临时措施等在指派时选填、关闭时必填，而此处已是流程末端——补填入口
+      // 必须跟着当前节点走，不能让操作员回上游找（2026-10-15 反馈）。
+      WB.h('button', { onclick: function () {
+        WB.stages.incident.capaModal(i, batch, slot, done, fail);
+      }, text: '补填整改措施' }),
+      err, slot);
     wrap.append(actions);
     return wrap;
   }
@@ -100,7 +121,7 @@ WB.stages.reinspection = (function () {
           WB.toast(WB.errText(e));
           return;
         }
-        WB.toast(res.data.passed ? '复检通过，请在异常卡片补勾整改措施已验证后确认关闭' : '复检不通过，异常与批次转拒绝');
+        WB.toast(res.data.passed ? '复检通过，整改措施已标记为已验证，请确认关闭异常' : '复检不通过，异常与批次转拒绝');
         WB.loadIncidents().then(function () { WB._loadDetail(batch.batch_id); WB.loadBatches(); });
       });
     }, { submitLabel: '提交复检' });

@@ -231,7 +231,6 @@ function openCreateForm(list) {
     assert(WB._modal === null, 'E2: 创建成功后 modal 关闭');
   }
 
-  console.log(failed === 0 ? '\nALL PASS' : '\n' + failed + ' FAILED');
   // ---- F. AI 归因按钮：点击须有反馈且必须真的发出请求 ----
   // （2026-10-15 反馈「AI 归因点击无反应」：真模型要 40~90s，旧实现
   //   超时写死 15s 必被 abort 且全程无 loading；这里钉住"点得动、有反馈、
@@ -358,5 +357,148 @@ function openCreateForm(list) {
     assert(mod.opts.hypothesisIndex === 0, 'H5: 记录被修改的原假设下标');
   }
 
+  // ---- I. 待复检异常：复检通过后不再要求倒回本节点补勾（2026-10-15 反馈）----
+  // 后端在「复检通过」时自动置 capa_verified（L3 门禁本来就要求 verified=true
+  // 必须先有通过的复检记录，该标记不是独立判断），界面因此删掉「补勾整改措施
+  // 已验证」按钮，直接展示已验证状态，并保留「确认关闭异常」这一签署动作。
+  {
+    const recheckInc = {
+      incident_id: INC_ID, batch_id: BATCH_ID, status: 'pending_recheck',
+      trigger_type: 'rule_fail', severity: 'major', owner: 'ZHL-QA',
+      confirmed_root_cause: '电池片隐裂', corrective_action: '更换电池片',
+      containment_action: '停线隔离该批',
+      capa_verified: true, verification_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+    };
+    WB.state.selected = batch; WB.state.batchId = BATCH_ID;
+    WB.state.incidents = [recheckInc]; WB.state.traces = [];
+    WB.api.listIncidents = () => Promise.resolve({ ok: true, data: [recheckInc] });
+    const panel = WB.stages.incident.render(batch, {});
+    const kv = (p) => p.querySelectorAll('.k').map(function (el) { return el.textContent; });
+    assert(!findText(panel, '补勾整改措施已验证'), 'I1: 不再出现「补勾整改措施已验证」按钮');
+    // 关闭动作前移到复检节点（2026-10-15 反馈：链路只往后推，不倒回上游）
+    assert(!findText(panel, '确认关闭异常'), 'I2: 关闭动作不再留在异常处置节点');
+    // 查 kv 行而不是整页文本：按钮文案里也含「已验证」，整页查找会假过
+    assert(kv(panel).indexOf('整改措施已验证') >= 0, 'I3: 复检通过后卡片直接显示已验证状态');
+    // 临时措施是关闭条件之一，卡片要能看见它有没有填——否则用户只看到一句
+    // 「未填报临时措施」却不知道这项该长什么样、有没有值
+    assert(kv(panel).indexOf('临时措施') >= 0, 'I3b: 卡片展示临时措施（关闭条件可见）');
+
+    // 尚未复检（无复检记录、未验证）→ 仍指向复检节点，且不显示已勾状态
+    const todoInc = {
+      incident_id: INC_ID, batch_id: BATCH_ID, status: 'pending_recheck',
+      trigger_type: 'rule_fail', severity: 'major', owner: 'ZHL-QA',
+      capa_verified: false, verification_id: null,
+    };
+    WB.state.incidents = [todoInc];
+    WB.api.listIncidents = () => Promise.resolve({ ok: true, data: [todoInc] });
+    const panel2 = WB.stages.incident.render(batch, {});
+    assert(!findText(panel2, '补勾整改措施已验证'), 'I4: 未复检也不给补勾入口');
+    assert(hasText(panel2, '复检节点'), 'I5: 未复检时提示去复检节点录入结果');
+    assert(kv(panel2).indexOf('整改措施已验证') < 0, 'I6: 未复检不显示已验证状态');
+  }
+
+  // ---- J. 关闭动作前移到复检节点（2026-10-15 反馈：链路只往后推）----
+  // 「确认关闭异常」从异常处置节点搬到复检节点：操作员刚录完复检就在原地关闭，
+  // 不必倒回上一步。可达性前提：异常进入 pending_recheck 的唯一路径
+  // （POST /capa）同事务把批次也置 pending_recheck，因此复检面板必然渲染该卡片。
+  {
+    const rb = { batch_id: BATCH_ID, batch_no: 'B-5', status: 'pending_recheck',
+      inspections: [{ sn: 'SN-N-057', inspection_id: INC_ID }] };
+    const noRe = {
+      incident_id: INC_ID, batch_id: BATCH_ID, status: 'pending_recheck',
+      trigger_type: 'rule_fail', severity: 'major', owner: 'ZHL-QA',
+      capa_verified: false, verification_id: null,
+    };
+    WB.state.selected = rb; WB.state.batchId = BATCH_ID;
+    WB.state.incidents = [noRe]; WB.state.traces = [];
+    WB.api.listIncidents = () => Promise.resolve({ ok: true, data: [noRe] });
+    const p1 = WB.stages.reinspection.render(rb, {});
+    assert(!!findText(p1, '录入复检'), 'J1: 复检节点保留「录入复检」');
+    assert(!findText(p1, '确认关闭异常'), 'J2: 未录复检时不提前给关闭入口');
+
+    // 已录复检（verification_id 回填）→ 原地出现「确认关闭异常」
+    const withRe = Object.assign({}, noRe, {
+      capa_verified: true, verification_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+    });
+    WB.state.incidents = [withRe];
+    WB.api.listIncidents = () => Promise.resolve({ ok: true, data: [withRe] });
+    const p2 = WB.stages.reinspection.render(rb, {});
+    const closeBtn = findText(p2, '确认关闭异常');
+    assert(!!closeBtn, 'J3: 已录复检 → 复检节点原地出现「确认关闭异常」');
+    assert(hasText(p2, '整改措施已验证'), 'J3b: 签署处同屏可见「整改措施已验证」状态');
+
+    // 点击即真的发起关闭请求（点得动、发得出）
+    let closedId = null;
+    WB.api.closeIncident = function (id) {
+      closedId = id;
+      return Promise.resolve({ ok: true, data: { batch_status: 'pending_release' } });
+    };
+    closeBtn.fire('click');
+    await flush(); await flush();
+    assert(closedId === INC_ID, 'J4: 点击后以该异常 id 调关闭接口');
+
+    // 关闭条件不满足 → 逐条列出缺失项（沿用既有 409 映射，不被搬动弄丢）
+    const miss = Object.assign({}, withRe);
+    WB.state.incidents = [miss];
+    WB.api.listIncidents = () => Promise.resolve({ ok: true, data: [miss] });
+    const p3 = WB.stages.reinspection.render(rb, {});
+    WB.api.closeIncident = function () {
+      return Promise.resolve({ ok: false, error: { key: 'close_conditions_unmet',
+        detail: { missing: ['owner', 'capa_fields'] } } });
+    };
+    findText(p3, '确认关闭异常').fire('click');
+    await flush(); await flush();
+    assert(hasText(p3, '关闭条件未满足'), 'J5: 409 缺失条件在复检卡片内逐条呈现');
+  }
+
+  // ---- K. 复检节点补填整改措施（2026-10-15 反馈：临时措施漏填后关不掉）----
+  // 指派端点只接受 isolated，close 却硬要求 containment_action 非空 —— 指派时
+  // 漏填就没有任何入口，异常永远关不掉。补填入口放在当前节点（复检卡片），
+  // 且不得把自动置位的 verified 洗掉。
+  {
+    const rb2 = { batch_id: BATCH_ID, batch_no: 'B-5', status: 'pending_recheck',
+      inspections: [{ sn: 'SN-N-057', inspection_id: INC_ID }] };
+    const inc = {
+      incident_id: INC_ID, batch_id: BATCH_ID, status: 'pending_recheck',
+      trigger_type: 'rule_fail', severity: 'major', owner: 'ZHL-QA',
+      confirmed_root_cause: '电池片隐裂', corrective_action: '更换电池片',
+      containment_action: null,               // ← 指派时漏填（用户截图现场）
+      capa_verified: true, verification_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+    };
+    WB.state.selected = rb2; WB.state.batchId = BATCH_ID;
+    WB.state.incidents = [inc]; WB.state.traces = [];
+    WB.api.listIncidents = () => Promise.resolve({ ok: true, data: [inc] });
+    const panel = WB.stages.reinspection.render(rb2, {});
+    const fillBtn = findText(panel, '补填整改措施');
+    assert(!!fillBtn, 'K1: 复检卡片提供「补填整改措施」入口');
+
+    let sent = null;
+    WB.api.capaIncident = function (id, body) {
+      sent = { id: id, body: body };
+      return Promise.resolve({ ok: true, data: {} });
+    };
+    fillBtn.fire('click');
+    assert(!!WB._modal, 'K2: 点击打开措施表单');
+    assert(hasText(WB._modal.box, '临时措施'), 'K3: 表单含「临时措施」字段');
+    // 三个必填：确认根因 / 纠正措施 / 临时措施
+    WB._modal.inputs[0].value = '电池片隐裂';
+    WB._modal.inputs[1].value = '更换电池片';
+    WB._modal.inputs[2].value = '停线隔离该批';
+    WB._modal.submitBtn.fire('click');
+    await flush(); await flush();
+    assert(sent && sent.id === INC_ID, 'K4: 提交到该异常的整改措施接口');
+    assert(sent.body.containment_action === '停线隔离该批', 'K5: 提交临时措施');
+    assert(!('verified' in sent.body), 'K6: 不带 verified → 后台保持已自动置位的标记');
+    assert(WB._modal === null, 'K7: 提交成功后关闭表单');
+
+    // 已在待复检态：不显示「已验证」勾选框（该标记由复检通过自动置位，
+    // 摆一个勾在这里等于把刚删掉的手续又搬回来）
+    const panel2 = WB.stages.reinspection.render(rb2, {});
+    findText(panel2, '补填整改措施').fire('click');
+    assert(!hasText(WB._modal.box, '已验证'), 'K8: 待复检态表单不再出现「已验证」勾选');
+    WB.closeModal();
+  }
+
+  console.log(failed === 0 ? '\nALL PASS' : '\n' + failed + ' FAILED');
   process.exit(failed === 0 ? 0 : 1);
 })().catch(function (e) { console.error('FATAL:', e); process.exit(1); });

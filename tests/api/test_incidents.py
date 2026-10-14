@@ -410,3 +410,61 @@ def test_get_detail_includes_hypotheses(api_client: Any) -> None:
     resp = client.get(f"/api/incidents/{iid}")
     assert resp.status_code == 200
     assert resp.json()["root_cause_hypotheses"]
+
+
+def _pending_recheck_with_pass_reinspection(session: Any) -> Any:
+    """造一个「已有通过复检、已验证、停在待复检」的异常（关闭前的真实态）。"""
+    _seed(session, batch_status="isolated", with_reinspection_pass=True, reinspection_id=_RE1)
+    inc = session.get(QualityIncident, UUID("bbbbbbbb-1111-2222-3333-444444444407"))
+    inc.status = "pending_recheck"
+    inc.capa_verified = True
+    inc.confirmed_root_cause = "cell mismatch"
+    inc.corrective_action = "replace lead cell"
+    session.commit()
+    return inc
+
+
+def test_capa_fills_containment_action_at_pending_recheck(api_client: Any) -> None:
+    """临时措施在待复检态可补填（2026-10-15 反馈：指派时漏填则永远关不掉）。
+
+    指派端点只接受 ``isolated``（incidents.py 状态门），而 close 硬要求
+    ``containment_action`` 非空——中间没有任何入口的话，漏填即等于该异常
+    永远无法关闭、批次永远无法放行。
+    """
+    client, session, _engine = api_client
+    inc = _pending_recheck_with_pass_reinspection(session)
+
+    resp = client.post(
+        f"/api/incidents/{inc.incident_id}/capa",
+        json={
+            "confirmed_root_cause": "cell mismatch",
+            "corrective_action": "replace lead cell",
+            "containment_action": "halt line, segregate lot",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    row = session.get(QualityIncident, inc.incident_id)
+    assert row.containment_action == "halt line, segregate lot"
+    assert row.status == "pending_recheck"  # 无状态转移
+
+
+def test_capa_without_verified_leaves_the_flag_alone(api_client: Any) -> None:
+    """未显式传 verified 时不得把它刷成 false。
+
+    复检通过后该标记由系统自动置位；「补填临时措施」这类局部更新若默认带上
+    ``verified=false``，就会把已验证悄悄洗掉，关闭条件重新变缺——前端漏传一个
+    字段就复发卡死。缺省 = 不改。
+    """
+    client, session, _engine = api_client
+    inc = _pending_recheck_with_pass_reinspection(session)
+
+    resp = client.post(
+        f"/api/incidents/{inc.incident_id}/capa",
+        json={
+            "confirmed_root_cause": "cell mismatch",
+            "corrective_action": "replace lead cell",
+            "containment_action": "halt line",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert session.get(QualityIncident, inc.incident_id).capa_verified is True

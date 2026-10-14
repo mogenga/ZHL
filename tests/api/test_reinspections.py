@@ -395,3 +395,59 @@ def test_reinspection_insert_and_verification_writeback_are_fk_safe(api_client: 
     # (so the FK the incident points at resolves) and the incident points at it.
     assert session.get(Reinspection, re_id) is not None
     assert session.get(QualityIncident, _INC).verification_id == re_id
+
+
+def test_pass_reinspection_auto_marks_measures_verified(api_client: Any) -> None:
+    """复检通过即自动置「整改措施已验证」（2026-10-15 反馈）。
+
+    L3 门禁本来就规定 ``verified=true`` 必须先有通过的复检记录
+    （``app/api/incidents.py``），所以这个标记从来不是一支独立判断，只是对
+    「复检已通过」的重述。此前它需要操作员从复检节点**倒回**异常处置节点
+    手动补勾，一步不产生新信息的手续；改为在复检通过的时刻落位。
+    """
+    client, session, _ = api_client
+    _seed(session)
+    resp = client.post(
+        f"/api/incidents/{_INC}/reinspections",
+        json={
+            "inspection_id": str(_INSP1),
+            "pmax": 550.0,
+            "temp": 25.0,
+            "isc": 10.5,
+            "voc": 0.5,
+            "vm": 48.0,
+            "im": 11.0,
+            "ff": 0.75,
+            "result": "pass",
+            "executor": "ZHL-QA",
+            "executed_at": "2026-06-01T10:00:00Z",
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    assert session.get(QualityIncident, _INC).capa_verified is True
+
+
+def test_fail_reinspection_does_not_mark_measures_verified(api_client: Any) -> None:
+    """复检不通过绝不标记已验证（否则 close 五条件里的 capa_verified 形同虚设）。"""
+    client, session, _ = api_client
+    _seed(session)
+    resp = client.post(
+        f"/api/incidents/{_INC}/reinspections",
+        json={
+            "inspection_id": str(_INSP1),
+            "pmax": 550.0,
+            "temp": 25.0,
+            "isc": 10.5,
+            "voc": 0.5,
+            "vm": 48.0,
+            "im": 11.0,
+            "ff": 0.75,
+            "result": "fail",
+            "executor": "ZHL-QA",
+            "executed_at": "2026-06-01T10:00:00Z",
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    inc = session.get(QualityIncident, _INC)
+    assert inc.capa_verified is False
+    assert inc.status == "rejected"

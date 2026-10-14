@@ -72,8 +72,12 @@ WB.stages.incident = (function () {
     if (autoSns && autoSns.length) meta.append(krow('受影响组件', autoSns.join('、')));
     if (i.owner) meta.append(krow('责任人', i.owner));
     if (i.due_at) meta.append(krow('处置期限', WB.fmtTime(i.due_at)));
+    if (i.containment_action) meta.append(krow('临时措施', i.containment_action));
     if (i.confirmed_root_cause) meta.append(krow('确认根因', i.confirmed_root_cause));
     if (i.corrective_action) meta.append(krow('整改措施', i.corrective_action));
+    // 复检通过时该标记由后端自动置位（app/api/reinspections.py），此处只读展示，
+    // 让操作员看得见"已经打勾了"，而不是要自己再勾一次。
+    if (i.capa_verified) meta.append(krow('整改措施已验证', '是'));
     if (meta.childNodes.length) wrap.append(meta);
     const actions = WB.h('div', { class: 'actions' });
     wrap.append(actions);
@@ -108,10 +112,13 @@ WB.stages.incident = (function () {
         slot.append(WB.h('button', { class: 'primary', onclick: function () { capaModal(i, batch, slot, done, fail); }, text: '填报整改措施' }));
         break;
       case 'pending_recheck':
-        slot.append(WB.h('span', { class: 'hint-line', text: '已转待复检，请在复检节点录入结果' }));
-        // 复检通过后的闭环：补勾整改措施已验证 → 确认关闭（P0 缺口 #1）
-        slot.append(WB.h('button', { onclick: function () { capaModal(i, batch, slot, done, fail); }, text: '补勾整改措施已验证' }));
-        slot.append(WB.h('button', { class: 'primary', onclick: function () { closeIncidentFlow(i, batch, slot, done, fail); }, text: '确认关闭异常' }));
+        // 本节点到此为止：复检与关闭都在下一个节点完成（2026-10-15 反馈：
+        // 链路只往后推，不倒回上游）。原先这里有「补勾整改措施已验证」与
+        // 「确认关闭异常」两个按钮——前者是复检通过的重述（后端已自动置位，
+        // 见 app/api/reinspections.py），后者已前移到复检节点就地签署。
+        slot.append(WB.h('span', { class: 'hint-line', text:
+          i.capa_verified ? '复检已通过，请在复检节点确认关闭异常'
+            : '已转待复检，请在复检节点录入结果并关闭异常' }));
         break;
       default:
         slot.append(WB.h('span', { class: 'hint-line', text: '当前状态 ' + (WB.ST_CN[i.status] || i.status) }));
@@ -250,7 +257,7 @@ WB.stages.incident = (function () {
     WB.openModal('指派责任人 · ' + String(i.incident_id).slice(0, 8), [
       { label: '责任人', type: 'text', required: true },
       { label: '处置期限', type: 'datetime-local', required: true },
-      { label: '临时措施', type: 'text' },
+      { label: '临时措施（关闭条件之一，建议此时填写）', type: 'text' },
     ], function (vals) {
       const owner = (vals[0] || '').trim();
       const dueRaw = vals[1];
@@ -263,22 +270,47 @@ WB.stages.incident = (function () {
   }
 
   // 整改措施表单（spec §4 步骤 4）：确认根因 / 纠正措施 / 已验证复选
+  /* 整改措施填报/更正（assigned 首填；pending_recheck 由复检卡片补填/更正）。
+
+     三处约束来自后端（app/api/incidents.py::IncidentCapa）：
+
+     - **临时措施**（containment_action）在指派时选填，但 close 硬要求非空，
+       而指派端点只接受 isolated —— 漏填必须能在当前节点补，否则异常永远
+       关不掉（2026-10-15 反馈）。故本表单必填它。
+     - **已验证**不再是操作项：复检通过时后端已自动置位。仅在 assigned 态
+       （即复检先于 CAPA 的合法顺序）且确有待用的复检记录时才给出勾选；
+       其余情况**不带该字段** —— 缺省语义是"不改"，避免把自动置位洗回 false。
+     - 缺省不改：只补临时措施的更新不会碰 verified。 */
   function capaModal(i, batch, slot, done, fail) {
-    WB.openModal('整改措施 · ' + String(i.incident_id).slice(0, 8), [
+    const canChooseVerified = i.status === 'assigned' && !!i.verification_id;
+    const fields = [
       { label: '确认根因', type: 'text', required: true, value: i.confirmed_root_cause || '' },
-      { label: '纠正措施', type: 'textarea', rows: 3, required: true },
-      { label: '已验证（需已有通过的复检记录）', type: 'checkbox', value: false },
-    ], function (vals) {
+      { label: '纠正措施', type: 'textarea', rows: 3, required: true, value: i.corrective_action || '' },
+      { label: '临时措施（关闭条件之一，必填）', type: 'text', required: true, value: i.containment_action || '' },
+    ];
+    if (canChooseVerified) {
+      fields.push({ label: '已验证（需已有通过的复检记录）', type: 'checkbox', value: !!i.capa_verified });
+    }
+    WB.openModal('整改措施 · ' + String(i.incident_id).slice(0, 8), fields, function (vals) {
       const confirmed_root_cause = (vals[0] || '').trim();
       const corrective_action = (vals[1] || '').trim();
-      const verified = !!vals[2];
-      if (!confirmed_root_cause || !corrective_action) { WB.toast('请填写确认根因与纠正措施'); return false; }
-      WB.api.capaIncident(i.incident_id, { confirmed_root_cause: confirmed_root_cause, corrective_action: corrective_action, verified: verified }).then(function (r) {
+      const containment_action = (vals[2] || '').trim();
+      if (!confirmed_root_cause || !corrective_action || !containment_action) {
+        WB.toast('请填写确认根因、纠正措施与临时措施');
+        return false;
+      }
+      const body = {
+        confirmed_root_cause: confirmed_root_cause,
+        corrective_action: corrective_action,
+        containment_action: containment_action,
+      };
+      if (canChooseVerified) body.verified = !!vals[3]; // 缺省不带 → 后端保持原值
+      WB.api.capaIncident(i.incident_id, body).then(function (r) {
         if (!r.ok) {
-          // spec §4.9：verified 需通过复检 → 回退复选并提示
+          // spec §4.9：verified 需通过复检 → 重开表单让使用者取消已验证
           if (r.error && r.error.key === 'capa_verified_requires_pass_reinspection') {
             WB.toast(WB.errText(r.error));
-            capaModal(i, batch, slot, done, fail); // 重开表单让使用者取消已验证
+            capaModal(i, batch, slot, done, fail);
             return;
           }
           fail(WB.errText(r.error));
@@ -399,7 +431,15 @@ WB.stages.incident = (function () {
     });
   }
 
-  return { stageIndex: stageIndex, render: render };
+  // closeIncidentFlow / capaModal 导出给复检节点复用：关闭与措施补填都归属
+  // 「当前节点」（2026-10-15），但缺失项文案（MISSING_CN）与表单校验属于异常
+  // 域，实现留在本模块，避免两处各写一套漂移。
+  return {
+    stageIndex: stageIndex,
+    render: render,
+    closeIncidentFlow: closeIncidentFlow,
+    capaModal: capaModal,
+  };
 })();
 
 WB.stages._byIndex[2] = WB.stages.incident;
