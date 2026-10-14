@@ -290,6 +290,15 @@ WB.api = {
     });
   },
   /* T8：放行/拒绝/报告 */
+  /* 只读前置校验（GET /release-preview）：算七项断言但不写库。
+     放行面板的渲染必须用它 —— POST /release 是签署端点，拿它当预检
+     会把批次真的放掉（2026-10-15 P0）。 */
+  releasePreview(batchId) {
+    return WB.api.request('GET', '/api/batches/' + batchId + '/release-preview').then(function (r) {
+      if (!r.ok) return { ok: false, error: r.error, data: null };
+      return { ok: true, data: r.data };
+    });
+  },
   releaseBatch(batchId, approvedBy) {
     return WB.api.request('POST', '/api/batches/' + batchId + '/release', { approved_by: approvedBy }).then(function (r) {
       if (!r.ok) return { ok: false, error: r.error, data: null };

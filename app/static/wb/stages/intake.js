@@ -276,15 +276,21 @@ WB.stages.intake = (function () {
 
   /* ---- 提交后即时展示：置信度/抽取字段/低置信清单 + 确认/拒绝 ---- */
   function showIntakeResult(batch, data) {
-    const panel = WB.el('mainPane');
+    // 结果进状态而不是直接 append 到 mainPane：_loadDetail / loadBatches 的
+    // 异步回调都会 replaceChildren 重画主区，直接 append 的卡片会被抹掉
+    // （2026-10-15 反馈「提交巡检数据后无反馈」）。由 renderCenter 在画完
+    // 节点面板后统一追加，任何一次重渲染都带着它。
+    WB.state.intakeResult = { batch_id: batch.batch_id, data: data };
+    WB._renderCenterAndRight();
+  }
+  /* 供 renderCenter 调用：把「入场结果」卡片 append 到已画好的主区末尾。 */
+  function appendResultCard(mainPane, data) {
     const card = WB.h('div', { class: 'card stage-panel' });
     card.append(WB.h('h3', { text: '入场结果' }));
     const body = WB.h('div', {});
     card.append(body);
-    // 移除占位面板
-    const existing = panel.querySelector('.stage-panel'); if (existing) existing.remove();
-    panel.append(card);
-    _renderIntakeBody(body, batch, data);
+    mainPane.append(card);
+    _renderIntakeBody(body, { batch_id: WB.state.batchId }, data);
   }
   function _renderIntakeBody(body, batch, data) {
     body.replaceChildren();
@@ -344,6 +350,10 @@ WB.stages.intake = (function () {
     WB.api.confirmIntake(batch.batch_id, { action: action, fields: null }).then(function (res) {
       if (!res.ok) { WB.toast(WB.errText(res.error)); return; }
       WB.toast(action === 'confirm' ? '已确认入场' : '已拒绝入场，批次仍待入场');
+      // 确认/拒绝后批次不再停在 pending_intake，即时结果卡已完成使命；
+      // 留着会在下个节点面板下面再挂一张「入场结果」（renderCenter 的
+      // 展示条件是批次仍在 pending_intake，但 reject 后仍满足，需显式清）。
+      WB.state.intakeResult = null;
       // 确认/拒绝后后端图同步推进（判定/抽样）→ 刷新批次跟随新状态（spec §4.3）；
       // 推进到隔离时后端会同事务自动建异常，异常列表必须同步刷新，
       // 否则面板停留在「尚无异常记录」误导再建（重复单缺陷，2026-10）
@@ -422,12 +432,15 @@ WB.stages.intake = (function () {
     }, 2000);
   }
 
-  // parseInspectionCsv / decodeCsvBytes 导出以便单测（纯函数，不碰 DOM）
+  // parseInspectionCsv / decodeCsvBytes 导出以便单测（纯函数，不碰 DOM）；
+  // appendResultCard 供 renderCenter 统一绘制「入场结果」卡片（异步重渲染
+  // 不会再把它抹掉）。
   return {
     stageIndex: stageIndex,
     render: render,
     parseInspectionCsv: parseInspectionCsv,
     decodeCsvBytes: decodeCsvBytes,
+    appendResultCard: appendResultCard,
   };
 })();
 

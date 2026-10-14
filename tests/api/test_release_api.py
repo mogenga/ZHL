@@ -470,3 +470,99 @@ def test_item7_lot_size_is_the_batch_lot_not_the_reinspected_count(api_client: A
     item7 = by_name["reinspection_scope_covered"]
     assert item7["passed"] is True, item7["reason"]
     assert body["passed"] is True
+
+
+# ---------------------------------------------------------------------------
+# 只读预检端点 GET /release-preview（2026-10-15 P0 回归）
+# 此前前端放行面板拿 POST /release + approved_by='probe' 当预检用 —— 渲染
+# 一次页面就把批次真放了，签署证据里躺着 "probe"。预检必须只读。
+# ---------------------------------------------------------------------------
+
+
+def test_release_preview_is_read_only(api_client: Any) -> None:
+    """预检算同一份七项断言，但绝不推进状态、不写签署证据、不落轨迹。"""
+    client, session, _ = api_client
+    _seed(session)
+    resp = client.get(f"/api/batches/{_BATCH}/release-preview")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    # 与 POST /release 同一份装配：逐项结果同口径
+    assert body["can_release"] is True
+    names = [c["name"] for c in body["checks"]]
+    assert names == [
+        "state",
+        "sample_passed",
+        "no_open_critical_incident",
+        "no_isolated_sn",
+        "all_evidence_present",
+        "all_capa_verified",
+        "reinspection_scope_covered",
+    ]
+    # 只读三连：状态不变 / 无签署证据 / 无放行轨迹
+    assert session.get(DeliveryBatch, _BATCH).status == "pending_release"
+    ev = session.query(Evidence).filter(Evidence.evidence_type == "human_confirmation").all()
+    assert ev == [], "预检不得写签署证据"
+    from app.infra.models import AgentTaskTrace
+
+    traces = session.query(AgentTaskTrace).filter(AgentTaskTrace.skill_name == "release").all()
+    assert traces == [], "预检不得落放行轨迹"
+
+
+def test_release_preview_reports_failing_checks(api_client: Any) -> None:
+    """预检在断言不过时也返回 200 + can_release=false + 逐项原因（不是 409）。"""
+    client, session, _ = api_client
+    _seed(session, sample_result="fail")
+    resp = client.get(f"/api/batches/{_BATCH}/release-preview")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["can_release"] is False
+    by_name = {c["name"]: c for c in body["checks"]}
+    assert by_name["sample_passed"]["passed"] is False
+    assert "expected pass" in by_name["sample_passed"]["reason"]
+    # 只读：批次状态不动
+    assert session.get(DeliveryBatch, _BATCH).status == "pending_release"
+
+
+def test_release_preview_wrong_state_still_answers(api_client: Any) -> None:
+    """非 pending_release 状态下预检照样回答"为什么现在不能放"，不 409。"""
+    client, session, _ = api_client
+    _seed(session)
+    session.get(DeliveryBatch, _BATCH).status = "isolated"
+    session.commit()
+    resp = client.get(f"/api/batches/{_BATCH}/release-preview")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["can_release"] is False
+    by_name = {c["name"]: c for c in body["checks"]}
+    assert by_name["state"]["passed"] is False
+
+
+def test_release_preview_archived_409(api_client: Any) -> None:
+    """归档批次是终态只读（D8），预检也 409 —— 与放行端点一致。"""
+    client, session, _ = api_client
+    _seed(session)
+    session.get(DeliveryBatch, _BATCH).status = "archived"
+    session.commit()
+    resp = client.get(f"/api/batches/{_BATCH}/release-preview")
+    assert resp.status_code == 409
+
+
+def test_release_rejects_empty_approver(api_client: Any) -> None:
+    """签署人必填：空字符串等于无人担责，放行一律拒绝（422）。"""
+    client, session, _ = api_client
+    _seed(session)
+    resp = client.post(f"/api/batches/{_BATCH}/release", json={"approved_by": ""})
+    assert resp.status_code == 422, resp.text
+    # 批次保持待放行，未写任何签署
+    assert session.get(DeliveryBatch, _BATCH).status == "pending_release"
+    ev = session.query(Evidence).filter(Evidence.evidence_type == "human_confirmation").all()
+    assert ev == []
+
+
+def test_release_rejects_whitespace_approver(api_client: Any) -> None:
+    """纯空白签署人同样拒绝（min_length 对 '   ' 不拦截，需显式 strip 校验）。"""
+    client, session, _ = api_client
+    _seed(session)
+    resp = client.post(f"/api/batches/{_BATCH}/release", json={"approved_by": "   "})
+    assert resp.status_code == 422, resp.text
+    assert session.get(DeliveryBatch, _BATCH).status == "pending_release"

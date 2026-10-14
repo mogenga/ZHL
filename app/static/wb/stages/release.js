@@ -47,19 +47,16 @@ WB.stages.release = (function () {
   }
 
   function runChecks(batch, body) {
-    WB.api.releaseBatch(batch.batch_id, 'probe').then(function (res) {
+    // 只读预检（GET /release-preview）：算同一份七项断言但**不写库**。
+    // 旧实现用 POST /release + approved_by='probe' 当预检 —— 那是真正的签署
+    // 端点，渲染一次面板就把批次放行了（2026-10-15 P0）。
+    WB.api.releasePreview(batch.batch_id).then(function (res) {
       const slot = body.querySelector('.hint-line');
       if (slot) slot.replaceChildren();
       if (!res.ok) {
         body.append(WB.h('div', { class: 'form-err', text: WB.errText(res.error) }));
         return;
       }
-      // passed=true 说明已自动置位 released（probe 会真正推进）→ 重新拉取详情
-      if (res.data.passed) {
-        WB._loadDetail(batch.batch_id);
-        return;
-      }
-      // passed=false：逐条展示未通过项（reasons 指明涉事异常/SN/证据）
       const checks = res.data.checks || [];
       const box = WB.h('div', {});
       checks.forEach(function (c) {
@@ -74,7 +71,8 @@ WB.stages.release = (function () {
         }
       });
       const failed = checks.filter(function (c) { return !c.passed; }).length;
-      body.append(WB.h('div', { class: 'hint-line', style: 'font-weight:600', text: failed + ' 项未通过，暂不可放行（校验可重试）' }));
+      body.append(WB.h('div', { class: 'hint-line', style: 'font-weight:600',
+        text: res.data.can_release ? '前置校验全部通过，可确认放行' : (failed + ' 项未通过，暂不可放行（校验可重试）') }));
       body.append(box);
       // 抽样结论阻断时给一条可执行的出路：复检已通过并关闭的批次，结论侧
       // 可能因历史缺陷没有回写第 2 轮（结论永远停在第 1 轮 fail）。由质量
@@ -94,6 +92,9 @@ WB.stages.release = (function () {
       const d = res.data || {};
       if (d.written) {
         WB.toast('已补写第 2 轮抽样结论（' + (d.result || '') + '）');
+        // 补写推进了断言②的事实侧，中栏与左栏都要跟着跑一次新数据
+        WB._loadDetail(batch.batch_id);
+        WB.loadBatches();
         runChecks(batch, body);
       } else if (d.result === 'pass') {
         WB.toast('第 2 轮抽样结论已在，无需重算');

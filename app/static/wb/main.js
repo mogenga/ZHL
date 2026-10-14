@@ -14,6 +14,10 @@ WB.state = {
   reports: [],         // 报告列表（左列报告视图，T9 接入）
   traces: [],          // 右栏轨迹（当前批次）
   viewStage: null,     // 流水线回看节点（null = 当前节点）
+  // 提交送检后的即时结果（intake.js 写入；渲染器画完当前节点面板后追加）。
+  // 必须进状态：旧实现把卡片直接 append 到 mainPane，_loadDetail 的异步回调
+  // 随后 replaceChildren 整个抹掉 —— 用户看到的就是「提交后无反馈」。
+  intakeResult: null,
 };
 
 /* ---- URL 参数读写（?batch=<id>，刷新恢复选中批次）---- */
@@ -34,6 +38,7 @@ WB.goHome = function () {
   WB.state.viewStage = null;
   WB.state.selected = null;
   WB.state.traces = [];
+  WB.state.intakeResult = null;
   WB.setBatch(null);
 };
 
@@ -111,6 +116,11 @@ WB.renderCenter = function (detail, listitem, panelDom) {
     return;
   }
   main.append(panelDom || WB.h('div', { class: 'card empty', text: '该节点无可操作项' }));
+  // 送检即时结果：跟随渲染周期走，异步 detail 刷新不再把它抹掉。
+  // 仅在当前节点确实是数据入场时展示——批次推进后信息已由节点面板承载。
+  if (WB.state.intakeResult && detail.status === 'pending_intake' && WB.state.intakeResult.batch_id === detail.batch_id) {
+    WB.stages.intake.appendResultCard(main, WB.state.intakeResult.data);
+  }
 };
 
 /* ---- 报告页（工作台主区）：仅展示当前批次拥有的报告 + 生成入口 + 查看正文 ----
@@ -543,6 +553,8 @@ WB._reportDrawer = function (r) {
 /* ---- 选中批次：接真实 getBatch + traces（spec §1.4 刷新恢复）---- */
 WB.selectBatch = function (id) {
   WB.state.viewStage = null;
+  // 换批次清掉上一批的送检结果（同批次重选保留，刷新恢复场景不清）
+  if (WB.state.batchId !== id) WB.state.intakeResult = null;
   WB.setBatch(id);
   WB._loadDetail(id);
 };
