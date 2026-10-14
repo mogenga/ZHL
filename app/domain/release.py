@@ -14,6 +14,7 @@ ISO combo. Closed incidents need no coverage.
 from __future__ import annotations
 
 from app.domain.sampling import iso_lookup
+from app.domain.state_machine import TERMINAL_INCIDENT_STATUSES
 from app.domain.types import (
     AssertionCheck,
     AssertionResult,
@@ -58,7 +59,7 @@ def check_no_open_critical_incident(incidents: list[IncidentView]) -> AssertionC
     open_critical = [
         i
         for i in incidents
-        if i.severity == "critical" and i.status not in ("closed", "rejected", "scrapped")
+        if i.severity == "critical" and i.status not in TERMINAL_INCIDENT_STATUSES
     ]
     passed = not open_critical
     reason = (
@@ -214,7 +215,7 @@ def assert_release(
     detects "no scope row at all" and keeps backward compatibility.
     """
     open_incident_ids = [
-        i.incident_id for i in incidents if i.status not in ("closed", "rejected", "scrapped")
+        i.incident_id for i in incidents if i.status not in TERMINAL_INCIDENT_STATUSES
     ]
     if required_sns is not None:
         # Authoritative mode: caller declares the full required set per

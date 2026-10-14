@@ -666,3 +666,11 @@
 2. **测试结果**：全量 272 passed；test_close_names_all_missing_conditions_at_once 一次指名 5 项缺失。
 3. **dev-notes 路径**：本文件（本节）。
 4. **实现说明**：§9.8 第 3 项收口；Ruling——scaffold 用例跳过 assign/capa 时批次停留在 isolated（close 不改批次状态），测试按此断言。
+
+## 2026-10-14 · 三批缺陷修复（报告可信度 / AI 归因 / 结构债）
+
+1. **功能演示命令**：`.venv\Scripts\pytest.exe tests`（313 passed）；`ruff check app tests` / `black --check app tests` 全绿。
+2. **批次 3 报告可信度**：新建 `app/skills/release_inputs.py`（放行端点与报告层共用的七项断言 DB→view 装配 + `judgment_stats` + `recorded_release_assertions`）；放行报告改为**引用**放行时刻随证据行落库的真实 AssertionResult（无证据则如实报全部未过，绝不渲染"全部通过"占位）；`POST /report` 新增状态门（release 型仅 released，409 `release_report_requires_released_batch`，FR §4.5 闭环点）；`decisions` = 真实判定统计（decision_counts + sample_conclusions，渲染器新增「## 判定统计」章节）；处置报告拒因 = 操作员真实 reason（reject 路由传参 / 报告 API 从 reject 轨迹回查），废除编造的 "incident xxx status=…" 占位；前端 report.js 断言摘要「passed 缺失 ≠ 全部通过」+ 判定统计摘要 + 生成报告类型按状态收窄。
+3. **批次 4 AI 归因**：`MockLLMClient` 未命中改抛 `FixtureMissError(KeyError)`（专异常，契约测试不变）；attribute 端点重写为直调 `AttributionSkill`，只捕 `FixtureMissError`——真实 KeyError 不再被吞成"未知 incident"；摘掉同请求自问自答的假 `human_adopt` interrupt 与硬编码 `{"result": "pass"}` 的假复检节点（子图本体保留为独立回放脚手架）；D2 全滤空时返回提示文案。
+4. **批次 5 结构债**：删除死代码 `app/infra/schemas.py` + 其测试（app 侧零引用）；`TERMINAL_INCIDENT_STATUSES` 常量收敛 5 处 closed/rejected/scrapped 字面量（domain/release.py ×2、skills/release_inputs.py ×2、api/release.py 经共享模块）；`_liBadge` 改为只在 innerHTML 上剥前缀——不再用 textContent 覆盖丢内联样式。
+5. **dev-notes 路径**：本文件（本节）。

@@ -20,6 +20,7 @@ keeps the plugin dependency-free (reviewer may override this decision).
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 #: Fixed context keys every report render consumes (PB spec §5.6).
@@ -57,6 +58,34 @@ def _checks_lines(checks: list[dict]) -> list[str]:
 
 class ReportRenderer:
     """Clock-free Markdown + JSON report renderer."""
+
+    def _decisions_lines(self, decisions: Any) -> list[str]:
+        """判定统计 → Markdown 列表行（dict 逐键 / list 逐条；非标量 json 化）。
+
+        Phase 0 夹具传 list、现行 ReportSkill 传 dict（judgment_stats）——
+        两种都如实渲染，绝不因形状不认识而静默丢章节。
+        """
+        lines: list[str] = []
+        if isinstance(decisions, dict):
+            for k, v in decisions.items():
+                if isinstance(v, (str, int, float, bool)):
+                    lines.append(f"- {k}: {v}")
+                else:
+                    lines.append(f"- {k}: {json.dumps(v, ensure_ascii=False)}")
+        elif isinstance(decisions, list):
+            for d in decisions:
+                if isinstance(d, dict):
+                    lines.append(f"- {json.dumps(d, ensure_ascii=False)}")
+                else:
+                    lines.append(f"- {d}")
+        return lines
+
+    def _judgment_section(self, context: dict) -> list[str]:
+        """「## 判定统计」章节（Phase B spec §5.10 两类报告模板都要求）。"""
+        dlines = self._decisions_lines(context.get("decisions"))
+        if not dlines:
+            return []
+        return ["## 判定统计", "", *dlines, ""]
 
     def _build_json(self, context: dict, report_type: str) -> dict:
         return {
@@ -103,6 +132,7 @@ class ReportRenderer:
         md.append(f"- 型号：{batch.get('model', '?')}")
         md.append(f"- 生成时间：{ctx['generated_at']}")
         md.append("")
+        md.extend(self._judgment_section(ctx))
         md.append("## 放行断言（7 项）")
         md.append("")
         if checks:
@@ -127,6 +157,7 @@ class ReportRenderer:
         md.append(f"- 批次状态：{batch.get('status', '?')}")
         md.append(f"- 生成时间：{ctx['generated_at']}")
         md.append("")
+        md.extend(self._judgment_section(ctx))
 
         # 拒因 section (PB spec §5.1: rejected only attaches a disposal
         # report; the refusal reason is a section within it, never a

@@ -289,7 +289,7 @@ def test_batch_detail_inspections_expose_inspection_id(api_client: Any) -> None:
     """get_batch_detail 的 inspections[] 必须含 inspection_id——复检表单靠它
     把选中的 SN 解析成组件行（缺失则前端必弹「无法解析复检组件」，
     2026-10 测试反馈的复检卡点）。"""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
@@ -342,7 +342,7 @@ def test_batch_detail_inspections_expose_inspection_id(api_client: Any) -> None:
         batch_id=batch_id,
         sn="SN-N-057",
         source_type="IV_CSV",
-        captured_at=datetime(2026, 10, 14, tzinfo=timezone.utc),
+        captured_at=datetime(2026, 10, 14, tzinfo=UTC),
         pmax=550.0,
         temp=25.0,
         isc=10.5,
@@ -369,9 +369,9 @@ def test_batch_detail_inspections_expose_inspection_id(api_client: Any) -> None:
     inspections = r.json()["inspections"]
     assert len(inspections) == 1
     assert inspections[0]["sn"] == "SN-N-057"
-    assert inspections[0].get("inspection_id") == str(insp.inspection_id), (
-        "inspections[] 缺 inspection_id，复检表单无法解析组件"
-    )
+    assert inspections[0].get("inspection_id") == str(
+        insp.inspection_id
+    ), "inspections[] 缺 inspection_id，复检表单无法解析组件"
     session.close()
     engine.dispose()
 

@@ -60,6 +60,10 @@ _KINDS = {"batch": BATCH_TRANSITIONS, "incident": INCIDENT_TRANSITIONS}
 #: 未关闭异常状态（close 端点的批次联动 / §8.1 自动创建幂等查重的单一事实来源）
 OPEN_INCIDENT_STATUSES = ("new", "isolated", "assigned", "pending_recheck")
 
+#: 异常终态（放行断言③⑦ / CAPA 检查 / 报告 open-incident 过滤的单一事实来源）。
+#: 与 OPEN_INCIDENT_STATUSES 互补，共同覆盖 INCIDENT_STATUS 全部取值。
+TERMINAL_INCIDENT_STATUSES = ("closed", "rejected", "scrapped")
+
 
 def transition(
     current: str,

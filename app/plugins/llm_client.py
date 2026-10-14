@@ -40,6 +40,18 @@ _EXTRACT_FIXTURE = "mock_llm_outputs.json"
 _ATTRIBUTION_FIXTURE = "mock_llm_attribution.json"
 
 
+class FixtureMissError(KeyError):
+    """MockLLMClient: the prompt's marker has no fixture entry.
+
+    Subclasses ``KeyError`` so existing ``pytest.raises(KeyError)`` contract
+    tests keep passing, but lets callers (the attribution endpoint) catch
+    *only* the "mock has no fixture for this id" business case. A bare
+    ``except KeyError`` around a whole graph run would also swallow genuine
+    KeyErrors from the skill / evidence store / ORM and masquerade them as
+    "unknown incident" — that is why this type exists.
+    """
+
+
 @runtime_checkable
 class LLMClient(Protocol):
     """The model I/O contract (总 spec §9.1 / AGENT.md §6.2)."""
@@ -95,7 +107,7 @@ class MockLLMClient:
             source_sn = m_sn.group(1)
             block = self._extract_fixtures.get("extraction")
             if not isinstance(block, dict) or block.get("source_sn") != source_sn:
-                raise KeyError(f"no fixture extraction block for source_sn={source_sn!r}")
+                raise FixtureMissError(f"no fixture extraction block for source_sn={source_sn!r}")
             return block
         # Phase B attribution routing.
         m_inc = _INCIDENT_ID_RE.search(prompt)
@@ -104,8 +116,8 @@ class MockLLMClient:
             if incident_id in self._attribution:
                 return self._attribution[incident_id]
         if m_inc is None:
-            raise KeyError("prompt carries neither a [SOURCE_SN] marker nor an incident_id")
-        raise KeyError(f"no mock attribution for incident_id={m_inc.group(1)!r}")
+            raise FixtureMissError("prompt carries neither a [SOURCE_SN] marker nor an incident_id")
+        raise FixtureMissError(f"no mock attribution for incident_id={m_inc.group(1)!r}")
 
 
 class OpenAICompatClient:

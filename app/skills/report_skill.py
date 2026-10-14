@@ -36,16 +36,10 @@ from app.infra.models import (
 )
 from app.plugins.report_renderer import ReportRenderer
 from app.plugins.trace_store import TraceStore
-
-#: The fixed seven assertion checks a release report carries (PB Task 2/8).
-_RELEASE_ASSERTION_NAMES = (
-    "state",
-    "sample_passed",
-    "no_open_critical_incident",
-    "no_isolated_sn",
-    "all_evidence_present",
-    "all_capa_verified",
-    "reinspection_scope_covered",
+from app.skills.release_inputs import (
+    judgment_stats,
+    missing_release_assertions,
+    recorded_release_assertions,
 )
 
 
@@ -55,8 +49,15 @@ def _build_context(
     report_type: str,
     trace_refs: list[str],
     evidence_refs: list[str],
+    refusal_reason: str = "",
 ) -> dict[str, Any]:
-    """Aggregate the renderer's fixed-shape context from the DB."""
+    """Aggregate the renderer's fixed-shape context from the DB.
+
+    数据引用原则（设计文档 §9.7/§9.9，架构红线「Report Skill 不得编造数据」）：
+    断言结果引用放行时刻随证据行落库的真实 ``AssertionResult``；判定统计来自
+    ``module_inspections`` / ``sample_conclusions`` 聚合。渲染层不再构造任何
+    占位值 —— 引用不到就如实报"无记录"，绝不渲染"全部通过"。
+    """
     incidents = (
         session.query(QualityIncident).filter(QualityIncident.batch_id == batch.batch_id).all()
     )
@@ -94,20 +95,18 @@ def _build_context(
     ]
 
     if report_type == "release":
-        # For a release report the assertions are the seven-check set (all
-        # treated as passed at the report-rendering layer; the actual
-        # pass/fail determination is Task 8's release API).
-        assertions = {
-            "passed": True,
-            "checks": [
-                {"name": name, "passed": True, "reason": ""} for name in _RELEASE_ASSERTION_NAMES
-            ],
-        }
+        # The seven checks QUOTE the recorded release-time AssertionResult
+        # (stored on the release evidence row by the release API). A released
+        # batch without that evidence gets an honest all-fail set naming the
+        # gap — never a rendered "all passed".
+        assertions = recorded_release_assertions(session, batch) or missing_release_assertions()
         refusal = ""
     else:
-        # Incident (disposal) report: no release assertion set.
+        # Incident (disposal) report: no release assertion set; the 拒因 is
+        # the operator's rejection reason passed by the caller (the reject
+        # route), empty for non-rejected dispositions.
         assertions = {"passed": True, "checks": []}
-        refusal = " ".join(f"incident {i.incident_id} status={i.status}" for i in incidents)
+        refusal = refusal_reason
 
     return {
         "batch": {
@@ -115,7 +114,7 @@ def _build_context(
             "status": batch.status,
             "model": batch.model,
         },
-        "decisions": [],
+        "decisions": judgment_stats(session, batch.batch_id),
         "incidents": incident_dicts,
         "reinspections": re_dicts,
         "assertions": assertions,
@@ -140,6 +139,7 @@ class ReportSkill:
         generated_at: datetime,
         trace_task_ids: list[str] | None = None,
         evidence_ids: list[str] | None = None,
+        refusal_reason: str | None = None,
     ) -> Report:
         batch = session.get(DeliveryBatch, batch_id)
         if batch is None:
@@ -151,6 +151,7 @@ class ReportSkill:
             report_type,
             trace_refs=trace_task_ids or [],
             evidence_refs=evidence_ids or [],
+            refusal_reason=refusal_reason or "",
         )
         context["generated_at"] = generated_at.isoformat()
         markdown, js = (

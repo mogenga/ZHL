@@ -95,6 +95,9 @@ def test_reject_from_pending_release(api_client: Any) -> None:
     )
     assert report is not None
     assert report.version == 1
+    # 拒因是操作员填的真实 reason，进报告正文（不再是编造的占位文本）
+    assert "复检全批不合格，拒绝交付" in (report.content_md or "")
+    assert report.content_json["refusal_reason"] == "复检全批不合格，拒绝交付"
 
 
 def test_reject_d8_archived_409(api_client: Any) -> None:

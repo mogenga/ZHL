@@ -70,6 +70,20 @@ def _to_out(r: Report) -> ReportOut:
     )
 
 
+def _reject_reason(session: Any, batch_id: uuid.UUID) -> str:
+    """最近一次人工拒绝的 reason（记在 reject 轨迹行的 params_summary）。
+
+    处置报告的拒因章节引用这份真实原因；查不到（非人工拒绝路径，如复检
+    fail 转拒绝）时返回空串 —— 报告如实留空，不编造占位文本。
+    """
+    reason = ""
+    for t in TraceStore().list_for_batch(session, batch_id):
+        if t.skill_name == "reject":
+            params = t.params_summary or {}
+            reason = str(params.get("reason") or "")
+    return reason
+
+
 def _record_trace(
     session: Any,
     batch_id: uuid.UUID,
@@ -115,6 +129,19 @@ def create_report(batch_id: uuid.UUID, payload: ReportCreate, session: SessionDe
             },
         )
 
+    # §4.5 闭环点：未放行批次只能生成处置报告。放行报告要求批次已处于
+    # released —— 七项断言在放行时刻随证据行落库，报告才有真实结果可引用；
+    # 判定中/隔离中的批次开"放行结论：通过"的报告是凭空编造。
+    if payload.report_type == "release" and batch.status != "released":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "release_report_requires_released_batch",
+                "status": batch.status,
+                "hint": "未放行批次只能生成处置报告；放行报告在批次 released 后生成",
+            },
+        )
+
     # D10: idempotent re-render — if a version already exists for this
     # batch+type, return the latest one without bumping the version.
     existing = (
@@ -130,11 +157,13 @@ def create_report(batch_id: uuid.UUID, payload: ReportCreate, session: SessionDe
         return JSONResponse(status_code=200, content=_to_out(existing).model_dump(mode="json"))
 
     skill = ReportSkill()
+    refusal = _reject_reason(session, batch_id) if payload.report_type == "incident" else None
     report = skill.generate(
         session,
         batch_id,
         payload.report_type,
         generated_at=datetime.now(UTC),
+        refusal_reason=refusal,
     )
 
     # D6a: auto-archive in the SAME transaction as the report write, via the

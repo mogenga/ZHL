@@ -637,10 +637,21 @@ def attribute_incident(
 ) -> dict:
     """T-1 AI attribution trigger (single-request 3-way, D9; P1 cross-request).
 
-    AGENT.md §4.3: the LLM call runs outside the transaction (inside the
-    LangGraph node); the business write + trace row commit in one unit.
+    AGENT.md §4.3: the LLM call runs outside the transaction; the business
+    write + trace row commit in one unit. The endpoint drives the
+    ``AttributionSkill`` directly instead of running the incident subgraph:
+    the subgraph's ``human_adopt`` interrupt was self-answered from the same
+    request body (a fake HITL) and its ``run_reinspection`` node was a
+    hardcoded ``{"result": "pass"}`` stub — neither had any real business
+    effect here. Genuine reinspections go through
+    ``POST /api/incidents/{id}/reinspections``; the subgraph itself remains a
+    standalone topology scaffold for replay tests.
+
     Mock with no fixture key for this incident UUID -> 200 + empty + hint
-    (spec §6 Q3: not a 404/500).
+    (spec §6 Q3: not a 404/500). Only ``FixtureMissError`` is treated as
+    that business case — any other ``KeyError`` from the skill / evidence
+    store / ORM propagates as a real 500 instead of being masked as
+    "unknown incident".
     """
     incident = session.get(QualityIncident, incident_id)
     if incident is None:
@@ -648,41 +659,17 @@ def attribute_incident(
     # D8: archived terminal guard (shared, single call site).
     require_not_archived(incident.batch_id, session)
 
-    from langgraph.checkpoint.memory import MemorySaver
-    from langgraph.types import Command
+    from app.plugins.attribution import AttributionSkill
+    from app.plugins.llm_client import FixtureMissError
 
-    from app.workflow.incident_subgraph import build_incident_subgraph
-
-    attribution_ctx = {
-        "incident": incident,
-        "session": session,
-        "llm": llm,
-        "evidence_store": evidence_store,
-        "trace": TraceStore(),
-    }
-    graph = build_incident_subgraph(
-        MemorySaver(),
-        attribution_ctx=attribution_ctx,
-        reinspection_callable=lambda p: {"result": "pass"},
-    )
-    initial_state = {
-        "incident_id": str(incident.incident_id),
-        "batch_id": str(incident.batch_id),
-        "hypotheses": [],
-        "human_decision": None,
-        "reinspection_result": None,
-        "reinspection_payload": {"scope_type": "minimal", "scope_sns": []},
-    }
-    thread = {"configurable": {"thread_id": f"attr-{uuid.uuid4().hex}"}}
     try:
-        for _ in graph.stream(initial_state, config=thread, stream_mode="updates"):
-            pass
-        resume = Command(resume={"decision": payload.decision, "cause": payload.cause})
-        for _ in graph.stream(resume, config=thread, stream_mode="updates"):
-            pass
-    except KeyError:
+        hypotheses = AttributionSkill(llm, evidence_store).run(
+            incident, trace=TraceStore(), session=session
+        )
+    except FixtureMissError:
         # Mock LLM has no fixture key for this incident UUID (spec §6 Q3):
-        # graceful 200 + empty hypotheses + hint.
+        # graceful 200 + empty hypotheses + hint. The skill raises before any
+        # write, so the rollback discards nothing of value.
         session.rollback()
         return {
             "incident_id": str(incident.incident_id),
@@ -691,10 +678,6 @@ def attribute_incident(
             "confirmed_root_cause": incident.confirmed_root_cause,
             "hint": "该 incident UUID 在归因 Mock 中无 fixture 键（未知 incident）",
         }
-
-    snap = graph.get_state(thread)
-    hypotheses = (snap.values.get("hypotheses") if snap else None) or []
-    source = snap.values.get("hypotheses_source") if snap else None
 
     # Business write: adopt persists the confirmed cause; one transaction.
     if payload.decision == "adopt":
@@ -706,10 +689,10 @@ def attribute_incident(
         {"decision": payload.decision, "cause": payload.cause},
         {
             "hypotheses": hypotheses,
-            "hypotheses_source": source,
-            "reinspection_result": snap.values.get("reinspection_result") if snap else None,
+            "hypotheses_source": "attribution" if hypotheses else "empty",
+            "evidence_validation": "skill",
         },
-        validation_result="pass" if source == "attribution" else "stub",
+        validation_result="pass" if hypotheses else "partial",
     )
     session.commit()
     session.refresh(incident)
@@ -718,5 +701,5 @@ def attribute_incident(
         "decision": payload.decision,
         "hypotheses": hypotheses,
         "confirmed_root_cause": incident.confirmed_root_cause,
-        "hint": None,
+        "hint": None if hypotheses else "归因假设均未通过证据校验（D2），请人工填写根因",
     }

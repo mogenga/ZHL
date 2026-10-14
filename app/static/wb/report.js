@@ -15,11 +15,18 @@ WB.report = (function () {
     out = out.replace(/(^|[^*])\*([^*]+)\*(?!\*)/g, function (_, pre, it) { return pre + '<em>' + it + '</em>'; });
     return out;
   }
-  // 列表项里的 [PASS] / [FAIL] 徽标着色
+  // 列表项里的 [PASS] / [FAIL] 徽标着色。只在 innerHTML 上剥掉前缀标记，
+  // 不再用 textContent 整体覆盖 —— 覆盖会把 _inlineHtml 渲染出的粗体/行内
+  // 代码等内联样式一并抹掉（样式丢失根因）。
   function _liBadge(el) {
-    const t = el.textContent || '';
-    if (/^\[PASS\]/.test(t)) { el.classList.add('li-pass'); el.textContent = t.slice(6).trim(); }
-    else if (/^\[FAIL\]/.test(t)) { el.classList.add('li-fail'); el.textContent = t.slice(6).trim(); }
+    const t = (el.textContent || '').trim();
+    const html = el.innerHTML || '';
+    let cls = '';
+    if (/^\[PASS\]/.test(t)) cls = 'li-pass';
+    else if (/^\[FAIL\]/.test(t)) cls = 'li-fail';
+    if (!cls) return;
+    el.classList.add(cls);
+    el.innerHTML = html.replace(/^\s*\[(PASS|FAIL)\]\s*/, '');
   }
   function mdToDom(md) {
     const wrap = WB.h('div', { class: 'report-md' });
@@ -148,14 +155,29 @@ WB.report = (function () {
     }
     const inc = contentJson.incidents || [];
     const rei = contentJson.reinspections || [];
-    const dec = contentJson.decisions || [];
+    const dec = contentJson.decisions;
     const asserts = contentJson.assertions;
     const checks = (asserts && asserts.checks) || [];
     const nPass = checks.filter(function (c) { return c.passed; }).length;
-    if (checks.length) rows.push(['放行断言', nPass + '/' + checks.length + ' 项通过' + (asserts && asserts.passed === false ? '（未通过）' : '（全部通过）')]);
+    if (checks.length) {
+      // passed 缺失（未引用到真实断言记录）时不标"全部通过"——缺失不是通过
+      const tail = asserts && asserts.passed === false ? '（未通过）' : (asserts && asserts.passed === true ? '（全部通过）' : '');
+      rows.push(['放行断言', nPass + '/' + checks.length + ' 项通过' + tail]);
+    }
     if (inc.length) rows.push(['异常', inc.length + ' 条']);
     if (rei.length) rows.push(['复检', rei.length + ' 条']);
-    if (dec.length) rows.push(['决策记录', dec.length + ' 条']);
+    // 判定统计（后端 judgment_stats dict）；Phase 0 夹具的 list 形状保持兼容
+    if (dec && typeof dec === 'object' && !Array.isArray(dec)) {
+      const dc = dec.decision_counts || {};
+      const parts = [];
+      if (dec.total_inspections != null) parts.push('共 ' + dec.total_inspections + ' 件');
+      Object.keys(dc).forEach(function (k) { parts.push(k + ' ' + dc[k]); });
+      if (parts.length) rows.push(['判定统计', parts.join(' / ')]);
+      const sc = dec.sample_conclusions || [];
+      if (sc.length) rows.push(['抽样结论', sc.map(function (s) { return (s.inspection_type || '?') + ' r' + (s.sample_round || 1) + ':' + (s.result || '?'); }).join(' / ')]);
+    } else if (Array.isArray(dec) && dec.length) {
+      rows.push(['决策记录', dec.length + ' 条']);
+    }
     if (contentJson.refusal_reason) rows.push(['拒绝原因', contentJson.refusal_reason]);
     if (contentJson.report_type) rows.push(['报告类型', contentJson.report_type]);
     return rows;
@@ -321,10 +343,13 @@ WB._expandReportInMain = function (report, batch) {
 };
 
 WB.generateReportForBatch = function (batch) {
+  // 报告类型由状态强制约束（FR §4.5 闭环点）：未放行批次只能生成处置报告，
+  // 放行报告仅 released 批次可开（后端 409 同口径，这里提前收窄选项）。
   const types = [
-    { value: 'release', label: '放行报告' },
-    { value: 'incident', label: '异常处置报告' },
-  ];
+    { value: 'release', label: '放行报告', enabled: batch && batch.status === 'released' },
+    { value: 'incident', label: '异常处置报告', enabled: true },
+  ].filter(function (t) { return t.enabled; })
+   .map(function (t) { return { value: t.value, label: t.label }; });
   WB.openModal('生成报告 · ' + batch.batch_no, [
     { label: '报告类型', type: 'select', value: 'release', options: types },
   ], function (vals) {
