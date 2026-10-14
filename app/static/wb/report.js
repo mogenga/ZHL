@@ -18,8 +18,8 @@ WB.report = (function () {
   // 列表项里的 [PASS] / [FAIL] 徽标着色
   function _liBadge(el) {
     const t = el.textContent || '';
-    if (/^\[PASS\]/.test(t)) { el.classList.add('li-pass'); el.textContent = t.slice(6); }
-    else if (/^\[FAIL\]/.test(t)) { el.classList.add('li-fail'); el.textContent = t.slice(6); }
+    if (/^\[PASS\]/.test(t)) { el.classList.add('li-pass'); el.textContent = t.slice(6).trim(); }
+    else if (/^\[FAIL\]/.test(t)) { el.classList.add('li-fail'); el.textContent = t.slice(6).trim(); }
   }
   function mdToDom(md) {
     const wrap = WB.h('div', { class: 'report-md' });
@@ -33,7 +33,14 @@ WB.report = (function () {
     });
     // 强制规则：仅由装饰字符（em-dash / en-dash / hyphen / asterisk / 冒号 / 点 / 中点 / 管符 / 空格）
     // 组成的“无字母数字”行视为装饰分隔线，当空行处理；内含任何可见内容的行一律保留。
-    const lines = norm.filter(function (l) { return l !== '' && !/^[\u2014\u2013\-\*\.:\u00b7|\s\u3000]+$/.test(l); });
+    // 例外：GFM 表格分隔行与 ---/*** 水平线是有效 Markdown 语法（下方表格 / hr 分支要消费），
+    // 不能按装饰行丢弃，否则表格分隔行被删后表格永远检测不到，全部退化为带竖线的段落。
+    const lines = norm.filter(function (l) {
+      if (l === '') return false;
+      if (/^\s*\|?[\s|:-]+\|\s*$/.test(l) && /-/.test(l)) return true; // 表格分隔行（与下方表格分支同一判定）
+      if (/^\s*(-{3,}|\*{3,})\s*$/.test(l)) return true;               // 水平线
+      return !/^[\u2014\u2013\-\*\.:\u00b7|\s\u3000]+$/.test(l);
+    });
     let i = 0;
     while (i < lines.length) {
       const ln = lines[i];
