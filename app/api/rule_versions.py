@@ -17,7 +17,7 @@ closure).
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
 
@@ -26,6 +26,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
+from app.domain.rule_version import transition_rule_status
 from app.infra.models import QualityRuleVersion, RuleVersionEvent
 
 router = APIRouter(prefix="/api/quality-rule-versions", tags=["rule-versions"])
@@ -64,6 +65,26 @@ class CreateRuleVersionResponse(BaseModel):
     version_no: int
     duplicate: bool
     event_id: UUID | None
+
+
+class StatusChangeRequest(BaseModel):
+    operator: str
+    source: Literal["manual", "recommended"] = "manual"
+    reason: str | None = None
+
+
+class StatusChangeResponse(BaseModel):
+    rule_version_id: UUID
+    status: str
+    event_id: UUID
+
+
+class RuleVersionEventResponse(BaseModel):
+    event_id: UUID
+    action: str
+    operator: str
+    detail: dict
+    created_at: datetime
 
 
 @router.get("")
@@ -187,10 +208,47 @@ def create_rule_version(
     )
 
 
+def _load_rule_or_404(session: Any, rule_version_id: UUID) -> QualityRuleVersion:
+    rule = session.get(QualityRuleVersion, rule_version_id)
+    if rule is None:
+        raise HTTPException(status_code=404, detail="rule_version_not_found")
+    return rule
+
+
+def _apply_status_change(
+    session: Any, rule: QualityRuleVersion, to_status: str, body: StatusChangeRequest
+) -> StatusChangeResponse:
+    new_status, err = transition_rule_status(rule.status, to_status)
+    if new_status is None:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": f"cannot_{to_status}", "reason": err, "from": rule.status},
+        )
+    rule.status = new_status
+    rule.updated_at = datetime.now(UTC)
+    session.add(rule)
+    ev = _write_event(
+        session,
+        rule.rule_version_id,
+        to_status,
+        body.operator,
+        {
+            "version_no": rule.version_no,
+            "effective_at": rule.effective_at.isoformat() if rule.effective_at else None,
+            "source": body.source,
+            "reason": body.reason,
+        },
+    )
+    session.refresh(rule)
+    return StatusChangeResponse(
+        rule_version_id=rule.rule_version_id, status=rule.status, event_id=ev
+    )
+
+
 def _write_event(
     session: Any, rule_version_id: UUID, action: str, operator: str, detail: dict
 ) -> UUID:
-    """写审计事件并 commit，返回新 event_id（供 publish/disable 复用）。"""
+    """写审计事件并 commit，返回新 event_id。"""
     ev = RuleVersionEvent(
         event_id=uuid4(),
         rule_version_id=rule_version_id,
@@ -200,14 +258,8 @@ def _write_event(
     )
     session.add(ev)
     session.commit()
+    session.refresh(ev)
     return ev.event_id
-
-
-def _load_rule_or_404(session: Any, rule_version_id: UUID) -> QualityRuleVersion:
-    rule = session.get(QualityRuleVersion, rule_version_id)
-    if rule is None:
-        raise HTTPException(status_code=404, detail="rule_version_not_found")
-    return rule
 
 
 @router.post("", response_model=CreateRuleVersionResponse)
@@ -219,12 +271,58 @@ def create_rule_version_endpoint(
     return out
 
 
+@router.post("/{rule_version_id}/publish", response_model=StatusChangeResponse)
+def publish_rule_version(
+    rule_version_id: UUID, body: StatusChangeRequest, session: SessionDep
+) -> StatusChangeResponse:
+    rule = _load_rule_or_404(session, rule_version_id)
+    return _apply_status_change(session, rule, "published", body)
+
+
+@router.post("/{rule_version_id}/disable", response_model=StatusChangeResponse)
+def disable_rule_version(
+    rule_version_id: UUID, body: StatusChangeRequest, session: SessionDep
+) -> StatusChangeResponse:
+    rule = _load_rule_or_404(session, rule_version_id)
+    return _apply_status_change(session, rule, "disabled", body)
+
+
+@router.get("/{rule_version_id}/events", response_model=list[RuleVersionEventResponse])
+def list_rule_version_events(
+    rule_version_id: UUID, session: SessionDep
+) -> list[RuleVersionEventResponse]:
+    _load_rule_or_404(session, rule_version_id)
+    rows = (
+        session.query(RuleVersionEvent)
+        .filter(RuleVersionEvent.rule_version_id == rule_version_id)
+        .order_by(RuleVersionEvent.created_at.desc(), RuleVersionEvent.event_id.desc())
+        .all()
+    )
+    return [
+        RuleVersionEventResponse(
+            event_id=e.event_id,
+            action=e.action,
+            operator=e.operator,
+            detail=e.detail or {},
+            created_at=e.created_at,
+        )
+        for e in rows
+    ]
+
+
 __all__ = [
     "CreateRuleVersionRequest",
     "CreateRuleVersionResponse",
+    "StatusChangeRequest",
+    "StatusChangeResponse",
+    "RuleVersionEventResponse",
+    "_apply_status_change",
     "_load_rule_or_404",
     "_write_event",
     "create_rule_version",
+    "disable_rule_version",
     "get_session",
+    "list_rule_version_events",
+    "publish_rule_version",
     "router",
 ]
