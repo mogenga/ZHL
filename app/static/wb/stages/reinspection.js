@@ -94,7 +94,7 @@ WB.stages.reinspection = (function () {
           WB.toast(WB.errText(e));
           return;
         }
-        WB.toast(res.data.passed ? '复检通过，异常闭环' : '复检不通过，异常与批次转拒绝');
+        WB.toast(res.data.passed ? '复检通过，请在异常卡片补勾整改措施已验证后确认关闭' : '复检不通过，异常与批次转拒绝');
         WB.loadIncidents().then(function () { WB._loadDetail(batch.batch_id); WB.loadBatches(); });
       });
     }, { submitLabel: '提交复检', inline: err });

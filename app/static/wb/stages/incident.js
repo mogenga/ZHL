@@ -87,6 +87,9 @@ WB.stages.incident = (function () {
         break;
       case 'pending_recheck':
         slot.append(WB.h('span', { class: 'hint-line', text: '已转待复检，请在复检节点录入结果' }));
+        // 复检通过后的闭环：补勾整改措施已验证 → 确认关闭（P0 缺口 #1）
+        slot.append(WB.h('button', { onclick: function () { capaModal(i, batch, slot, done, fail); }, text: '补勾整改措施已验证' }));
+        slot.append(WB.h('button', { class: 'primary', onclick: function () { closeIncidentFlow(i, batch, slot, done, fail); }, text: '确认关闭异常' }));
         break;
       default:
         slot.append(WB.h('span', { class: 'hint-line', text: '当前状态 ' + (WB.ST_CN[i.status] || i.status) }));
@@ -170,9 +173,36 @@ WB.stages.incident = (function () {
           fail(WB.errText(r.error));
           return;
         }
-        done('已填报整改措施，批次转待复检');
+        done(i.status === 'pending_recheck' ? '整改措施已更新' : '已填报整改措施，批次转待复检');
       });
     }, { submitLabel: '提交' });
+  }
+
+  // 确认关闭异常（P0 缺口 #1）：close 端点五条件校验；缺失项逐条行内展示
+  var MISSING_CN = {
+    owner: '未指派责任人',
+    capa_fields: '整改措施未填报完整（确认根因 / 纠正措施）',
+    reinspection_record: '无独立复检记录',
+    reinspection_passed: '复检未通过',
+    capa_verified: '整改措施未勾选已验证',
+  };
+  function closeIncidentFlow(i, batch, slot, done, fail) {
+    WB.api.closeIncident(i.incident_id).then(function (r) {
+      if (r.ok) {
+        WB.toast(r.data.batch_status === 'pending_release' ? '异常已关闭，批次转待放行' : '异常已关闭');
+        WB.loadIncidents().then(function () { WB._loadDetail(batch.batch_id); WB.loadBatches(); });
+        return;
+      }
+      const e = r.error;
+      if (e && e.key === 'close_conditions_unmet' && Array.isArray(e.detail && e.detail.missing)) {
+        slot.replaceChildren(WB.h('div', { class: 'hint-line', text: '关闭条件未满足：' }),
+          WB.h('ul', {}, e.detail.missing.map(function (m) {
+            return WB.h('li', { text: MISSING_CN[m] || m });
+          })));
+        return;
+      }
+      fail(WB.errText(e));
+    });
   }
 
   /* ---- 创建异常表单（isolated 批次且无异常；spec §4 步骤 2）---- */

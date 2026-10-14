@@ -29,6 +29,8 @@ WB.errText = function (error) {
     'rule not effective yet': '规则版本尚未生效，无法判定',
     cross_batch_sn_conflict: '组件条码已存在于其他批次',
     capa_verified_requires_pass_reinspection: '需先有通过的复检记录才能勾选已验证',
+    close_conditions_unmet: '关闭条件未满足，请补齐缺失项',
+    incident_not_closeable: '该异常当前状态不可关闭',
     batch_not_found: '批次不存在或已被删除',
     incident_not_found: '异常记录不存在',
     report_not_found: '报告不存在或已被删除',
@@ -212,6 +214,13 @@ WB.api = {
   },
   capaIncident(id, body) {
     return WB.api.request('POST', '/api/incidents/' + id + '/capa', body).then(function (r) {
+      if (!r.ok) return { ok: false, error: r.error, data: null };
+      return { ok: true, data: r.data };
+    });
+  },
+
+  closeIncident(id) {
+    return WB.api.request('POST', '/api/incidents/' + id + '/close', {}).then(function (r) {
       if (!r.ok) return { ok: false, error: r.error, data: null };
       return { ok: true, data: r.data };
     });
