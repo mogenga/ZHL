@@ -346,32 +346,44 @@ BASE = {"sn": "SN-X", "project": "P-DEFAULT", "grade": "A", "captured_date": "20
 | --- | --- | --- | --- |
 | C-B01 | 责任人 | `owner=""` | `["owner"]`（叠加其他时一起出现） |
 | C-B02 | CAPA 字段 | 根因或纠正措施为空串 | 含 `capa_fields` |
-| C-B03 | 复检记录 | `reinspection=None` | 含 `reinspection_record` |
+| C-B03 | 复检记录 | `reinspection=None` | 含 `reinspection_record`。⚠️ 2026-10-15 起界面在未录复检时不给关闭入口，此项只能经 API 触发 |
 | C-B04 | 复检通过 | `reinspection.result='fail'` | 含 `reinspection_passed` |
-| C-B05 | 已验证 | `capa_verified=False` | 含 `capa_verified` |
-| C-B06 | 临时措施 | `containment_action` 为空 | 含 `containment_action`（API 层补） |
+| C-B05 | 已验证 | `capa_verified=False` | 含 `capa_verified`。⚠️ 复检 `pass` 会自动置位，需显式经 `/capa` 传 `verified=false` 才能构造 |
+| C-B06 | 临时措施 | `containment_action` 为空 | 含 `containment_action`（API 层补）。**界面可复现**：复检卡片「补填整改措施」就地补齐 |
 
 ### 5.3 失败（叠加 + 状态守卫）
 
 | ID | 场景 | 预期 |
 | --- | --- | --- |
-| C-F01 | 无复检 + 未勾验证 + 临时措施为空 | `409 {"error": "close_conditions_unmet", "missing": ["reinspection_record", "capa_verified", "containment_action"]}`（**一次全列**） |
-| C-F02 | 复检已有但未勾验证、临时措施已填 | `409 … "missing": ["capa_verified"]` |
+| C-F01 | 无复检 + 已验证未置位 + 临时措施为空 | `409 {"error": "close_conditions_unmet", "missing": ["reinspection_record", "capa_verified", "containment_action"]}`（**一次全列**） |
+| C-F02 | 复检 `pass`（已验证自动置位）但临时措施为空 | `409 … "missing": ["containment_action"]`（实测） |
 | C-F03 | 异常状态为 `new` | `409 {"error": "incident_not_closeable", "status": "new"}` |
 | C-F04 | 异常状态为 `isolated` | `409 {"error": "incident_not_closeable", "status": "isolated"}` |
 | C-F05 | 异常状态为 `assigned` | `409 {"error": "incident_not_closeable", "status": "assigned"}` |
 | C-F06 | 异常状态为 `rejected` | `409 {"error": "incident_not_closeable", "status": "rejected"}` |
 | C-F07 | 批次已 `archived` | `409 {"error": "batch archived, terminal state"}` |
 
-### 5.4 CAPA 的「已验证」门禁（L3）
+### 5.4 CAPA 字段语义与「已验证」门禁（L3）
+
+**2026-10-15 起 `POST /capa` 的三个字段缺省语义是「不改」，不是「清空」**（`IncidentCapa`）：
+
+| 字段 | 类型 | 缺省行为 |
+| --- | --- | --- |
+| `confirmed_root_cause` | `str` | 必填，直接写 |
+| `corrective_action` | `str` | 必填，直接写 |
+| `containment_action` | `str \| None` | 缺省 **不改**；传值则 `strip()` 后写入 |
+| `verified` | `bool \| None` | 缺省 **不改**；传值则写入 |
+
+> 这个「缺省 = 不改」是必须的：复检通过后 `capa_verified` 由系统自动置位，若按 pydantic 默认值写 `false`，一次「只补临时措施」的更新就会把已验证洗掉，关闭条件重新变缺 —— 前端漏传一个字段即复发卡死。
 
 | ID | 场景 | 输入 | 预期 |
 | --- | --- | --- | --- |
 | C-V01 | `verified=True` 但无复检记录 | `POST /capa`，`verified=true` | `400 {"error": "capa_verified_requires_pass_reinspection"}` |
 | C-V02 | `verified=True` 且复检 `fail` | 同上 | 同上 400 |
 | C-V03 | `verified=True` 且复检 `pass` | 同上 | `200` |
-| C-V04 | `verified=False` | 同上，先不勾 | `200`（允许先填字段，后补勾） |
-| C-V05 | 异常 `pending_recheck` 态补勾 | 复检已有且 `pass` | `200`，无状态转移（只更新字段） |
+| C-V04 | `verified=False` | 显式传 `false` | `200`（允许人工否决自动置位） |
+| C-V05 | 异常 `pending_recheck` 态更新 | 复检已有且 `pass`，只传三个文本字段、**不带 `verified`** | `200`，无状态转移；**`capa_verified` 保持 `true`**（实测） |
+| C-V06 | 异常 `assigned` 态首次填报 | 带 `containment_action` | `200`；异常与批次同事务转 `pending_recheck` |
 
 ---
 
@@ -395,8 +407,19 @@ BASE = {"sn": "SN-X", "project": "P-DEFAULT", "grade": "A", "captured_date": "20
 | RS-B05 | 异常状态为 `closed` | `409 {"error": "incident_not_reinspectable", "status": "closed"}` |
 | RS-B06 | `result="fail"`，异常在 `pending_recheck` | `201`；异常 → `rejected`；批次 → `rejected` |
 | RS-B07 | **`result="fail"`，异常仍在 `assigned`** | **`409 {"error": "incident_transition_denied", "reason": "no transition incident:assigned -> rejected (skip/invalid)"}`** —— 必须先经 `pending_recheck` |
-| RS-B08 | `result="pass"` | `201`，`passed=true`；异常与批次状态**不变**（关闭是后续人工动作） |
+| RS-B08 | `result="pass"` | `201`，`passed=true`；异常与批次**状态不变**（关闭是后续人工动作）；**但 `capa_verified` 被自动置为 `true`**（见 RS-N03） |
 | RS-B09 | 复检写回 `verification_id` | 复检行独立落库，`module_inspections` 原值不变 |
+
+### 6.3 复检通过自动置位「已验证」（2026-10-15）
+
+| ID | 输入 | 预期 |
+| --- | --- | --- |
+| RS-N03 | `result="pass"` | `capa_verified` 由 `false` → **`true`**；轨迹 `params_summary` 记 `"capa_verified": true`，事后可分清是「复检自动落位」还是「人工 `/capa` 声明」 |
+| RS-N04 | `result="fail"` | `capa_verified` **不变**（轨迹记 `"capa_verified": false`） |
+| RS-N05 | 已自动置位后再 `POST /capa` 补临时措施（不带 `verified`） | `capa_verified` **仍为 `true`**（缺省 = 不改，实测） |
+| RS-N06 | 人工经 `POST /capa` 显式传 `verified=false` | `capa_verified` → `false`（工程师仍可否决） |
+
+> **这不是新增的自动放行**：L3 门禁本就规定 `verified=true` 必须先有通过的复检记录，该标记从来只是对「复检已通过」的重述，不是独立判断。真正的最终签署仍是 `close`（五条件校验）。
 
 ---
 
@@ -522,13 +545,13 @@ BASE = {"sn": "SN-X", "project": "P-DEFAULT", "grade": "A", "captured_date": "20
 | 抽样 `iso_lookup`/`freeze` | S-N01..06 | S-B01..12 | S-F01..05 | 23 |
 | 状态机 `transition()` | T-N01..09 | T-B01..05 | T-F01..07 | 21 |
 | 放行 `assert_release()` | R-N01 | R-B01..12 | R-F01..05 | 18 |
-| 关闭 `close_incident()` | C-N01 | C-B01..06 | C-F01..07 + C-V01..05 | 19 |
-| 复检范围 | RS-N01..02 | RS-B01..09 | — | 11 |
+| 关闭 `close_incident()` | C-N01 | C-B01..06 | C-F01..07 + C-V01..06 | 20 |
+| 复检范围 | RS-N01..06 | RS-B01..09 | — | 15 |
 | 复检结论 | RC-N01..03 | RC-B01..08 | RC-A01..06 | 17 |
 | API 守卫 | G-N01..05 | G-B01..08 | G-F01..16 | 29 |
 | AI 归因端点 | G-A01..04 | G-A05..09 | G-A10..11 | 11 |
 
-**合计：正常 44 / 边界 87 / 失败 56 = 187 条针对性用例。**
+**合计：正常 48 / 边界 87 / 失败 56 = 191 条针对性用例。**
 
 ### 9.2 转写建议
 
@@ -554,3 +577,6 @@ BASE = {"sn": "SN-X", "project": "P-DEFAULT", "grade": "A", "captured_date": "20
 | 无第 2 轮抽样结论的用例 | 已补 §7（`materialize_remediation_conclusion` + `/recheck`） | 抽样 fail 批次能否放行的关键 |
 | 无 `/api/batches/{id}/recheck` 端点 | 已存在（`app/api/release.py`） | 见 RC-A01..06 |
 | 无「isolated 批次取放行报告」用例 | 实测 `409 release_report_requires_released_batch` | 见 G-F03 |
+| `verified` 是「人工独立判断」，复检通过≠已验证 | 2026-10-15 起复检 `result=pass` **自动置位** `capa_verified`；`IncidentCapa.verified` 改为 `bool \| None`，缺省 = 不改 | 见 §5.4、§6.3；旧用例「复检过但未勾验证 → 缺 `capa_verified`」在界面上已不可复现 |
+| `containment_action` 只在指派时可填 | 指派端点只接受 `isolated`，而 close 硬要求它非空 —— 漏填则异常永远关不掉。现 `/capa` 接受该字段，复检卡片提供「补填整改措施」 | 见 C-B06、C-F02、C-V06 |
+| 「确认关闭异常」在异常处置节点 | 2026-10-15 起前移到**复检节点**（复检通过后原地签署）；异常节点对 `pending_recheck` 只留前向提示 | 见 01 文档 C4 第 8 步 |

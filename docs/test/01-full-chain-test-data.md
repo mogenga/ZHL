@@ -84,14 +84,16 @@ new → isolated → assigned → pending_recheck → closed
 
 **批次-异常联动（实测）**：`close` 只在**该批次全部异常都处于终态**时才把批次推到 `pending_release`；否则批次停在 `pending_recheck`。
 
+**闭环动作都发生在当前节点（2026-10-15 起）**：复检通过 → 后端自动置位「整改措施已验证」→ **在复检节点直接点「确认关闭异常」**。链路只往后推，不回异常处置节点补勾。
+
 | # | 链路 | 触发数据 | 批次终态 | 异常终态 |
 | --- | --- | --- | --- | --- |
 | C1 | 正常放行 | 10 SN 全 Pass | `archived` | 无 |
 | C2 | 功率边界 Pass | `pmax = 533.5` | `pending_release` | 无 |
 | C3 | 功率边界 Fail / 越档 Fail | `pmax = 533.4`；`im = 16.5` | `isolated` | `new`（自动） |
-| C4 | 完整闭环：归因→复检→放行 | `im = 16.5` 越档 | `archived` | `closed` |
+| C4 | 完整闭环：归因→复检→关闭→放行 | `im = 16.5` 越档 | `archived` | `closed` |
 | C5 | 复检失败 → 拒绝 | 复检 `result=fail` | `archived`（经 `rejected`） | `rejected` |
-| C6 | 关闭五条件逐项缺失 | 逐项不满足 | 不变 | 不变 |
+| C6 | 关闭条件缺失与就地补齐 | 逐项不满足 | 不变 | 不变 |
 | C7 | 多异常批次联动 | 同批 2 只异常 | 最后一只关闭后才 `pending_release` | `closed`×2 |
 | C8 | 归档只读 | 已 `archived` | `archived` | — |
 | C9 | 跨批同 SN 一致性 | 两批同 SN | 第二批 `pending_intake` | `data_consistency` / critical |
@@ -319,11 +321,10 @@ report_api / pass
 | 2 | 同卡片 → 点「**AI 归因**」 | 无 | 按钮位置变成「AI 归因中，正在调用模型，请稍候（约 1 分钟）…」（真模型需等约 1 分钟；Mock 秒回）<br>随后弹出「AI 归因 · xxxxxxxx」窗，列出**带单选按钮**的假设列表 |
 | 3 | 在归因弹窗里选一条假设 | 点第 1 条的单选按钮 | 底部文本框自动填入这条假设的原文 |
 | 4 | 点主按钮「**采纳选中假设**」 | 无 | 该弹窗关闭，卡片上出现「已采纳假设 #1：…」；toast「已记录归因决定：采纳」<br>卡片「确认根因」一行显示被采纳的假设原文 |
-| 5 | 同卡片 → 点「**指派责任人**」 | 责任人 `ZHL-QA`<br>处置期限 `2026-06-10T17:00`（任意今天之后的）<br>临时措施 `隔离该组件并暂停该工位投料` | 异常 → **已指派**；批次 → **处置中** |
-| 6 | 同卡片 → 点「**填报整改措施**」 | 确认根因 `电芯失配致 Impp 越档`（若第 4 步已采纳，这里已预填）<br>纠正措施 `更换主电芯并复测`<br>**不勾**「已验证」 | 异常 → **待复检**；批次 → **待复检**<br>（不勾是因为此时还没有通过的复检记录，勾了会被 400 拒绝） |
-| 7 | 流水线节点「**复检**」→ 点该异常的「录入复检」 | 复检组件 = `SN-I-OODB`<br>结果 = `通过`<br>Pmax `550.0` / Temp `25.0` / Isc `10.5` / Voc `48.0` / Vm `40.0` / Im `13.0` / Ff `0.80`<br>执行人 `ZHL-QA`<br>执行时间 `2026-06-02T10:00`<br>范围 = `最小集` | toast「复检通过，请在异常卡片补勾整改措施已验证后确认关闭」<br>`scope_sns` 服务端自动填为该异常的全部受影响 SN（本例 `["SN-I-OODB"]`） |
-| 8 | 回「异常」tab → 同卡片 → 点「**补勾整改措施已验证**」 | 确认根因 / 纠正措施保持第 6 步的值<br>**勾选**「已验证（需已有通过的复检记录）」 | 异常保持 **待复检**；toast「整改措施已更新」 |
-| 9 | 同卡片 → 点「**确认关闭异常**」 | 无 | 异常 → **已关闭**；批次 → **待放行**；toast「异常已关闭，批次转待放行」 |
+| 5 | 同卡片 → 点「**指派责任人**」 | 责任人 `ZHL-QA`<br>处置期限 `2026-06-10T17:00`（任意今天之后的）<br>临时措施 `隔离该组件并暂停该工位投料`（**建议此时就填**：它是关闭条件之一，虽然指派时选填、可在复检节点补填，但先填省一步） | 异常 → **已指派**；批次 → **处置中** |
+| 6 | 同卡片 → 点「**填报整改措施**」 | 确认根因 `电芯失配致 Impp 越档`（若第 4 步已采纳，这里已预填）<br>纠正措施 `更换主电芯并复测`<br>临时措施（若第 5 步已填则预填） | 异常 → **待复检**；批次 → **待复检**<br>表单里**没有**「已验证」勾选项：此时还没有复检记录，该标记由复检通过自动置位（见第 7 步） |
+| 7 | 流水线节点「**复检**」→ 点该异常的「录入复检」 | 复检组件 = `SN-I-OODB`<br>结果 = `通过`<br>Pmax `550.0` / Temp `25.0` / Isc `10.5` / Voc `48.0` / Vm `40.0` / Im `13.0` / Ff `0.80`<br>执行人 `ZHL-QA`<br>执行时间 `2026-06-02T10:00`<br>范围 = `最小集` | toast「**复检通过，整改措施已标记为已验证，请确认关闭异常**」<br>`scope_sns` 服务端自动填为该异常的全部受影响 SN（本例 `["SN-I-OODB"]`）<br>卡片头变为「**复检已录入 · 整改措施已验证**」 |
+| 8 | **仍在复检节点**，点该卡片的「**确认关闭异常**」 | 无 | 异常 → **已关闭**；批次 → **待放行**；toast「异常已关闭，批次转待放行」；签署完这张卡从复检列表消失 |
 | 10 | 流水线节点「**放行**」 | 点「确认放行」→ 批准人 `ZHL-ENG` | 7 项断言全 ✓ → 批次 **已放行** |
 | 11 | 批次头「生成报告」 | 报告类型 `放行报告` | 报告 v1；批次 **已归档** |
 | 12 | 「报告」tab → 点该报告 | — | 判定统计 `decision_counts: {"pass": 1, "fail": 1}`<br>抽样结论含**两轮**：`sample_round: 2 … "result": "pass"` 与 `sample_round: 1 … "result": "fail"`<br>7 项断言全 `[PASS]`，放行结论「**通过**」 |
@@ -366,7 +367,9 @@ report_api / pass
 | 批次 | `archived` |
 | 异常 | `closed` |
 | `sample_conclusions` | `sample_round=1 result=fail`、**`sample_round=2 result=pass`** |
-| 轨迹序列 | `incident_auto` → `judge` → `incident_isolate` → `attribution`×2 → `incident_attribute` → `incident_assign` → `incident_capa` → `reinspection` → `incident_capa` → `incident_close` → `release` → `report` |
+| 轨迹序列 | `incident_auto` → `judge` → `incident_isolate` → `attribution` → `incident_attribute` → `incident_assign` → `incident_capa` → `reinspection` → `incident_close` → `release` → `report` → `report_api`（**只有一次 `incident_capa`**：复检通过后标记自动置位，不再需要回异常节点补勾） |
+| 复检轨迹 | `reinspection` 的 `params_summary` 带 `"capa_verified": true`，用于事后分清该标记是「复检自动落位」还是「人工 `/capa` 声明」 |
+| 关闭轨迹 | `incident_close` 的 `structured_output` 带 `remediation_conclusion: {"sample_round": 2, "sample_result": "pass", "written": true}` —— 第 2 轮结论就是在关闭这步落库的 |
 | 7 项断言 | `state` / `sample_passed` / `no_open_critical_incident` / `no_isolated_sn` / `all_evidence_present` / `all_capa_verified` / `reinspection_scope_covered` 全部 `True` |
 
 > **第 2 轮结论是闭环的关键。** 第 1 轮抽样是 `fail`，若没有人把「复检已通过并关闭」落成 `sample_round=2`，放行断言②（`sample_passed`）会读「最新一轮 = fail」而**永久阻断**该批次。关闭端点会在批次转入 `pending_release` 的同一事务里自动补写；对历史批次可用 C13 的 `/recheck` 手动补。
@@ -377,7 +380,7 @@ report_api / pass
 
 **目标终态**：批次 `archived`（经 `rejected`），异常 `rejected`。
 
-前置：先按 C3b 得到 `isolated` 批次，再走 C4 的第 1–6 步（隔离 → 指派 → 填报整改措施，**不勾已验证**）。
+前置：先按 C3b 得到 `isolated` 批次，再走 C4 的第 1–6 步（隔离 → 指派 → 填报整改措施）。
 
 | 步 | 点击哪里 | 输入什么 | 应看到什么 |
 | --- | --- | --- | --- |
@@ -408,11 +411,13 @@ report_api / pass
 | 1 | 异常 `new` | `409 {"error": "incident_not_closeable", "status": "new"}`（状态就不对，先隔离） |
 | 2 | 点「隔离异常」后 `isolated` | `409 {"error": "incident_not_closeable", "status": "isolated"}`（先指派） |
 | 3 | 指派后 `assigned`，未填 CAPA | `409 {"error": "incident_not_closeable", "status": "assigned"}`（先填报整改措施） |
-| 4 | 填报整改措施后 `pending_recheck`，**无复检记录**、**未勾验证**、**临时措施为空** | `409 {"error": "close_conditions_unmet", "missing": ["reinspection_record", "capa_verified", "containment_action"]}` |
-| 5 | 录入通过的复检后，仍未勾验证（临时措施已填） | `409 … "missing": ["capa_verified"]` |
-| 6 | 补勾「已验证」后再点 | `200`，异常 → **已关闭**，批次 → **待放行** |
+| 4 | 填报整改措施后 `pending_recheck`，**临时措施为空** | `409 {"error": "close_conditions_unmet", "missing": ["containment_action"]}`（复检节点「补填整改措施」就地补齐） |
+| 5 | 临时措施已填但**还没录复检** | ⚠️ **界面上没有关闭入口** —— 未录复检时复检卡片只给「录入复检」（关闭必然缺 `reinspection_record`）。此状态只能经 API 复现 |
+| 6 | 录入通过的复检后 | 复检通过会自动置位「已验证」→ 直接 `200`，异常 → **已关闭**，批次 → **待放行** |
 
-**实测确认的一组对照**：指派时临时措施留空 → 第 4/5 步的 `missing` 里会多一项 `containment_action`；把临时措施填上后该项消失。所以**第 5 步只缺 `capa_verified` 的前提是临时措施已填**。
+**实测确认**：指派时临时措施留空 → 录完通过的复检后 close 返回 `409 {"missing": ["containment_action"]}`；用复检卡片的「补填整改措施」补上后 close `200`，且**补填不会把已自动置位的 `capa_verified` 洗掉**（`verified` 字段缺省语义是「不改」）。
+
+> **2026-10-15 起界面只保留可达成的前置条件**：未录复检时**不给**关闭入口，而「已验证」由复检通过自动置位——因此 `reinspection_record` 与 `capa_verified` 两行在界面上已不可复现，仍由 `tests/e2e/test_closure.py` 逐条覆盖。界面可复现的是 `capa_fields` / `containment_action` / `original_decision_evidence`，且前两项都能在**复检卡片**用「补填整改措施」就地补齐——被阻断不等于死路。
 
 前端对 `missing` 项的中文映射（`app/static/wb/stages/incident.js::MISSING_CN`）：
 
@@ -438,7 +443,7 @@ report_api / pass
 | 1 | 「＋ 新建批次」 | 批次号 `B-20261015-007`，计划数量 `8` | 待入场 |
 | 2 | 「数据入场」→「提交送检数据」 | 粘贴两行：<br>`SN-N-001,533.4,25.0,10.5,48.0,40.0,13.0,0.80,pass`<br>`SN-N-002,550.0,25.0,10.5,48.0,40.0,16.5,0.80,pass` | 自动确认入场；判定后批次 **已隔离** |
 | 3 | 「异常」tab → 点「＋ 再建一条异常」 | 触发原因 = `外观人工触发`<br>严重度 = `轻微`<br>受影响条码（每行一个）：`SN-N-001`<br>证据引用留空 | 本批出现 **2 只**异常（1 只系统自动建的 `规则失败`，1 只手工的 `外观人工触发`） |
-| 4 | 对**第 1 只**异常依次：隔离 → 指派 → 填报整改措施（不勾验证）→ 复检节点录入 `通过`（组件选该异常对应的 SN，Pmax/Temp/… 全填标准值）→ 补勾已验证 → 确认关闭 | 见 C4 第 1–9 步 | 关闭成功，但**批次仍是「待复检」**（还有一只没关） |
+| 4 | 对**第 1 只**异常依次：隔离 → 指派 → 填报整改措施 → 复检节点录入 `通过`（组件选该异常对应的 SN，Pmax/Temp/… 全填标准值）→ 复检节点点「确认关闭异常」 | 见 C4 第 1–8 步 | 关闭成功，但**批次仍是「待复检」**（还有一只没关） |
 | 5 | 对**第 2 只**异常重复第 4 步 | 同上，组件选它自己对应的 SN | 关闭成功，**批次转「待放行」** |
 
 实测确认：关闭第 1 只 → `incident_status=closed` 但 `batch_status=pending_recheck`；关闭第 2 只（最后一只）→ `batch_status=pending_release`。
@@ -608,7 +613,9 @@ docker exec -e PGCLIENTENCODING=UTF8 zhl-pg psql -U postgres -d zhl \
 | 2 | `im = 12.0 / 14.0 / 15.5` 都判 Fail，看着像「分档边界应该过」 | **容差 `[12.35,13.65]` 与分档 `A/B` 是两把独立的尺子**，两条都要满足 | 演示越档用 `im = 16.5`；演示分档 Pass 用 `im = 13.0` |
 | 3 | 走「原始单据（AI 抽取）」通道时演示不出低置信 | 该通道逐行置信度固定 `0.9` | 低置信必须用「**已结构化数据**」+ `SN-LOW-*` |
 | 4 | 从「已指派」直接登记复检 `result=fail` 返回 409 | 异常状态机**没有 `assigned → rejected` 边** | 先「填报整改措施」把异常推到**待复检**，再登记复检 |
-| 5 | Mock 模式置信度 0.95 / 0.62，真模型下完全不一样 | 两条路径的置信度来源不同 | 验收写死数字时切 `ZHL_LLM_MODE=mock` |
+| 5 | Mock 模式置信度 0.85 / 0.62，真模型下完全不一样 | 两条路径的置信度来源不同 | 验收写死数字时切 `ZHL_LLM_MODE=mock` |
+| 5b | 复检通过后不需要（也找不到）「补勾已验证」按钮 | 2026-10-15 起复检 `result=pass` 时后端**自动置位** `capa_verified`；异常节点对 `pending_recheck` 只留前向提示 | 复检通过后直接在复检卡片点「确认关闭异常」 |
+| 5c | 「临时措施」在指派时没填，之后异常关不掉 | 关闭硬要求 `containment_action` 非空，而指派端点只接受 `isolated` 状态 | 在**复检卡片**点「补填整改措施」就地补齐；或指派时就填 |
 | 6 | 真模型下点「AI 归因」要等约 1 分钟 | 现场调用真实模型，单次 40~90 秒 | 界面已有「AI 归因中…」提示与 120s 超时；演示前先跑一次预热 |
 | 7 | 自动创建的异常「严重度」恒为「较严重」 | `ensure_incident` 自动路径固定 `major`，不自动升 critical | 需要 critical 请手工建异常并选「严重」 |
 | 8 | 报告正文的「留痕引用」显示「（无轨迹引用）」 | 报告渲染层拿到的 `trace_refs`/`evidence_refs` 为空 | 轨迹与证据可在右栏「批次轨迹」与数据库核实；不影响断言结论 |

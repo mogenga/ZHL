@@ -285,9 +285,14 @@ class QualityIncident(Base):
     verification_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("reinspections.reinspection_id")
     )
-    # PB L3: explicit engineer-declared CAPA-verified flag (reinspection pass alone
-    # does NOT imply verified — measures-effectiveness is an independent human
-    # judgement). `assert_release`'s `check_all_capa_verified` reads this.
+    # PB L3: CAPA-verified flag read by `assert_release`'s
+    # `check_all_capa_verified`. Set automatically when a passing reinspection is
+    # recorded (`app/api/reinspections.py`), since L3 already makes a passing
+    # reinspection the precondition of `verified=true`; the engineer's final
+    # signature is the close action, and `/capa` can still set it explicitly
+    # (either way) while the incident is assigned / pending_recheck.
+    # 2026-10-15 变更：原为「复检通过 ≠ 已验证，措施有效是独立人工判断」，
+    # 现按业务要求把复检通过直接落成该标记（判定依据见 reinspections.py 注释）。
     capa_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     status: Mapped[str] = mapped_column(
         SAEnum(*INCIDENT_STATUS, native_enum=False, create_type=False, length=40),
