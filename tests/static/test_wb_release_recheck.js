@@ -122,36 +122,55 @@ const CHECKS_FAIL = [
 const CHECKS_PASS = CHECKS_FAIL.map((c) => ({ ...c, passed: true, reason: '' }));
 
 function setup(checks) {
+  // 2026-10-15 起面板预检走只读的 releasePreview（GET /release-preview）；
+  // releaseBatch（POST /release）是签署端点，面板渲染**不得**碰它 ——
+  // releaseCalls 是回归哨兵：>0 即说明 probe 用法复活了。
   let releaseCalls = 0;
+  let previewCalls = 0;
   WB.api.releaseBatch = function () {
     releaseCalls++;
     return Promise.resolve({ ok: true, data: { passed: false, checks: checks } });
   };
+  WB.api.releasePreview = function () {
+    previewCalls++;
+    return Promise.resolve({ ok: true, data: { batch_id: BATCH_ID, can_release: false, checks: checks } });
+  };
   const panel = WB.stages.release.render(batch, {});
-  return flush().then(flush).then(() => ({ panel: panel, calls: () => releaseCalls }));
+  return flush().then(flush).then(() => ({
+    panel: panel,
+    calls: () => previewCalls,
+    releaseCalls: () => releaseCalls,
+  }));
 }
 
 (async function main() {
   // ---- A. 抽样结论未通过 → 出现重算入口 ----
   {
-    const { panel } = await setup(CHECKS_FAIL);
+    const { panel, releaseCalls } = await setup(CHECKS_FAIL);
     assert(!!findText(panel, '重算复检结论'),
       'A1: sample_passed 未通过 → 面板出现「重算复检结论」');
     assert(hasText(panel, 'sample result is fail, expected pass'),
       'A2: 未通过原因原样展示（不吞掉后台 reason）');
+    // P0 回归哨兵（2026-10-15）：渲染面板曾经用 POST /release +
+    // approved_by='probe' 当预检 —— 一个"只看看"的动作就把批次真放了。
+    assert(releaseCalls() === 0,
+      'A0: 渲染面板不得调用签署端点 releaseBatch（probe 预检已死）');
   }
 
-  // ---- A2. 没有抽样阻断时不出现该入口 ----
+  // ---- A2. 没有抽样阻断时不出现该入口 + P0 哨兵：面板不得调签署端点 ----
   {
     let calls = 0;
-    WB.api.releaseBatch = function () {
+    WB.api.releasePreview = function () {
       calls++;
-      return Promise.resolve({ ok: true, data: { passed: true, checks: CHECKS_PASS } });
+      return Promise.resolve({ ok: true, data: { batch_id: BATCH_ID, can_release: true, checks: CHECKS_PASS } });
     };
     const panel = WB.stages.release.render(batch, {});
     await flush(); await flush();
     assert(!findText(panel, '重算复检结论'),
       'A3: 抽样结论已通过 → 不出现重算入口（避免误触）');
+    assert(hasText(panel, '可确认放行'),
+      'A4: 全部通过 → 显示「可确认放行」');
+    assert(calls > 0, 'A5: 面板预检走 releasePreview');
   }
 
   // ---- B. 点击 → 调 /recheck；闭环成立 → 重跑前置校验 ----

@@ -46,7 +46,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.api._archival import auto_archive_if_terminal
 from app.api.guards import require_not_archived
@@ -61,7 +61,9 @@ router = APIRouter(prefix="/api/batches", tags=["release"])
 
 
 class ReleaseRequest(BaseModel):
-    approved_by: str
+    #: 签署人。放行是质量工程师的最终签署动作（FR §4.4 闭环点「系统验证前提，
+    #: 质量工程师作最终签署」），空签署人等于无人担责 —— 一律拒绝。
+    approved_by: str = Field(min_length=1)
 
 
 class ReleaseResponse(BaseModel):
@@ -69,6 +71,20 @@ class ReleaseResponse(BaseModel):
     batch_id: uuid.UUID
     status: str
     release_decision: str
+    checks: list[dict]
+
+
+class ReleasePreviewResponse(BaseModel):
+    """只读的前置校验结果（前端放行节点的面板渲染用）。
+
+    断言计算与 ``POST /release`` **共用同一装配**（``assert_batch_release``），
+    逐项结果同口径；区别只有一条：**绝不写库** —— 不发签署证据、不推进状态机、
+    不落轨迹。此前前端面板拿 ``POST /release`` 当预检用（``approved_by='probe'``），
+    一个"只看看"的渲染动作就能真的放行批次并把 ``probe`` 写成签署人。
+    """
+
+    batch_id: uuid.UUID
+    can_release: bool
     checks: list[dict]
 
 
@@ -104,10 +120,44 @@ SessionDep = Annotated[Any, Depends(get_session)]
 # --- endpoint ---------------------------------------------------------------
 
 
+@router.get("/{batch_id}/release-preview", response_model=ReleasePreviewResponse)
+def release_preview(batch_id: uuid.UUID, session: SessionDep) -> ReleasePreviewResponse:
+    """只读前置校验：算七项断言，但**不写任何东西**。
+
+    前端放行节点的面板用它渲染「当前能不能放、哪几项没过」。与
+    ``POST /release`` 共用 ``assert_batch_release`` 这一份装配，逐项结果
+    同口径 —— 但这里没有签署人、没有证据行、没有状态机推进，渲染一个
+    页面不可能变成一次放行（2026-10-15 P0：面板 probe 调用把批次真放了）。
+
+    404 / 归档 409 与放行端点一致；非 ``pending_release`` 状态**不是**
+    409 —— 预检要在任意状态下都能回答"现在为什么还不能放"，返回
+    ``can_release=false`` 加逐项原因即可。
+    """
+    batch = session.get(DeliveryBatch, batch_id)
+    if batch is None:
+        raise HTTPException(status_code=404, detail="batch_not_found")
+    require_not_archived(batch_id, session)
+
+    result = assert_batch_release(session, batch)
+    return ReleasePreviewResponse(
+        batch_id=batch_id,
+        can_release=result.passed,
+        checks=[{"name": c.name, "passed": c.passed, "reason": c.reason} for c in result.checks],
+    )
+
+
 @router.post("/{batch_id}/release", response_model=ReleaseResponse)
 def release_batch(
     batch_id: uuid.UUID, payload: ReleaseRequest, session: SessionDep
 ) -> ReleaseResponse:
+    # 签署人必须是真的名字：min_length 拦不住纯空白，这里显式 strip（422 与
+    # pydantic 校验失败同形，前端 errText 统一按「参数不正确」呈现）。
+    if not payload.approved_by.strip():
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "approved_by_required", "hint": "放行必须留下签署人"},
+        )
+    approved_by = payload.approved_by.strip()
     batch = session.get(DeliveryBatch, batch_id)
     if batch is None:
         raise HTTPException(status_code=404, detail="batch_not_found")
@@ -130,18 +180,18 @@ def release_batch(
         # All-pass: write release evidence + transition + trace in one tx.
         # C8: content_hash is a real sha256 over the canonical JSON of the
         # evidence content (sort_keys=True for stability) — not a random uuid.
-        _release_content = {"approved_by": payload.approved_by, "assertions": result.to_dict()}
+        _release_content = {"approved_by": approved_by, "assertions": result.to_dict()}
         _release_hash = hashlib.sha256(
             json.dumps(_release_content, ensure_ascii=False, sort_keys=True).encode("utf-8")
         ).hexdigest()
         release_ev = Evidence(
             evidence_id=uuid.uuid4(),
             evidence_type="human_confirmation",
-            object_ref={"kind": "batch", "id": batch.batch_no, "approved_by": payload.approved_by},
+            object_ref={"kind": "batch", "id": batch.batch_no, "approved_by": approved_by},
             content_hash=f"sha256:{_release_hash}",
             content=_release_content,
             generated_at=datetime.now(UTC),
-            generated_by=payload.approved_by,
+            generated_by=approved_by,
         )
         session.add(release_ev)
         session.flush()  # 先把证据行落库，release_evidence_id 外键才指向存在的证据
@@ -155,7 +205,7 @@ def release_batch(
             skill_name="release",
             input_ref={"kind": "batch", "id": batch.batch_no},
             plugins_invoked=["assert_release"],
-            params_summary={"approved_by": payload.approved_by, "assertions_passed": True},
+            params_summary={"approved_by": approved_by, "assertions_passed": True},
             model_version=None,
             structured_output={"status": "released"},
             validation_result="pass",
@@ -184,7 +234,7 @@ def release_batch(
         skill_name="release",
         input_ref={"kind": "batch", "id": batch.batch_no},
         plugins_invoked=["assert_release"],
-        params_summary={"approved_by": payload.approved_by, "assertions_passed": False},
+        params_summary={"approved_by": approved_by, "assertions_passed": False},
         model_version=None,
         structured_output={
             "status": "pending_release",
