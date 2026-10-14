@@ -156,9 +156,15 @@ class BatchView:
 
 @dataclass(frozen=True)
 class SampleView:
-    """Latest sampling conclusion for a batch (None when sampling disabled)."""
+    """Latest sampling conclusion for a batch.
 
-    result: str = "pass"
+    ``result`` defaults to ``""`` (not ``"pass"``): there is no such thing as
+    a *default* sampling conclusion. A batch with no conclusion — or one the
+    caller could not resolve — must fail ``check_sample_passed``, never pass
+    it by omission (D9: no silent default release).
+    """
+
+    result: str = ""
     inspection_type: str = ""
     rule_version_id: str = ""
     sample_round: int = 1
@@ -232,6 +238,10 @@ class ReinspectionScopeIn:
     inspection_type: str
     inspection_level: str
     aql: float
+    #: 非空表示"这条 scope 的 ISO 组合没能从规则方案解析出来"（规则 sample_plan
+    #: 缺项 / 无对应抽样方案）。不许用兜底值造一个假组合去查表——那会让检查
+    #: 自证通过；由 check_reinspection_scope_covered 原样报为 Fail 原因。
+    plan_error: str = ""
 
 
 # ---------------------------------------------------------------------------

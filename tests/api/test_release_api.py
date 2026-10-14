@@ -74,6 +74,10 @@ def _mk_ins(session: Any, iid: UUID, sn: str, pmax: float) -> ModuleInspection:
     return ins
 
 
+#: 生产形状的规则抽样方案（001_init.sql 种子：iv / normal / AQL 1.0）。
+_DEFAULT_PLAN = {"inspection_type": "iv", "inspection_level": "normal", "aql": 1.0}
+
+
 def _seed(
     session: Any,
     *,
@@ -82,6 +86,12 @@ def _seed(
     reinspection_present: bool = True,
     sample_result: str = "pass",
     incident_status: str = "pending_recheck",
+    sample_plan: dict | None = None,
+    with_conclusion: bool = True,
+    conclusion_inspection_type: str = "iv",
+    evidence_object_ref: dict | None = None,
+    iso_rows: list[tuple] | None = None,
+    planned_quantity: int = 3,
 ) -> dict[str, Any]:
     rule = QualityRuleVersion(
         rule_version_id=_RULE,
@@ -92,7 +102,7 @@ def _seed(
         power_tolerance=0.5,
         parameter_standards={},
         current_bands={},
-        sample_plan={},
+        sample_plan=dict(_DEFAULT_PLAN if sample_plan is None else sample_plan),
         effective_at=_TS,
         version_no=1,
     )
@@ -101,7 +111,7 @@ def _seed(
         batch_no="B-REL-001",
         project_id="P-1",
         model="JH-550W",
-        planned_quantity=3,
+        planned_quantity=planned_quantity,
         rule_version_id=_RULE,
         status="pending_release",
     )
@@ -111,7 +121,11 @@ def _seed(
     ev = Evidence(
         evidence_id=_EV1,
         evidence_type="decision_snapshot",
-        object_ref={"kind": "batch", "id": "B-REL-001"},
+        object_ref=(
+            {"kind": "batch", "id": "B-REL-001"}
+            if evidence_object_ref is None
+            else dict(evidence_object_ref)
+        ),
         content_hash="sha256:222",
         generated_at=_TS,
         generated_by="test",
@@ -119,7 +133,7 @@ def _seed(
     conclusion = SampleConclusion(
         conclusion_id=_CONC1,
         batch_id=_BATCH,
-        inspection_type="module",
+        inspection_type=conclusion_inspection_type,
         rule_version_id=_RULE,
         sample_round=1,
         n=3,
@@ -128,16 +142,22 @@ def _seed(
         result=sample_result,
         evidence_id=_EV1,
     )
-    iso = IsoSamplingRow(
-        inspection_type="module",
-        inspection_level="full",
-        aql=0.65,
-        lot_size_min=1,
-        lot_size_max=100,
-        n=3,
-        ac=0,
-        re=1,
-    )
+    # ISO 行按规则 sample_plan 的真实组合（iv / normal / AQL 1.0）落库；测试
+    # 不再靠"实现里硬编码的 combo"来配套，否则实现写死什么测试就跟着塞什么。
+    iso_rows = iso_rows if iso_rows is not None else [("iv", "normal", 1.0, 1, 100, 3, 0, 1)]
+    iso_objs = [
+        IsoSamplingRow(
+            inspection_type=t,
+            inspection_level=lvl,
+            aql=aql,
+            lot_size_min=lo,
+            lot_size_max=hi,
+            n=n,
+            ac=ac,
+            re=re,
+        )
+        for (t, lvl, aql, lo, hi, n, ac, re) in iso_rows
+    ]
     incident = QualityIncident(
         incident_id=_INC,
         batch_id=_BATCH,
@@ -151,7 +171,9 @@ def _seed(
         corrective_action="replace lead cell",
         capa_verified=incident_capa_verified,
     )
-    session.add_all([rule, batch, ins1, ins2, ins3, ev, conclusion, iso, incident])
+    session.add_all([rule, batch, ins1, ins2, ins3, ev] + iso_objs + [incident])
+    if with_conclusion:
+        session.add(conclusion)
     session.add(IncidentSnLink(incident_id=_INC, inspection_id=_INSP1))
     session.add(IncidentSnLink(incident_id=_INC, inspection_id=_INSP2))
     session.add(IncidentSnLink(incident_id=_INC, inspection_id=_INSP3))
@@ -307,3 +329,137 @@ def test_release_evidence_hash_is_stable_real_sha256(api_client: Any) -> None:
         json.dumps(ev.content, ensure_ascii=False, sort_keys=True).encode("utf-8")
     ).hexdigest()
     assert digest == digest2
+
+
+# ---------------------------------------------------------------------------
+# B1 回归：放行口径不得"看着在检查、实际不生效"
+# ---------------------------------------------------------------------------
+
+
+def test_item2_no_sample_conclusion_blocks(api_client: Any) -> None:
+    """断言②：批次没有抽样结论时不得默认通过。
+
+    ``_latest_sample`` 原本在查不到结论时返回 ``SampleView(result="pass")``
+    —— "没抽样"被当成"抽样合格"，等于放行闸门缺一环。
+    """
+    client, session, _ = api_client
+    _seed(session, with_conclusion=False)
+    resp = client.post(f"/api/batches/{_BATCH}/release", json={"approved_by": "ZHL-ENG"})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    by_name = {c["name"]: c for c in body["checks"]}
+    assert by_name["sample_passed"]["passed"] is False
+    assert by_name["sample_passed"]["reason"]
+    assert body["passed"] is False
+    assert session.get(DeliveryBatch, _BATCH).status == "pending_release"
+
+
+def test_item2_conclusion_of_another_inspection_type_does_not_count(api_client: Any) -> None:
+    """断言②：只认批次规则抽样类型的结论。
+
+    别类型（visual）的合格结论、且 sample_round 更大，不能被当成"最新结论"
+    —— 这正是 ``SampleRepository.get_latest_conclusion`` 强制要求
+    ``inspection_type`` 的原因，放行端点不得绕开它。
+    """
+    client, session, _ = api_client
+    _seed(session, with_conclusion=False)
+    session.add(
+        SampleConclusion(
+            conclusion_id=UUID("eeeeeeee-1111-2222-3333-44444444440a"),
+            batch_id=_BATCH,
+            inspection_type="visual",
+            rule_version_id=_RULE,
+            sample_round=9,
+            n=3,
+            ac=0,
+            re=1,
+            result="pass",
+            evidence_id=_EV1,
+        )
+    )
+    session.commit()
+    body = client.post(f"/api/batches/{_BATCH}/release", json={"approved_by": "ZHL-ENG"}).json()
+    by_name = {c["name"]: c for c in body["checks"]}
+    assert by_name["sample_passed"]["passed"] is False
+    assert body["passed"] is False
+
+
+def test_item5_evidence_without_anchor_blocks(api_client: Any) -> None:
+    """断言⑤：没有锚点（object_ref 为空）的证据行不算"证据齐备"。
+
+    原来的 ``all(e.evidence_id for e in evidence)`` 对主键取真值判断，恒为
+    真；"证据齐备"实际退化成"列表非空"。证据必须能指回它证明的对象。
+    """
+    client, session, _ = api_client
+    _seed(session, evidence_object_ref={})
+    body = client.post(f"/api/batches/{_BATCH}/release", json={"approved_by": "ZHL-ENG"}).json()
+    by_name = {c["name"]: c for c in body["checks"]}
+    assert by_name["all_evidence_present"]["passed"] is False
+    assert body["passed"] is False
+
+
+def test_item7_uses_rule_sample_plan_and_passes(api_client: Any) -> None:
+    """断言⑦：ISO 查询参数取自批次规则的 sample_plan，生产形状下必须能解析。
+
+    种子库的 ISO 表只有 ``normal`` 级别（001_init.sql），而实现原来硬编码
+    ``inspection_level="full"`` —— 生产里查不到任何行。这里用生产形状
+    （iv / normal / AQL 1.0）就能过。
+    """
+    client, session, _ = api_client
+    _seed(session)  # 默认即生产形状
+    body = client.post(f"/api/batches/{_BATCH}/release", json={"approved_by": "ZHL-ENG"}).json()
+    by_name = {c["name"]: c for c in body["checks"]}
+    assert by_name["reinspection_scope_covered"]["passed"] is True, by_name[
+        "reinspection_scope_covered"
+    ]["reason"]
+    assert body["passed"] is True
+
+
+def test_item7_does_not_resolve_against_a_different_iso_level(api_client: Any) -> None:
+    """断言⑦：表里"碰巧有别的级别/AQL 的行"不算解析成功。
+
+    只给 (iv, full, AQL 0.65) 这类与规则方案不符的行时，ISO 必须解析失败
+    —— 这正是旧实现配的那条假行；留下它，检查就变成了自证。
+    """
+    client, session, _ = api_client
+    _seed(session, iso_rows=[("iv", "full", 0.65, 1, 100, 3, 0, 1)])
+    body = client.post(f"/api/batches/{_BATCH}/release", json={"approved_by": "ZHL-ENG"}).json()
+    by_name = {c["name"]: c for c in body["checks"]}
+    item7 = by_name["reinspection_scope_covered"]
+    assert item7["passed"] is False
+    assert "ISO" in item7["reason"]
+
+
+def test_item7_fails_closed_when_rule_sample_plan_is_incomplete(api_client: Any) -> None:
+    """断言⑦：规则没配抽样方案时不得静默放行（D9：缺规则即异常）。
+
+    原来实现用 ``iso_rows[0].aql`` + 硬编码 "full" 兜底，恰好掩盖了规则
+    缺失。现在必须指名"规则方案缺项"。
+    """
+    client, session, _ = api_client
+    _seed(session, sample_plan={})
+    body = client.post(f"/api/batches/{_BATCH}/release", json={"approved_by": "ZHL-ENG"}).json()
+    by_name = {c["name"]: c for c in body["checks"]}
+    item7 = by_name["reinspection_scope_covered"]
+    assert item7["passed"] is False
+    assert "sample_plan" in item7["reason"] or "抽样" in item7["reason"]
+    assert body["passed"] is False
+
+
+def test_item7_lot_size_is_the_batch_lot_not_the_reinspected_count(api_client: Any) -> None:
+    """断言⑦：查 ISO 的 lot_size 是批次批量，不是"本次复检覆盖了几只"。
+
+    原实现 ``lot_size=len(actual_sns) or 1``：批次计划 50 只、复检只覆盖 3 只
+    时，lot 被当成 3，于是按错误的批量区间去匹配 ISO 行。
+    """
+    client, session, _ = api_client
+    _seed(
+        session,
+        planned_quantity=50,
+        iso_rows=[("iv", "normal", 1.0, 26, 50, 32, 1, 2)],
+    )
+    body = client.post(f"/api/batches/{_BATCH}/release", json={"approved_by": "ZHL-ENG"}).json()
+    by_name = {c["name"]: c for c in body["checks"]}
+    item7 = by_name["reinspection_scope_covered"]
+    assert item7["passed"] is True, item7["reason"]
+    assert body["passed"] is True

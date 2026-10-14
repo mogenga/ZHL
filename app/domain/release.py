@@ -38,13 +38,19 @@ def check_state(batch: BatchView) -> AssertionCheck:
 
 
 def check_sample_passed(sample: SampleView) -> AssertionCheck:
-    """② latest sampling conclusion must be pass."""
+    """② latest sampling conclusion must be pass.
+
+    A missing conclusion (``result`` empty) is a Fail, not a pass by default:
+    "no sampling happened" must never read as "sampling passed".
+    """
     passed = sample.result == "pass"
-    return AssertionCheck(
-        name="sample_passed",
-        passed=passed,
-        reason="" if passed else f"sample result is {sample.result}, expected pass",
-    )
+    if passed:
+        reason = ""
+    elif not sample.result:
+        reason = f"no sampling conclusion for inspection_type {sample.inspection_type or '?'}"
+    else:
+        reason = f"sample result is {sample.result}, expected pass"
+    return AssertionCheck(name="sample_passed", passed=passed, reason=reason)
 
 
 def check_no_open_critical_incident(incidents: list[IncidentView]) -> AssertionCheck:
@@ -72,9 +78,27 @@ def check_no_isolated_sn(isolated_sns: list[str]) -> AssertionCheck:
 
 
 def check_all_evidence_present(evidence: list[EvidenceView]) -> AssertionCheck:
-    """⑤ required evidence is present and non-empty."""
-    passed = bool(evidence) and all(e.evidence_id for e in evidence)
-    reason = "" if passed else "missing required evidence"
+    """⑤ required evidence is present, identified, and anchored.
+
+    "Present and non-empty" bites on two things a stored row must have to be
+    usable as audit evidence: an identifier, and an ``object_ref`` telling
+    what it attests to. The previous ``all(e.evidence_id ...)`` tested a
+    primary key for truthiness — always true — so the check degenerated into
+    "the list is non-empty".
+    """
+    if not evidence:
+        return AssertionCheck(
+            name="all_evidence_present", passed=False, reason="missing required evidence"
+        )
+    unanchored = [
+        e.evidence_id or "<no-id>" for e in evidence if not e.evidence_id or not e.object_ref
+    ]
+    passed = not unanchored
+    reason = (
+        ""
+        if passed
+        else "evidence not traceable to an object (missing id/object_ref): " + ", ".join(unanchored)
+    )
     return AssertionCheck(name="all_evidence_present", passed=passed, reason=reason)
 
 
@@ -135,8 +159,13 @@ def check_reinspection_scope_covered(
                     f"{sorted(required_set)}; missing {missing_sorted}"
                 )
 
-    # 2. ISO lookup must resolve for every provided row.
+    # 2. ISO lookup must resolve for every provided row. A row whose combo could
+    #    not be resolved from the batch's rule plan is a rule gap, reported as
+    #    such rather than papered over with a made-up combo.
     for row in reinspection_scopes:
+        if row.plan_error:
+            problems.append(f"incident {row.incident_id}: {row.plan_error}")
+            continue
         result = iso_lookup(
             row.inspection_type,
             row.inspection_level,
@@ -198,17 +227,17 @@ def assert_release(
         # Legacy self-referential mode (Phase 0 backward compatibility):
         # build required_by_incident from the scope rows themselves.
         #
-        # Known limitation (H-3, review 2026-10-12): in this mode an open
-        # incident with NO reinspection scope row gets an empty required set
-        # (``required_by_incident[inc_id] = ()`` below). check_reinspection_
-        # scope_covered short-circuits ``if required_sns:`` for an empty
-        # tuple, so "no reinspection at all" does NOT fail item 7 here — the
-        # open incident with zero coverage is silently treated as covered.
+        # Scope of the gap in this mode (H-3, review 2026-10-12; corrected
+        # 2026-10-14 — the original note described a hole that is already
+        # closed): the required set is derived from the scope rows, so the
+        # subset check at ``if required_sns:`` is self-referential and cannot
+        # detect partial coverage. What IS detected is the "no reinspection
+        # at all" case: an open incident absent from ``required_by_incident``
+        # is entered below as an empty tuple, and check_reinspection_scope_
+        # covered fails it on ``if not rows`` before the subset check runs.
         # The authoritative ``required_sns`` mode (Task 8 release API, fed
-        # from incident_sn_links) is the correct path and always names the
-        # gap. Legacy mode is retained only for Phase 0 backward
-        # compatibility; callers that want item 7 to catch missing
-        # reinspection coverage MUST pass ``required_sns``.
+        # from incident_sn_links) is the correct path and additionally names
+        # which SNs are missing.
         required_by_incident = {}
         for row in reinspection_scopes:
             required_by_incident.setdefault(row.incident_id, ())

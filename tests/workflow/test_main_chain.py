@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
 
+import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
@@ -227,6 +228,9 @@ def _make_env(
         model=_SEED["model"],
         planned_quantity=lot,
         rule_version_id=rule.rule_version_id,
+        # 生产路径里批次由 BatchRepository.create_batch 落库、随即由
+        # create_batch 端点推进到 pending_intake；入场守卫要求的就是这个状态。
+        status="pending_intake",
     )
     s.add(batch)
     s.flush()
@@ -492,3 +496,80 @@ def test_thread_isolation() -> None:
     assert state_a["decision"]["result"] == "Pass"
     # B has not reached judge yet:
     assert not snap_b.values.get("decision") or not snap_b.values.get("decision", {}).get("result")
+
+
+# ---------------------------------------------------------------------------
+# B2 回归：状态机拒绝时不得照样写状态
+# ---------------------------------------------------------------------------
+
+
+def test_advance_batch_refuses_when_the_state_machine_denies() -> None:
+    """状态机不接受时，批次状态必须原样不动。
+
+    原 ``batch_transition_node`` 调完 ``transition()`` 不检查 ``accepted``，
+    直接 ``batch.status = target``；两次 transition 都被拒也照写 ——
+    "状态机是唯一权威"被绕过，已放行/已归档批次可被改回隔离或待放行。
+    """
+    from app.infra.models import DeliveryBatch
+    from app.workflow.main_chain import advance_batch
+
+    env = _make_env(confidence=0.9, sns=[f"SN-D-{i:02d}" for i in range(3)])
+    session = env["session"]
+    batch = session.get(DeliveryBatch, uuid.UUID(env["batch_id"]))
+    batch.status = "released"
+    session.flush()
+
+    res = advance_batch(session, batch.batch_id, "isolated", {"any_fail": True})
+
+    assert res.accepted is False
+    assert res.reason
+    session.expire_all()
+    assert session.get(DeliveryBatch, batch.batch_id).status == "released"
+
+
+def test_advance_batch_writes_status_when_accepted() -> None:
+    """合法转移照常落库（否则这次修复会把正常路径一起打死）。"""
+    from app.infra.models import DeliveryBatch
+    from app.workflow.main_chain import advance_batch
+
+    env = _make_env(confidence=0.9, sns=[f"SN-O-{i:02d}" for i in range(3)])
+    session = env["session"]
+    batch = session.get(DeliveryBatch, uuid.UUID(env["batch_id"]))
+    batch.status = "pending_judge"
+    session.flush()
+
+    res = advance_batch(
+        session, batch.batch_id, "pending_release", {"all_pass": True, "sample_pass": True}
+    )
+
+    assert res.accepted is True
+    session.expire_all()
+    assert session.get(DeliveryBatch, batch.batch_id).status == "pending_release"
+
+
+def test_graph_refuses_to_run_intake_on_a_batch_past_intake() -> None:
+    """批次已过进场阶段时，图不得替它重新入场。
+
+    这条与 API 的 409 守卫是两层：端点挡住正常调用，节点挡住直接使用图
+    的路径（测试 / 脚本）。拒绝时不得写入任何检验行，也不得改批次状态。
+    """
+    from app.infra.models import DeliveryBatch, ModuleInspection
+    from app.workflow.main_chain import IntakeNotAllowed, build_main_chain_graph
+
+    env = _make_env(confidence=0.9, sns=[f"SN-X-{i:02d}" for i in range(3)])
+    session = env["session"]
+    batch = session.get(DeliveryBatch, uuid.UUID(env["batch_id"]))
+    batch.status = "archived"
+    session.flush()
+    before_rows = session.query(ModuleInspection).count()
+
+    graph = build_main_chain_graph(_deps(env), checkpointer=InMemorySaver())
+    with pytest.raises(IntakeNotAllowed):
+        for _chunk in graph.stream(
+            _initial_inputs(env), config={"configurable": {"thread_id": env["batch_id"]}}
+        ):
+            pass
+
+    session.expire_all()
+    assert session.get(DeliveryBatch, batch.batch_id).status == "archived"
+    assert session.query(ModuleInspection).count() == before_rows

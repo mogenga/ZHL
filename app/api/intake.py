@@ -24,9 +24,35 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.api.guards import require_not_archived
 from app.infra.models import DeliveryBatch, ModuleInspection
 from app.infra.repositories import CrossBatchSnConflict
-from app.workflow.main_chain import build_main_chain_graph
+from app.workflow.main_chain import (
+    INTAKE_ALLOWED_STATUS,
+    IntakeNotAllowed,
+    build_main_chain_graph,
+)
+
+
+def _require_intake_ready(session: Session, batch: DeliveryBatch) -> None:
+    """B2 进场守卫：只有停在 ``pending_intake`` 的批次能入场。
+
+    原实现只检查"批次存在"，于是重复 POST /api/intake 会把整条链在同一
+    ``thread_id`` 上重跑（图已完成 → 从 START 重跑，且 workflow state 继承
+    上一轮的 ``batch_status``），既能重复写检验行，又能让图替批次改状态。
+    归档批次同样在这里被 D8 挡住。
+    """
+    require_not_archived(batch.batch_id, session)
+    if batch.status != INTAKE_ALLOWED_STATUS:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "batch_not_pending_intake",
+                "status": batch.status,
+                "expected": INTAKE_ALLOWED_STATUS,
+                "hint": "该批次已进场或已离开待入场状态，不能重复入场",
+            },
+        )
 
 
 def _get_batch_by_id(s: Session, batch_id: str, label: str) -> DeliveryBatch:
@@ -79,6 +105,24 @@ def _parse_iso_utc(value: str):
     return dt
 
 
+def _raise_if_transition_denied(state: dict) -> None:
+    """整条链跑完但批次状态没被状态机接受时，别报成功。
+
+    ``reject`` 分支（human_confirm → END）不经过 ``batch_transition``，
+    ``transition_result`` 因此为空——那不是失败，跳过。
+    """
+    tr = state.get("transition_result") or {}
+    if tr and tr.get("accepted") is False:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "reason": "batch_transition_denied",
+                "detail": tr.get("reason") or "",
+                "target": tr.get("target"),
+            },
+        )
+
+
 def _graph_for(d: object, batch: DeliveryBatch) -> object:
     """Compile the main-chain graph over the request's collaborators."""
     return build_main_chain_graph(
@@ -113,6 +157,16 @@ def build_router(get_deps: object) -> APIRouter:
         """
         s: Session = d.session
         batch = _get_batch_by_id(s, body.batch_id, "batch_id")
+        # B2: 只有待入场批次可以入场（重复入场 / 归档批次 → 409）。
+        _require_intake_ready(s, batch)
+        if not body.inspections:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "reason": "no_inspections",
+                    "hint": "本次入场没有任何检验行；空批入场只会把批次推进到没有数据支撑的判定",
+                },
+            )
 
         graph = _graph_for(d, batch)
         cfg = {"configurable": {"thread_id": body.batch_id}}
@@ -201,6 +255,19 @@ def build_router(get_deps: object) -> APIRouter:
                 status_code=400,
                 detail={"reason": "cross_batch_sn_conflict", "error": str(exc)},
             ) from exc
+        except IntakeNotAllowed as exc:
+            # 第二道防线：端点守卫已挡过一次，这里是直接使用图的路径漏过来
+            # 的情形（例如守卫与节点对"可入场状态"的判断不一致）。回滚任何
+            # 已写入的行，按 409 报出，不做"照常入场"的处理。
+            s.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "intake_not_allowed",
+                    "status": exc.status,
+                    "reason": str(exc),
+                },
+            ) from exc
         state = graph.get_state(cfg).values or {}
         pending = bool(graph.get_state(cfg).next)
 
@@ -259,6 +326,12 @@ def build_router(get_deps: object) -> APIRouter:
             s.commit()
             state = graph.get_state(cfg).values or {}
             pending = bool(graph.get_state(cfg).next)
+
+        # B2: the chain finished but the state machine refused to advance the
+        # batch. That is an internal inconsistency (the entry guard should have
+        # prevented it), so fail loudly instead of reporting a success whose
+        # batch never moved.
+        _raise_if_transition_denied(state)
         return {
             "task_id": body.batch_id,
             "status": "pending" if pending else "confirmed",
@@ -276,6 +349,23 @@ def build_router(get_deps: object) -> APIRouter:
         """§5.6: persist the whole-batch confirmation, then resume the graph."""
         s: Session = d.session
         batch = _get_batch_by_id(s, task_id, "task_id")
+
+        # D8: 归档是终态——确认/拒绝都是写库动作，归档后一律只读。
+        require_not_archived(batch.batch_id, s)
+
+        # B2: 有人工确认待处理 ⇔ 批次仍停在 pending_intake（确认一被接受就
+        # 走 pending_intake -> pending_judge）。批次已离开该状态时再调确认，
+        # 只会在同一 thread_id 上把整条链从 START 重跑一遍 —— 直接 409。
+        if batch.status != INTAKE_ALLOWED_STATUS:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "no_pending_confirmation",
+                    "status": batch.status,
+                    "expected": INTAKE_ALLOWED_STATUS,
+                    "hint": "该批次没有待确认的入场；确认/拒绝已经生效",
+                },
+            )
 
         # §5.6 / Q3: whole-batch intake_status + human_confirmation evidence
         # BEFORE the resume (graph nodes must not write DB state, spec §2.3).
@@ -301,11 +391,24 @@ def build_router(get_deps: object) -> APIRouter:
 
         graph = _graph_for(d, batch)
         cfg = {"configurable": {"thread_id": task_id}}
-        for _chunk in graph.stream(
-            Command(resume={"action": body.action, "fields": body.fields}), config=cfg
-        ):
-            pass
+        try:
+            for _chunk in graph.stream(
+                Command(resume={"action": body.action, "fields": body.fields}), config=cfg
+            ):
+                pass
+        except IntakeNotAllowed as exc:
+            # 第二道防线：确认记录已落库、但图拒绝继续（批次被别处挪走了，
+            # 或该 thread 已无待确认的中断点 → 图从 START 重跑撞上入场守卫）。
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "intake_not_allowed",
+                    "status": exc.status,
+                    "reason": str(exc),
+                },
+            ) from exc
         s.commit()
+        _raise_if_transition_denied(graph.get_state(cfg).values or {})
         return {"task_id": task_id, "intake_status": new_status}
 
     return router

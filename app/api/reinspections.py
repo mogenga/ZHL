@@ -78,6 +78,25 @@ def get_session() -> Any:
 
 SessionDep = Annotated[Any, Depends(get_session)]
 
+#: 允许登记复检记录的异常状态。``assigned`` = 已指派、措施未确认（正常闭环
+#: 里复检先于 CAPA）；``pending_recheck`` = CAPA 已确认、等待复检结论。
+#: ``new``/``isolated`` 还没有处置责任人，``closed``/``rejected``/``scrapped``
+#: 是终态——对终态追加复检记录会覆盖 ``verification_id``，把已签署的闭环
+#: 结论事后改写。
+REINSPECTABLE_STATUSES = ("assigned", "pending_recheck")
+
+
+def _require_reinspectable(incident: QualityIncident) -> None:
+    if incident.status not in REINSPECTABLE_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "incident_not_reinspectable",
+                "status": incident.status,
+                "expected": list(REINSPECTABLE_STATUSES),
+            },
+        )
+
 
 # --- helpers --------------------------------------------------------------
 
@@ -196,6 +215,9 @@ def create_reinspection(
     )
     if incident is None:
         raise HTTPException(status_code=404, detail="incident_not_found")
+
+    # B2: 只有处置中的异常能登记复检（终态一律只读）。
+    _require_reinspectable(incident)
 
     # D5: scope validation (Review Focus #2)
     applied_sns, is_expansion = _validate_scope(

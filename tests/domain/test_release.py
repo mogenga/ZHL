@@ -65,7 +65,13 @@ def _ok_inputs():
     sample = SampleView(result="pass")
     incidents = []
     isolated = []
-    evidence = [EvidenceView(evidence_id="EV-1", evidence_type="decision_snapshot")]
+    evidence = [
+        EvidenceView(
+            evidence_id="EV-1",
+            evidence_type="decision_snapshot",
+            object_ref={"kind": "batch", "id": "B-1"},
+        )
+    ]
     capa = [CapaView(incident_id="INC-0", verified=True)]
     return batch, sample, incidents, isolated, evidence, capa
 
@@ -135,7 +141,8 @@ def test_each_check_named() -> None:
 def test_state_check_wrong_state_fails() -> None:
     b = BatchView(batch_id="B-1", status="pending_judge")
     s = SampleView(result="pass")
-    r = assert_release(b, s, [], [], [EvidenceView("E", "decision_snapshot")], [], [], [_iso_row()])
+    ev = [EvidenceView("E", "decision_snapshot", {"kind": "batch", "id": "B-1"})]
+    r = assert_release(b, s, [], [], ev, [], [], [_iso_row()])
     by_name = {c.name: c for c in r.checks}
     assert by_name["state"].passed is False
 
@@ -145,10 +152,31 @@ def test_individual_check_functions() -> None:
     assert check_sample_passed(SampleView(result="pass")).passed is True
     assert check_no_open_critical_incident([]).passed is True
     assert check_no_isolated_sn([]).passed is True
-    assert check_all_evidence_present([EvidenceView("E", "decision_snapshot")]).passed is True
+    assert (
+        check_all_evidence_present(
+            [EvidenceView("E", "decision_snapshot", {"kind": "batch", "id": "B-1"})]
+        ).passed
+        is True
+    )
     assert check_all_capa_verified([CapaView("INC-1", verified=True)]).passed is True
     assert check_sample_passed(SampleView(result="fail")).passed is False
     assert check_no_isolated_sn(["SN-X"]).passed is False
+
+
+def test_evidence_check_rejects_unanchored_rows_and_empty_sample_result() -> None:
+    """断言⑤ / ② 不得因"字段恒真"或"缺省值"而放行。
+
+    ``evidence_id`` 是主键、``result`` 缺省曾为 ``"pass"`` —— 两处都让检查
+    退化成恒真。这里钉死：没有 object_ref 的证据不算齐备；没有抽样结论不算
+    抽样合格。
+    """
+    assert check_all_evidence_present([]).passed is False
+    assert check_all_evidence_present([EvidenceView("E", "decision_snapshot")]).passed is False
+    no_id = EvidenceView("", "decision_snapshot", {"id": "B"})
+    assert check_all_evidence_present([no_id]).passed is False
+    assert check_sample_passed(SampleView()).passed is False
+    assert check_sample_passed(SampleView(result="")).reason
+    assert check_sample_passed(SampleView(result="")).passed is False
 
 
 # ---------------------------------------------------------------------------
@@ -266,7 +294,13 @@ def test_required_sns_authoritative_closes_self_reference_gap() -> None:
         severity="major",
         status="pending_recheck",
     )
-    ev = [EvidenceView(evidence_id="E1", evidence_type="decision_snapshot")]
+    ev = [
+        EvidenceView(
+            evidence_id="E1",
+            evidence_type="decision_snapshot",
+            object_ref={"kind": "batch", "id": "B"},
+        )
+    ]
     result = assert_release(
         batch=BatchView(batch_id="B", status="pending_release"),
         sample=SampleView(result="pass"),
@@ -316,7 +350,13 @@ def test_required_sns_full_coverage_passes() -> None:
         severity="major",
         status="pending_recheck",
     )
-    ev = [EvidenceView(evidence_id="E1", evidence_type="decision_snapshot")]
+    ev = [
+        EvidenceView(
+            evidence_id="E1",
+            evidence_type="decision_snapshot",
+            object_ref={"kind": "batch", "id": "B"},
+        )
+    ]
     result = assert_release(
         batch=BatchView(batch_id="B", status="pending_release"),
         sample=SampleView(result="pass"),

@@ -65,6 +65,7 @@ from app.infra.models import (
     IsoSamplingRow,
     ModuleInspection,
     QualityIncident,
+    QualityRuleVersion,
     Reinspection,
     SampleConclusion,
 )
@@ -108,18 +109,49 @@ SessionDep = Annotated[Any, Depends(get_session)]
 
 # --- input assembly helpers (DB -> domain views) ---------------------------
 
+#: 一个能驱动 ISO 查表的抽样方案至少要有这三个键（规则 sample_plan 的约定，
+#: 见 001_init.sql 种子与主链 ``main_chain._aql``）。
+_REQUIRED_PLAN_KEYS = ("inspection_type", "inspection_level", "aql")
 
-def _latest_sample(session: Any, batch_id: uuid.UUID) -> SampleView:
+
+def _rule_sample_plan(session: Any, batch: DeliveryBatch) -> tuple[dict, str]:
+    """批次所选规则版本的抽样方案 → ``(plan, error)``。
+
+    ``error`` 非空表示方案缺项、无法解析 ISO 组合。调用方必须据此判定失败
+    —— 旧实现用硬编码 ``"full"`` + ``iso_rows[0].aql`` 兜底，把"规则缺失"
+    掩盖成了"查表命中/未命中"，检查因此失去意义（D9：规则缺失即异常）。
+    """
+    rule = session.get(QualityRuleVersion, batch.rule_version_id) if batch.rule_version_id else None
+    plan = dict(getattr(rule, "sample_plan", None) or {})
+    missing = [k for k in _REQUIRED_PLAN_KEYS if plan.get(k) in (None, "")]
+    if missing:
+        return plan, (
+            f"rule sample_plan missing {missing} in rule_version "
+            f"{getattr(rule, 'rule_version_id', None)} — cannot resolve the ISO sampling plan"
+        )
+    return plan, ""
+
+
+def _latest_sample(session: Any, batch_id: uuid.UUID, inspection_type: str) -> SampleView:
+    """该批次**指定检验类型**的最新抽样结论。
+
+    ``inspection_type`` 必传：跨类型取"最新"正是
+    ``SampleRepository.get_latest_conclusion`` 明确禁止的行为（会拿到别类型
+    的合格结论）。查不到结论时返回空 ``result`` —— 由断言②判失败，不默认通过。
+    """
+    if not inspection_type:
+        return SampleView(result="", inspection_type="")
     row = (
         session.query(SampleConclusion)
-        .filter(SampleConclusion.batch_id == batch_id)
+        .filter(
+            SampleConclusion.batch_id == batch_id,
+            SampleConclusion.inspection_type == inspection_type,
+        )
         .order_by(SampleConclusion.sample_round.desc())
         .first()
     )
     if row is None:
-        # No sampling on the batch: the assertion treats "pass" as the
-        # default (the judge's per-module results are the gate).
-        return SampleView(result="pass", inspection_type="module")
+        return SampleView(result="", inspection_type=inspection_type)
     return SampleView(
         result=row.result,
         inspection_type=row.inspection_type,
@@ -252,28 +284,42 @@ def _reinspection_scope_rows(
     session: Any,
     batch: DeliveryBatch,
     incident_views: list[IncidentView],
-    sample: SampleView,
+    plan: dict,
+    plan_error: str,
 ) -> tuple[list[ReinspectionScopeIn], dict[str, tuple[str, ...]]]:
     """One ReinspectionScopeIn per open incident: the incident's *reinspection
-    coverage* (scope_sns from the Reinspection row, or the full affected set
-    when no row exists) plus the four ISO values resolved here (Task 8 is
-    the resolver that keeps the domain layer read-free).
+    coverage* (scope_sns from the Reinspection row) plus the ISO values
+    resolved here from the batch's rule sample plan (Task 8 is the resolver
+    that keeps the domain layer read-free).
 
     The required-SN set for item 7 is what the incident *should* cover
     (its full incident_sn_links set); the scope_sns field is what a
     reinspection *actually* covered. A gap between the two is exactly the
     Review Focus #2 signal item 7 is meant to catch — so the row must
     carry the actual coverage, not re-declare the required set.
+
+    The ISO values come from the rule's sample plan and the batch's planned
+    quantity — the same scheme the main chain samples under. They are NOT
+    hardcoded, and NOT taken from whichever ISO row happens to come back
+    first: with a hardcoded ``"full"`` level the lookup could never resolve
+    against the shipped table (which only carries ``normal``), and a
+    positionally-picked AQL made the outcome depend on row order.
+
+    ``plan_error`` (non-empty when the plan is incomplete) is carried onto
+    every row so item 7 reports the rule gap instead of inventing a combo.
     """
     open_ids = [
         iv.incident_id
         for iv in incident_views
         if iv.status not in ("closed", "rejected", "scrapped")
     ]
-    inspection_type = sample.inspection_type or "module"
-    inspection_level = "full"
-    iso_rows = _iso_table(session)
-    aql = iso_rows[0].aql if iso_rows else 0.65
+    if not open_ids:
+        return [], {}
+    inspection_type = str(plan.get("inspection_type") or "")
+    inspection_level = str(plan.get("inspection_level") or "")
+    aql = float(plan.get("aql") or 0.0)
+    # lot_size = 批次批量（ISO 表的 lot 区间针对整批），不是"本次复检覆盖了几只"。
+    lot_size = int(batch.planned_quantity or 0)
     out: list[ReinspectionScopeIn] = []
     required_sns: dict[str, tuple[str, ...]] = {}
     for iid in open_ids:
@@ -283,10 +329,11 @@ def _reinspection_scope_rows(
             ReinspectionScopeIn(
                 incident_id=iid,
                 scope_sns=actual_sns,
-                lot_size=len(actual_sns) or 1,
+                lot_size=lot_size,
                 inspection_type=inspection_type,
                 inspection_level=inspection_level,
                 aql=aql,
+                plan_error=plan_error,
             )
         )
     return out, required_sns
@@ -312,7 +359,23 @@ def _incident_reinspection_sns(session: Any, incident_id: str) -> tuple[str, ...
 
 
 def _iso_table(session: Any) -> list[IsoRow]:
-    rows = session.query(IsoSamplingRow).all()
+    """The preset ISO table, in a deterministic order.
+
+    ``order_by`` is not decoration: without it the row order is whatever the
+    engine happens to return, and any consumer that reads the table
+    positionally (the old code took ``iso_rows[0].aql``) silently becomes
+    non-reproducible across engines / plans.
+    """
+    rows = (
+        session.query(IsoSamplingRow)
+        .order_by(
+            IsoSamplingRow.inspection_type,
+            IsoSamplingRow.inspection_level,
+            IsoSamplingRow.aql,
+            IsoSamplingRow.lot_size_min,
+        )
+        .all()
+    )
     return [
         IsoRow(
             inspection_type=r.inspection_type,
@@ -350,16 +413,19 @@ def release_batch(
         )
 
     # Assemble the seven assertion inputs (DB -> domain views).
+    # 抽样/复检的 ISO 组合统一来自该批次规则的 sample_plan（与主链抽样同源），
+    # 不硬编码、不取"表里第一行"。
+    plan, plan_error = _rule_sample_plan(session, batch)
     incident_views = _incident_views(session, batch_id)
     open_ids = [
         iv.incident_id
         for iv in incident_views
         if iv.status not in ("closed", "rejected", "scrapped")
     ]
-    sample = _latest_sample(session, batch_id)
+    sample = _latest_sample(session, batch_id, str(plan.get("inspection_type") or ""))
     iso_table = _iso_table(session)
     reinspection_scopes, required_sns = _reinspection_scope_rows(
-        session, batch, incident_views, sample
+        session, batch, incident_views, plan, plan_error
     )
 
     result = assert_release(

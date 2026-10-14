@@ -6,7 +6,8 @@ through the assembled app (Task 9 ``create_app``) with a SQLite session:
 
     create incident -> assign -> attribution (Mock LLM, PB O-2) ->
     reinspection (minimal scope, pass) -> CAPA (verified=true) ->
-    pending_release -> release (7 items all pass, incl. item 7) ->
+    pending_release -> release (all 7 items pass; item 7 is vacuous here —
+    every incident is already closed, so there is no scope row to check) ->
     released -> report (release type, from terminal state) -> auto-archived.
 
 Each step asserts the three-layer audit trail (trace / evidence / report
@@ -126,14 +127,21 @@ def _seed_batch(session: Any, sample: dict, batch_no: str) -> None:
                 decision_status="pass",
             )
         )
-    # ISO preset row so release item 7's iso_lookup resolves: the release API
-    # builds ReinspectionScopeIn with inspection_level="full" and the first
-    # iso row's AQL, lot = reinspection coverage size.
+    # ISO preset row in the shape the rule's sample_plan actually declares
+    # (iv / normal / AQL 1.0 — see 001_init.sql), so the release API's ISO
+    # resolution has something real to resolve against.
+    #
+    # Honest note on coverage: on this path the batch only reaches
+    # pending_release *after* every incident is closed, so at release time
+    # item 7 has no open incident and no scope row to check — it passes
+    # without consulting the ISO table at all. Item 7's real coverage lives
+    # in tests/api/test_release_api.py. This row is kept so the seed matches
+    # production rather than the implementation's old hardcoded combo.
     session.add(
         IsoSamplingRow(
             inspection_type="iv",
-            inspection_level="full",
-            aql=0.65,
+            inspection_level="normal",
+            aql=1.0,
             lot_size_min=1,
             lot_size_max=100,
             n=2,

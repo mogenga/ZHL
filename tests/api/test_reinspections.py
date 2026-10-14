@@ -296,3 +296,58 @@ def test_list_reinspections(api_client: Any) -> None:
     resp = client.get(f"/api/incidents/{_INC}/reinspections")
     assert resp.status_code == 200
     assert len(resp.json()) == 1
+
+
+def test_reinspection_rejected_for_closed_incident(api_client: Any) -> None:
+    """复检记录只能在异常处于 ``assigned`` / ``pending_recheck`` 时写入。
+
+    原实现不校验异常状态：对已关闭（甚至已报废）的异常仍可追加复检记录，
+    并把 ``verification_id`` 覆盖掉 —— 闭环签署过的结论会被事后改写。
+    """
+    client, session, _ = api_client
+    _seed(session, incident_status="closed", batch_status="released")
+    resp = client.post(
+        f"/api/incidents/{_INC}/reinspections",
+        json={
+            "inspection_id": str(_INSP1),
+            "pmax": 550.0,
+            "temp": 25.0,
+            "isc": 10.5,
+            "voc": 0.5,
+            "vm": 48.0,
+            "im": 11.0,
+            "ff": 0.75,
+            "result": "pass",
+            "executor": "ZHL-QA",
+            "executed_at": _TS.isoformat(),
+        },
+    )
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"]["status"] == "closed"
+    assert session.query(Reinspection).count() == 0
+    assert session.get(QualityIncident, _INC).verification_id is None
+
+
+def test_reinspection_rejected_before_the_incident_is_assigned(api_client: Any) -> None:
+    """``new`` / ``isolated`` 的异常还没有处置责任人，不能直接复检。"""
+    client, session, _ = api_client
+    _seed(session, incident_status="new", batch_status="isolated")
+    resp = client.post(
+        f"/api/incidents/{_INC}/reinspections",
+        json={
+            "inspection_id": str(_INSP1),
+            "pmax": 550.0,
+            "temp": 25.0,
+            "isc": 10.5,
+            "voc": 0.5,
+            "vm": 48.0,
+            "im": 11.0,
+            "ff": 0.75,
+            "result": "pass",
+            "executor": "ZHL-QA",
+            "executed_at": _TS.isoformat(),
+        },
+    )
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"]["status"] == "new"
+    assert session.query(Reinspection).count() == 0

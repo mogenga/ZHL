@@ -43,7 +43,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from app.domain.state_machine import transition
-from app.domain.types import IsoRow
+from app.domain.types import IsoRow, TransitionResult
 from app.infra.models import AgentTaskTrace, DeliveryBatch, QualityRuleVersion
 from app.plugins.auto_incident import ensure_incident
 from app.plugins.sampling import run_sampling
@@ -59,6 +59,63 @@ if TYPE_CHECKING:
 
 #: Low-confidence threshold: ``confidence < 0.8`` → interrupt (Review Focus #1).
 CONFIDENCE_THRESHOLD = 0.8
+
+#: 允许开始进场的批次状态。入场是"pending_intake → pending_judge"这一步，
+#: 只有停在该状态的批次才该被喂入数据；其余状态（已判定/已隔离/已放行/
+#: 已归档……）再入场要么重复写行，要么让图替批次改状态。
+INTAKE_ALLOWED_STATUS = "pending_intake"
+
+
+class IntakeNotAllowed(Exception):
+    """批次不在可入场状态时拒绝执行整条主链（节点层的守卫）。
+
+    API 端点在这一层之前已经用 409 挡过一次；这里是第二道防线，覆盖直接
+    使用图的调用方（脚本 / 测试），避免"绕过端点就绕过状态机"。
+    """
+
+    def __init__(self, status: str, batch_id: str) -> None:
+        self.status = status
+        self.batch_id = batch_id
+        super().__init__(
+            f"batch {batch_id} is in status {status!r}, expected {INTAKE_ALLOWED_STATUS!r}; "
+            "refusing to run intake"
+        )
+
+
+def advance_batch(
+    session: Session,
+    batch_id: uuid.UUID,
+    target: str,
+    preconditions: dict,
+) -> TransitionResult:
+    """按状态机推进批次状态，**拒绝时不写库**，返回状态机的判定结果。
+
+    这是 ``batch_transition`` 节点唯一被允许改批次状态的入口。此前的实现
+    调用 ``transition()`` 后不检查 ``accepted``，直接 ``batch.status =
+    target``：两次转移都被拒也照样落库，等于把状态机降级成"记录一下说法"。
+    同时它写的一直是"请求的目标"而不是"实际被接受的边"—— ``target`` 被拒、
+    回退到 ``isolated`` 成功时，落库的会是 ``pending_release``。
+    """
+    batch = session.get(DeliveryBatch, batch_id)
+    if batch is None:
+        return TransitionResult(accepted=False, reason=f"unknown batch: {batch_id}")
+
+    res = transition(batch.status, target, preconditions, kind="batch")
+    if res.accepted:
+        batch.status = target
+        session.flush()
+        return res
+
+    if target != "isolated":
+        # 任何"不能照常放行"的判定都退回隔离（R1 挂载点），但同样必须真的
+        # 被状态机接受才落库。
+        fallback = transition(batch.status, "isolated", {"any_fail": True}, kind="batch")
+        if fallback.accepted:
+            batch.status = "isolated"
+            session.flush()
+            return fallback
+
+    return res
 
 
 class MainChainDeps(TypedDict, total=False):
@@ -132,11 +189,25 @@ def build_main_chain_graph(
         Deterministic: the inspection rows are the ones carried in state
         (upstream of the graph they were parsed by the API layer, Q1); the
         node persists them exactly once.
+
+        Entry guard (B2): the batch must actually be in ``pending_intake``.
+        The batch status itself is advanced one node later, in
+        ``human_confirm`` — only a *confirmed* intake may leave
+        ``pending_intake`` (a rejected intake must stay there so the operator
+        can correct the data and re-submit).
         """
+        batch_id = uuid.UUID(state["batch_id"])
+        batch = session.get(DeliveryBatch, batch_id)
+        if batch is None:
+            raise IntakeNotAllowed("<missing>", state["batch_id"])
+        if batch.status != INTAKE_ALLOWED_STATUS:
+            raise IntakeNotAllowed(batch.status, state["batch_id"])
+
         rows = state.get("inspections") or []
         if not rows:
-            return {}
-        inspect_repo.create_inspections(session, uuid.UUID(state["batch_id"]), rows)
+            return {"batch_status": state.get("batch_status") or INTAKE_ALLOWED_STATUS}
+
+        inspect_repo.create_inspections(session, batch_id, rows)
         session.flush()
         ev = evidence.save(
             "source_file",
@@ -200,6 +271,17 @@ def build_main_chain_graph(
         only ever runs *after* a resume whose payload the API endpoint has
         already persisted. The resume payload is
         ``{"action": "confirm"|"reject", "fields"?: dict}``.
+
+        DB write (B2): on ``confirm`` this node runs the ``pending_intake ->
+        pending_judge`` state-machine edge and persists it. The batch's status
+        lives in the DB, not in workflow state, and the chain is about to judge
+        against it — ``pending_judge`` used to be recorded in workflow state
+        only, so the batch never actually occupied it (and the DB kept saying
+        ``pending_intake`` while the chain called itself ``pending_judge``,
+        which is what let ``batch_transition`` write a state the state machine
+        had refused). On ``reject`` nothing is written: the batch stays
+        ``pending_intake`` so the data can be corrected and re-submitted —
+        "rejected never leaves intake".
         """
         confidence = float(state.get("confidence", 0.0))
         payload = interrupt(
@@ -211,7 +293,19 @@ def build_main_chain_graph(
             }
         )
         action = (payload or {}).get("action", "reject")
-        return {"intake_status": "confirmed" if action == "confirm" else "rejected"}
+        if action != "confirm":
+            return {"intake_status": "rejected"}
+
+        entered = advance_batch(session, uuid.UUID(state["batch_id"]), "pending_judge", {})
+        if not entered.accepted:
+            # The confirmation record is written by the API layer *before*
+            # this resume, so a refusal here means the batch moved out from
+            # under the chain. Refuse rather than judge a batch whose state
+            # we cannot vouch for.
+            raise IntakeNotAllowed(
+                f"state changed during confirmation: {entered.reason}", state["batch_id"]
+            )
+        return {"intake_status": "confirmed", "batch_status": "pending_judge"}
 
     def route_after_human_confirm(state: BatchWorkflowState) -> str:
         return "judge" if state.get("intake_status") == "confirmed" else "end"
@@ -293,27 +387,31 @@ def build_main_chain_graph(
         # (a missing sampling rule is a rule anomaly, not a clean pass — D9)
         release_path = all_pass and sample.get("result") == "pass"
 
-        current = state.get("batch_status") or "pending_judge"
+        # The batch's current status is read from the DB inside advance_batch —
+        # not from the carried-over workflow state. Workflow state can hold a
+        # stale value (``state["batch_status"]`` survives a re-run of the same
+        # thread_id), and the DB is the authority for a batch's state.
         target = "pending_release" if release_path else "isolated"
         preconditions = {
             "all_pass": all_pass,
             "sample_pass": release_path,
             "any_fail": (not all_pass) or sample.get("result") == "rule_missing",
         }
-        tr = transition(current, target, preconditions, kind="batch")
-        if not tr.accepted:
-            tr = transition(current, "isolated", {"any_fail": True}, kind="batch")
-
-        # Persist the new batch status (if it changed) + one agent_task_trace row (B2).
         batch = session.get(DeliveryBatch, uuid.UUID(state["batch_id"]))
-        if batch is not None:
-            batch.status = target
+        if batch is None:
+            tr = TransitionResult(accepted=False, reason=f"unknown batch: {state['batch_id']}")
+        else:
+            tr = advance_batch(session, batch.batch_id, target, preconditions)
+        # 状态机接受后批次实际落到的状态——可能是 target，也可能是被接受
+        # 的 isolated 回退边；未接受时批次状态原样未动。
+        applied = batch.status if batch is not None else ""
+        applied_target = applied if tr.accepted else ""
 
-        # §8.1 异常事件自动创建（P0 缺口 #2）：批次进入隔离时同事务创建
-        # 异常。触发优先级：规则缺失 > 判定 Fail（affected=fail_sns，精确
+        # §8.1 异常事件自动创建（P0 缺口 #2）：批次**确实进入隔离**时同事务
+        # 创建异常。触发优先级：规则缺失 > 判定 Fail（affected=fail_sns，精确
         # 到组件）> 抽样 Fail（affected=全批 SN；判定 Fail 时抽样必然同源
         # 失败，只建一只 rule_fail，不重复建）。
-        if target == "isolated" and batch is not None:
+        if applied_target == "isolated" and batch is not None:
             sample_result = sample.get("result")
             fail_sns = list(decision.get("fail_sns") or [])
             if decision.get("result") == "rule_missing" or sample_result == "rule_missing":
@@ -341,13 +439,21 @@ def build_main_chain_graph(
             input_ref={"batch_id": state["batch_id"]},
             skill_name="judge",
             plugins_invoked=["sampling"],
-            params_summary={"target": target, "accepted": tr.accepted},
+            params_summary={
+                "target": target,
+                "applied_target": applied_target,
+                "accepted": tr.accepted,
+            },
             model_version="mock",
             structured_output={
                 "result": decision.get("result"),
                 "sample_result": sample.get("result"),
             },
-            validation_result="pass" if tr.accepted else "partial",
+            # A denied transition is not "partial data" — nothing was advanced.
+            # Record it as a failure with the state machine's reason so the
+            # audit trail names why the batch did not move.
+            validation_result="pass" if tr.accepted else "fail",
+            failure_reason=None if tr.accepted else f"batch transition denied: {tr.reason}",
             human_action={"action": state.get("intake_status")},
             started_at=datetime.now(UTC),
             finished_at=datetime.now(UTC),
@@ -358,14 +464,18 @@ def build_main_chain_graph(
         ev = evidence.save(
             "task_trace",
             {"kind": "batch", "id": state["batch_id"]},
-            content=str(target).encode("utf-8"),
-            meta={"target": target, "accepted": tr.accepted},
+            content=str(applied_target or target).encode("utf-8"),
+            meta={"target": target, "applied_target": applied_target, "accepted": tr.accepted},
         )
         return {
-            "batch_status": target,
+            # What actually happened, not what was requested: an empty string
+            # means the state machine refused and the batch did not move.
+            "batch_status": applied_target,
             "transition_result": {
                 "accepted": tr.accepted,
                 "reason": getattr(tr, "reason", "") or "",
+                "target": target,
+                "applied_target": applied_target,
             },
             "evidence_ids": [
                 *list(state.get("evidence_ids") or []),

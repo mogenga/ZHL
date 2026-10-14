@@ -396,7 +396,9 @@ def test_judge_replays_skill(sqlite_env):
         "/api/intake",
         json={"batch_id": batch["batch_id"], "inspections": [_r_for(sn) for sn in sns]},
     )
-    _confirm(client, resp.json()["task_id"], "confirm")
+    # confidence 0.9 >= 0.8 → /api/intake 已在同一请求内自动确认并跑完整条链，
+    # 这里不需要（也不允许）再调一次 /confirm。
+    assert resp.json()["status"] == "confirmed"
 
     r = client.post(f"/api/batches/{batch['batch_id']}/judge")
     assert r.status_code == 200, r.text
@@ -439,7 +441,9 @@ def test_judge_rule_not_effective_returns_400(sqlite_env):
         "/api/intake",
         json={"batch_id": batch["batch_id"], "inspections": [_r_for(sn) for sn in sns]},
     )
-    _confirm(client, resp.json()["task_id"], "confirm")
+    # confidence 0.9 >= 0.8 → /api/intake 已在同一请求内自动确认并跑完整条链，
+    # 这里不需要（也不允许）再调一次 /confirm。
+    assert resp.json()["status"] == "confirmed"
 
     r = client.post(f"/api/batches/{batch['batch_id']}/judge")
     assert r.status_code == 400, r.text

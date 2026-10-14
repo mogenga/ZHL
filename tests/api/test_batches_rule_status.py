@@ -233,9 +233,8 @@ def test_disabled_rule_does_not_affect_existing_batch_rejudge(env) -> None:
         "/api/intake",
         json={"batch_id": batch["batch_id"], "inspections": [_r_for(sn) for sn in sns]},
     )
-    task_id = resp.json()["task_id"]
-    confirm = client.post(f"/api/intake/{task_id}/confirm", json={"action": "confirm"})
-    assert confirm.status_code == 200
+    # confidence 0.9 >= 0.8 → /api/intake 已在同一请求内自动确认并跑完整条链。
+    assert resp.json()["status"] == "confirmed"
     # judge once before disable -> pass
     r1 = client.post(f"/api/batches/{batch['batch_id']}/judge")
     assert r1.status_code == 200

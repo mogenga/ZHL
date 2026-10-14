@@ -7,9 +7,11 @@ second batch's SN insert is rejected by the EXCLUDE sn_uniqueness constraint
 
 - a data-consistency incident is raised on the open batch (the shared SN is
   the affected SN);
-- the open batch's release is blocked by assertion items 4/7 (an isolated
-  SN remains; the reinspection scope for the consistency incident does not
-  cover the required set — Review Focus #2/#3 E2E face);
+- the open batch cannot be released (the release attempt hits the state
+  guard — the batch is rejected, not pending_release). Note this does NOT
+  exercise assertion items 4/7: the guard short-circuits before the
+  assertion set is assembled. Items 4/7 are covered by
+  tests/api/test_release_api.py and tests/domain/test_release.py;
 - the batch is transitioned to ``rejected`` (the recheck-failed / disposition
   branch), a disposition (incident-type) report is written, and the batch is
   archived (D6a auto-archive on the terminal state).
@@ -149,13 +151,16 @@ def _seed(session: Any, sample: dict) -> None:
             decision_status="fail",
         )
     )
-    # ISO preset row (item 7 lookup must still resolve so the *named*
-    # failure is the scope coverage, not a missing ISO row).
+    # ISO preset row in the rule's declared shape (iv / normal / AQL 1.0).
+    # Note: this test never reaches item 7 — the release attempt below is
+    # stopped by the state guard (409 batch_not_pending_release) before the
+    # assertion set is assembled. Item 7 is covered in
+    # tests/api/test_release_api.py; this row keeps the seed production-shaped.
     session.add(
         IsoSamplingRow(
             inspection_type="iv",
-            inspection_level="full",
-            aql=0.65,
+            inspection_level="normal",
+            aql=1.0,
             lot_size_min=1,
             lot_size_max=100,
             n=1,
