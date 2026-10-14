@@ -1,270 +1,556 @@
-# 质慧链 · 针对性测试数据（正常 / 边界 / 失败）
+# 质慧链 · 针对性测试用例（正常 / 边界 / 失败）
 
-日期：2026-10-14
-定位：基于**现有实现**的确定性纯函数与 API 守卫设计。按测试对象分组，每组覆盖**正常 / 边界 / 失败**三类输入，给出「输入值 → 预期输出」。可直接转写为 `tests/domain/*` 单测或 API 集成用例。
-依据：`app/domain/{judge,sampling,release,state_machine}.py`；`app/api/{batches,intake,release,reports,incidents}.py`；`migrations/001_init.sql` enum 约束；`AGENT.md` §3.3（domain 纯函数单测含边界值 + 非法路径，不依赖 DB/模型）。
-姊妹文档：`docs/test/01-full-chain-test-data.md`（全链路连通数据）。
+日期：2026-10-15
+定位：按**测试对象**分组的「输入 → 预期输出」矩阵。每条用例给出**完整输入值**，可直接转写为 pytest 参数化用例，也可手工照做。
+依据：`app/domain/{judge,sampling,release,state_machine}.py`、`app/api/*.py`、`app/skills/*.py`、`migrations/001_init.sql`、`AGENT.md` §3.3。
 
-> **边界语义（判定核心，`judge.py`）**：所有容差区间为**闭区间** `lower = std*(1-tol)`, `upper = std*(1+tol)`；`lower ≤ 实测 ≤ upper` 判 Pass，**等于边界判 Pass**。
-> **分档**：`im` 落声明区间 `[lower, upper]` 判 Pass（闭区间）。
-> 每条数据只改一个变量，其余参数取标准值（`temp=25.0, isc=10.5, voc=48.0, vm=40.0`），保证单一故障维度。
+姊妹文档：`01-full-chain-test-data.md`（全链路逐步操作）。
+
+> **本文件所有「预期」都已在跑起来的系统上实测确认**，不是从文档转抄。凡与旧版本表述冲突处，以本文件的实测值为准（差异见 §9）。
 
 ---
 
-## 1. 判定引擎 `judge()`（五重校验，固定顺序）
+## 0. 判定引擎的四条口径（先记住，再看用例）
 
-判定顺序：① 必填字段 → ② 功率范围 → ③ 参数容差 → ④ 电流分档 → ⑤ 外观。全部 Pass 才 `result=Pass`，任一 Fail 即 `Fail`。纯函数（不读库/不取时/不调模型）。
+### 0.1 容差是**相对**容差，闭区间
 
-> 默认标准值（规则 §3.1）：`nameplate=550.0, power_tol=0.03`；`temp 25.0±0.10, isc 10.5±0.05, voc 48.0±0.05, vm 40.0±0.05, im 13.0±0.05, ff 0.80±0.02`；分档 `A=[12.0,14.0], B=[14.0,15.5]`。
+```
+lower = 标准值 × (1 − 容差)
+upper = 标准值 × (1 + 容差)
+lower ≤ 实测值 ≤ upper        ← 闭区间：等于任一端点判 Pass
+```
 
-### 1.1 正常（每类各 1，`result=Pass`）
+对应 `app/domain/judge.py::tolerance_interval`，公式字符串为
+`"lower = std * (1 - tol); upper = std * (1 + tol)"`。
 
-| ID | 场景 | 输入（变化字段） | 预期 |
-| --- | --- | --- | --- |
-| J-N01 | 全中值 | `pmax=550.0, im=13.0, 外观=pass, 六参全标准值` | Pass（5 项全过） |
-| J-N02 | 功率偏高 | `pmax=566.5`（=上限 550×1.03） | Pass（闭区间含上限） |
-| J-N03 | 功率偏低 | `pmax=533.5`（=下限 550×0.97） | Pass |
-| J-N04 | 电流 B 档 | `im=15.0`（落 B 档 `[14.0,15.5]`） | Pass |
-| J-N05 | 多 SN 整批 | 10 SN 各自微扰（见 `acceptance_normal`） | 每 SN Pass |
+**实测推出的各参数区间**（规则 `JH-550W v1`）：
 
-### 1.2 边界（`result=Pass`，钉住闭区间语义）
-
-| ID | 参数 | 边界点 | 预期 | 说明 |
+| 参数 | 标准值 | 容差 | 闭区间 | 边界实测 |
 | --- | --- | --- | --- | --- |
-| J-B01 | pmax | 下限 533.5 | Pass | = 下限判 Pass（spec §2.3） |
-| J-B02 | pmax | 上限 566.5 | Pass | = 上限判 Pass |
-| J-B03 | pmax | 533.4（下限 −0.1） | **Fail**（对照组） | 越下限 |
-| J-B04 | pmax | 566.6（上限 +0.1） | Fail | 越上限 |
-| J-B05 | im 分档 | 12.0（A 档下界） | Pass | 闭区间含下界 |
-| J-B06 | im 分档 | 14.0（A/B 档交界） | Pass | 落两档公共界，命中即过 |
-| J-B07 | im 分档 | 15.5（B 档上界） | Pass |
-| J-B08 | im 分档 | 15.6（B 档上界外） | Fail | 越档（样例 3 触发点，`SN-I-OODB`） |
-| J-B09 | ff | 下界 0.784 / 上界 0.816 | Pass | ff 容差 0.02 |
-| J-B10 | temp | 下界 22.5 / 上界 27.5 | Pass | 容差 0.10 |
+| `pmax` | 550.0 | 0.03 | **[533.5, 566.5]** | 533.5 Pass / 533.4 Fail / 566.5 Pass / 566.6 Fail |
+| `temp` | 25.0 | 0.10 | [22.5, 27.5] | 22.5 Pass / 27.5 Pass / 30.0 Fail |
+| `isc` | 10.5 | 0.05 | [9.975, 11.025] | 9.975 Pass |
+| `voc` | 48.0 | 0.05 | [45.6, 50.4] | 45.6 Pass / 50.4 Pass / 55.0 Fail |
+| `vm` | 40.0 | 0.05 | [38.0, 42.0] | 40.05 Pass |
+| `im` | 13.0 | 0.05 | **[12.35, 13.65]** | 12.35 Pass / 13.65 Pass / 12.0 Fail |
+| `ff` | 0.80 | 0.02 | [0.784, 0.816] | 0.784 Pass / 0.816 Pass / 0.779 Fail |
 
-### 1.3 失败（单一故障维度，`result=Fail`，指名未过项）
+### 0.2 电流分档是**独立**的第五项校验
 
-| ID | 故障 | 输入 | 预期未过校验 |
+`im` 必须同时满足：① 落在容差区间 `[12.35, 13.65]`；② 落在某个声明档位（`A=[12.0,14.0]`、`B=[14.0,15.5]`）。
+
+**实测的坑**：`im = 12.0`、`14.0`、`15.5` 全部 **Fail** —— 它们满足分档但违反容差（`parameter_tolerances` 报错），`current_band` 这一项本身反而是 Pass。
+
+| `im` 取值 | `parameter_tolerances` | `current_band` | 总结果 |
 | --- | --- | --- | --- |
-| J-F01 | 功率越下限 | `pmax=533.4` | `power_range` |
-| J-F02 | 功率越上限 | `pmax=567.0` | `power_range` |
-| J-F03 | 电流越档 | `im=16.5` | `current_band` |
-| J-F04 | 温度越界 | `temp=30.0`（>27.5） | `parameter_tolerances`（名 temp） |
-| J-F05 | Voc 越界 | `voc=55.0`（>50.4） | `parameter_tolerances`（名 voc） |
-| J-F06 | 外观 fail | `appearance_result=fail` | `appearance` |
-| J-F07 | 必填缺失 | `sn` 或 `grade` 或六参任一 `None/""` | `required_fields`（missing 列名） |
-| J-F08 | 分档缺表 | 规则 `current_bands=[]` 或 `im` 不落在任何档 | `current_band`（matched_band=None） |
+| 13.0（标准值） | Pass | Pass（A 档） | **Pass** |
+| 12.35 / 13.65（容差端点） | Pass | Pass（A 档） | **Pass** |
+| 12.0（A 档下界） | **Fail** | Pass | Fail |
+| 14.0（A/B 交界） | **Fail** | Pass | Fail |
+| 15.5（B 档上界） | **Fail** | Pass | Fail |
+| 15.6（B 档外） | **Fail** | **Fail** | Fail |
+| 16.5 | **Fail** | **Fail** | Fail |
 
-> 校验顺序钉住（固定序）：`J-F07`（缺字段）会先于其他项拦截；多项同时异常时，`checks` 返回全部 5 项的逐条结果（`Decision.checks`），不只首个失败。
+### 0.3 判定固定五步顺序，`checks` 返回全部五项
 
-### 1.4 参数未启用（`enabled=false` 跳过）
+① `required_fields` → ② `power_range` → ③ `parameter_tolerances` → ④ `current_band` → ⑤ `appearance`。任一 Fail 即总结果 Fail，但**五项都会算**，`Decision.checks` 里逐条给出输入、公式、计算值与结果。
+
+### 0.4 判定读数据库列，不读模型输出
+
+`judge()` 的入参来自 `module_inspections` 表的**原始列**（`judge.py::_inspection_in` 直接取 `row.pmax/temp/isc/voc/vm/im/ff/appearance_result`），**不是** LLM 的抽取值。
+
+实测对照（同一批两行）：
+
+| SN | 提交列 `pmax` | 模型抽取值 `pmax` | 判定 |
+| --- | --- | --- | --- |
+| `SN-N-001` | 533.5 | 547.3 | **Pass** |
+| `SN-N-002` | 533.4 | 551.94 | **Fail** |
+
+构造用例时只需控制提交列；抽取值与判定结果**没有**因果关系，不要用它做断言。
+
+### 0.5 必填字段缺一即**先于**其他项拦截（但后续项仍会算）
+
+① 检查 `sn / grade / captured_date / pmax / temp / isc / voc / vm / im / ff` 十项非空。
+
+> **实测注意**：把 `pmax` 置为 `None` 会让 ② `check_power_range` 抛
+> `TypeError: '<=' not supported between instances of 'float' and 'NoneType'`。
+> 即 ① 本身返回 Fail 但**不会短路**，② 会因为拿 `None` 做比较而崩。所以
+> **走接口的用例永远拿不到 `None`**（DDL 是 `NOT NULL`，`intake` 端点也会先挡）；
+> 只有直接调 `judge()` 的纯函数单测才会碰到，此时必须只断言 ① 的返回，
+> 或把该项换成空串 `""`（字符串比较同样会崩，故应在 ① 之后单独断言）。
+
+---
+
+## 1. 判定引擎 `judge()`
+
+基座输入（除标注变化的那一列外全部取此值）：
+
+```python
+BASE = {"sn": "SN-X", "project": "P-DEFAULT", "grade": "A", "captured_date": "2026-06-01",
+        "pmax": 550.0, "temp": 25.0, "isc": 10.5, "voc": 48.0, "vm": 40.0,
+        "im": 13.0, "ff": 0.80, "appearance_result": "pass"}
+```
+
+规则：`nameplate_power=550.0, power_tolerance=0.03`，参数标准与分档见 §0.1/§0.2。
+
+### 1.1 正常（全 Pass）
+
+| ID | 场景 | 变化字段 | 预期 `result` | 预期未过项 |
+| --- | --- | --- | --- | --- |
+| J-N01 | 全部标准值 | 无 | `Pass` | `[]` |
+| J-N02 | 功率取上限 | `pmax=566.5` | `Pass` | `[]` |
+| J-N03 | 功率取下限 | `pmax=533.5` | `Pass` | `[]` |
+| J-N04 | 温度取下界 | `temp=22.5` | `Pass` | `[]` |
+| J-N05 | 温度取上界 | `temp=27.5` | `Pass` | `[]` |
+| J-N06 | Voc 取下界 | `voc=45.6` | `Pass` | `[]` |
+| J-N07 | Voc 取上界 | `voc=50.4` | `Pass` | `[]` |
+| J-N08 | isc 取下界 | `isc=9.975` | `Pass` | `[]` |
+| J-N09 | ff 取下界 | `ff=0.784` | `Pass` | `[]` |
+| J-N10 | ff 取上界 | `ff=0.816` | `Pass` | `[]` |
+| J-N11 | im 容差下界 | `im=12.35` | `Pass` | `[]` |
+| J-N12 | im 容差上界 | `im=13.65` | `Pass` | `[]` |
+| J-N13 | vm 微偏 | `vm=40.05` | `Pass` | `[]` |
+
+### 1.2 边界（钉住闭区间语义，含对照组）
+
+| ID | 参数 | 取值 | 预期 `result` | 预期未过项 | 说明 |
+| --- | --- | --- | --- | --- | --- |
+| J-B01 | pmax | **533.5**（下限） | `Pass` | `[]` | 等于下限判 Pass |
+| J-B02 | pmax | **533.4**（下限 −0.1） | `Fail` | `['power_range']` | 对照组 |
+| J-B03 | pmax | **566.5**（上限） | `Pass` | `[]` | |
+| J-B04 | pmax | **566.6**（上限 +0.1） | `Fail` | `['power_range']` | 对照组 |
+| J-B05 | temp | 22.5 / 27.5 | `Pass` | `[]` | 两端点 |
+| J-B06 | temp | 30.0 | `Fail` | `['parameter_tolerances']` | |
+| J-B07 | ff | 0.784 / 0.816 | `Pass` | `[]` | 两端点 |
+| J-B08 | ff | 0.779 | `Fail` | `['parameter_tolerances']` | |
+| J-B09 | im | 12.35 / 13.65 | `Pass` | `[]` | **容差**端点，不是分档端点 |
+| J-B10 | im | **12.0**（A 档下界） | `Fail` | `['parameter_tolerances']` | ⚠️ 分档过、容差不过 |
+| J-B11 | im | **14.0**（A/B 交界） | `Fail` | `['parameter_tolerances']` | ⚠️ 同上 |
+| J-B12 | im | **15.5**（B 档上界） | `Fail` | `['parameter_tolerances']` | ⚠️ 同上 |
+| J-B13 | im | **15.6** | `Fail` | `['parameter_tolerances', 'current_band']` | 两项同时不过 |
+| J-B14 | im | **16.5** | `Fail` | `['parameter_tolerances', 'current_band']` | 全链路用到的越档值 |
+
+### 1.3 失败（单一故障维度）
+
+| ID | 故障 | 变化字段 | 预期 `result` | 预期未过项 |
+| --- | --- | --- | --- | --- |
+| J-F01 | 功率越下限 | `pmax=533.4` | `Fail` | `['power_range']` |
+| J-F02 | 功率越上限 | `pmax=566.6` | `Fail` | `['power_range']` |
+| J-F03 | 电流越档 | `im=16.5` | `Fail` | `['parameter_tolerances', 'current_band']` |
+| J-F04 | 温度越界 | `temp=30.0` | `Fail` | `['parameter_tolerances']` |
+| J-F05 | Voc 越界 | `voc=55.0` | `Fail` | `['parameter_tolerances']` |
+| J-F06 | 外观不合格 | `appearance_result='fail'` | `Fail` | `['appearance']` |
+| J-F07 | SN 为空 | `sn=''` | `Fail` | `['required_fields']` |
+
+### 1.4 判定证据的四元组（可复算）
+
+每条检查项都落 `input` / `formula` / `computed` / `result`。实测样例（`pmax=566.6`）：
+
+```json
+{"rule": "power_range",
+ "input": {"nameplate_power": 550.0, "tolerance": 0.03, "pmax": 566.6},
+ "formula": "lower = nameplate * (1 - tol); upper = nameplate * (1 + tol)",
+ "computed": {"lower": 533.5, "upper": 566.5},
+ "result": "Fail"}
+```
+
+`parameter_tolerances` 项的 `computed` 逐参数给出 `{lower, upper, value}`，实测（全标准值时）：
+
+```json
+{"temp": {"lower": 22.5, "upper": 27.500000000000004, "value": 25.0},
+ "isc":  {"lower": 9.975, "upper": 11.025, "value": 10.5},
+ "voc":  {"lower": 45.599999999999994, "upper": 50.400000000000006, "value": 48.0},
+ "vm":   {"lower": 38.0, "upper": 42.0, "value": 40.0},
+ "im":   {"lower": 12.35, "upper": 13.65, "value": 13.0},
+ "ff":   {"lower": 0.784, "upper": 0.8160000000000001, "value": 0.8}}
+```
+
+> 浮点表示带尾数（如 `27.500000000000004`）是预期行为，断言请用容差比较而非 `==`。
+
+### 1.5 参数未启用
 
 | ID | 场景 | 输入 | 预期 |
 | --- | --- | --- | --- |
-| J-X01 | ff 停用 | 规则 `ff.enabled=false` + 实测 `ff=0.50` | `parameter_tolerances` 跳过 ff，判 Pass |
-| J-X02 | 多参停用 | `temp/ff.enabled=false` | 仅 isc/voc/vm/im 参与容差 |
+| J-X01 | ff 停用 | 规则 `ff.enabled=false` + 实测 `ff=0.50` | `parameter_tolerances` 跳过 ff → `Pass` |
+| J-X02 | 多参停用 | `temp`、`ff` 均 `enabled=false` | 仅 isc/voc/vm/im 参与容差校验 |
 
 ---
 
----
+## 2. 抽样 `iso_lookup` / `freeze_sample`
 
-## 2. 抽样 `iso_lookup` / `freeze_sample`（D9 无静默默认放行）
+### 2.1 正常（`iv` / `normal`，实测命中值）
 
-`iso_lookup(inspection_type, inspection_level, aql, lot_size, iso_table)` 查预置 ISO 行；查不到 → 判规则异常（禁止按默认值放行，与架构 §10 一致）。冻结样本按 `seed=batch_id` 确定性重放。
-
-### 2.1 正常
-
-| ID | 输入（type, level, aql, lot） | 预期 |
+| ID | 输入 `(type, level, aql, lot)` | 预期 |
 | --- | --- | --- |
-| S-N01 | `iv, normal, 1.0, lot=10` | 命中 9–15 行：`n=13, ac=0, re=1` |
-| S-N02 | `iv, normal, 0.65, lot=5` | 命中 2–8 行：`n=8, ac=0, re=1` |
-| S-N03 | `iv, normal, 1.5, lot=20` | 命中 16–25 行：`n=20, ac=1, re=2` |
+| S-N01 | `iv, normal, 1.0, lot=10` | `n=13, ac=0, re=1` |
+| S-N02 | `iv, normal, 1.0, lot=5` | `n=8, ac=0, re=1` |
+| S-N03 | `iv, normal, 1.0, lot=20` | `n=20, ac=1, re=2` |
+| S-N04 | `iv, normal, 0.65, lot=100` | `n=80, ac=3, re=4` |
+| S-N05 | `iv, normal, 1.5, lot=100` | `n=80, ac=5, re=6` |
+| S-N06 | `visual, normal, 1.0, lot=10` | `n=13, ac=0, re=1` |
 
-### 2.2 边界（lot 区间端点）
+### 2.2 边界（lot 区间端点，`iv/normal/aql=1.0` 实测）
 
-| ID | lot | 命中行 | 预期 |
+| ID | lot | 命中区间 | 预期 |
 | --- | --- | --- | --- |
-| S-B01 | 8 | 2–8（含上界） | `n=8` |
-| S-B02 | 9 | 9–15（含下界） | `n=13` |
-| S-B03 | 15 | 9–15 | `n=13` |
-| S-B04 | 16 | 16–25 | `n=20` |
-| S-B05 | 25 | 16–25 | `n=20` |
-| S-B06 | 50 | 26–50 | `n=32` |
-| S-B07 | 90 | 51–90 | `n=50` |
+| S-B01 | 2 | 2–8 | `n=8, ac=0, re=1` |
+| S-B02 | 8 | 2–8（含上界） | `n=8, ac=0, re=1` |
+| S-B03 | 9 | 9–15（含下界） | `n=13, ac=0, re=1` |
+| S-B04 | 15 | 9–15 | `n=13, ac=0, re=1` |
+| S-B05 | 16 | 16–25 | `n=20, ac=1, re=2` |
+| S-B06 | 25 | 16–25 | `n=20, ac=1, re=2` |
+| S-B07 | 26 | 26–50 | `n=32, ac=1, re=2` |
+| S-B08 | 50 | 26–50 | `n=32, ac=1, re=2` |
+| S-B09 | 51 | 51–90 | `n=50, ac=2, re=3` |
+| S-B10 | 90 | 51–90 | `n=50, ac=2, re=3` |
+| S-B11 | 91 | 91–150 | `n=80, ac=3, re=4` |
+| S-B12 | 150 | 91–150 | `n=80, ac=3, re=4` |
 
-### 2.3 失败（D9：缺表 → 无静默放行）
+### 2.3 失败（D9：缺表即规则异常，**没有静默默认放行**）
 
 | ID | 输入 | 预期 |
 | --- | --- | --- |
-| S-F01 | lot=1（低于 2 下界） | `iso_lookup` 返 None → 判 `rule_missing`，**不**默认放行 |
-| S-F02 | lot=151（超 150 上界） | None → `rule_missing` |
-| S-F03 | 未预置的 `(type,level,aql)` 组合 | None → `rule_missing`（如 `visual, normal, 1.5, lot=200`） |
-| S-F04 | 冻结后重复冻结（幂等重放） | 同一 seed 选中相同 SN 集，不重复写入 |
+| S-F01 | `lot=1`（低于最小下界 2） | `iso_lookup → None` → 抽样结论 `rule_missing` |
+| S-F02 | `lot=151`（超最大上界 150） | `None` → `rule_missing` |
+| S-F03 | 未预置组合 `(type,level,aql)`，如 `iv, tightened, 1.0, lot=20` | `None` → `rule_missing` |
+| S-F04 | `freeze_sample` 同一 seed 重放 | 选中 SN 集完全一致（实测两次调用结果相同） |
+| S-F05 | 可用 SN 少于 `n` | 选中全部可用 SN（`n = min(iso.n, len(sns))`），不报错 |
 
-> **与放行断言 ⑦ 联动**：放行时 `release.py` 用预置 `full` 行（`aql=0.65, lot=1..100`）构造 `ReinspectionScopeIn`，`iso_lookup` 解析非 None 才过（见 §4 R-N07）。
+**端到端实测**：批次计划数量 `151`，判定结果 `Pass`，但抽样结论 `rule_missing`，批次被 **隔离** 并自动建 `rule_missing / major` 异常，轨迹 `structured_output = {"result": "Pass", "sample_result": "rule_missing"}`。
 
 ---
 
----
+## 3. 状态机 `transition()`
 
-## 3. 状态机 `transition()`（批次 10 态 / 异常 7 态）
+`transition(current, target, preconditions, kind)` 表驱动，非法边与前置不足都返回 `accepted=False` 并给出 `reason`。
 
-`transition(current, target, preconditions, kind)` 表驱动；前置条件未满足 → `accepted=False` + 指名缺失。纯数据表（`state_machine.py`）。
+### 3.1 批次合法边（实测全表）
 
-### 3.1 正常（合法边 + 前置满足）
-
-| ID | 机 | 转移（前置） | 预期 |
-| --- | --- | --- | --- |
-| T-N01 | 批次 | `draft → pending_intake`（∅） | accepted |
-| T-N02 | 批次 | `pending_judge → pending_release`（`all_pass, sample_pass`） | accepted |
-| T-N03 | 批次 | `pending_recheck → pending_release`（`recheck_passed, measures_effective`） | accepted |
-| T-N04 | 批次 | `pending_release → released`（`assertions_passed, human_approved`） | accepted |
-| T-N05 | 批次 | `released → archived`（∅，D6a 空前置） | accepted |
-| T-N06 | 异常 | `new → isolated`（`sn_linked`） | accepted |
-| T-N07 | 异常 | `isolated → assigned`（`owner_assigned`） | accepted |
-
-### 3.2 边界（前置临界 / 终态不可达）
-
-| ID | 转移 | 说明 | 预期 |
-| --- | --- | --- | --- |
-| T-B01 | `rejected → archived`（∅） | 终态自动归档（D6a） | accepted |
-| T-B02 | `archived → *`（任意） | 归档为终态，无出边 | rejected（no transition） |
-| T-B03 | 批次 `pending_judge → pending_release` 但 `sample_pass=False` | 前置缺 1 项 | rejected（指名 sample_pass） |
-| T-B04 | 异常 `pending_recheck → rejected`（∅） | 复检失败分支 | accepted |
-
-### 3.3 失败（非法 / 前置缺）
-
-| ID | 转移 | 预期 |
+| 从 | 到 | 前置条件 |
 | --- | --- | --- |
-| T-F01 | 批次 `new → isolated` 前置缺 `sn_linked` | rejected（precondition not met） |
-| T-F02 | 批次 `draft → released`（跳态） | rejected（no transition 边） |
-| T-F03 | 未知 `kind="foo"` | rejected（unknown kind） |
-| T-F04 | 异常 `new → assigned`（直跳，P0 表无此边） | rejected（钉住不得直跳，`test_sample3` 断言） |
+| `draft` | `pending_intake` | （空） |
+| `draft` | `rejected` | `human_rejected` |
+| `pending_intake` | `pending_judge` | （空） |
+| `pending_intake` | `rejected` | `human_rejected` |
+| `pending_judge` | `pending_release` | `all_pass`, `sample_pass` |
+| `pending_judge` | `isolated` | `any_fail` |
+| `pending_judge` | `rejected` | `human_rejected` |
+| `isolated` | `disposing` | `assigned_owner`, `due_at_set` |
+| `isolated` | `rejected` | `human_rejected` |
+| `disposing` | `pending_recheck` | `measures_confirmed` |
+| `pending_recheck` | `pending_release` | `recheck_passed`, `measures_effective` |
+| `pending_recheck` | `rejected` | （空） |
+| `pending_release` | `released` | `assertions_passed`, `human_approved` |
+| `pending_release` | `rejected` | `human_rejected` |
+| `released` | `archived` | （空） |
+| `rejected` | `archived` | （空） |
 
----
+> `archived` **无任何出边**（终态）。
 
----
+### 3.2 异常合法边（实测全表）
 
-## 4. 放行断言 `assert_release()`（七项逐条）
-
-`assert_release(batch, sample, incidents, isolated_sns, evidence, capa, reinspection_scopes, iso_table, required_sns)` 返回逐条结果，绝不裸 bool。任一项 Fail 即 `passed=False`，逐项 reason 指名（spec §2.4）。
-
-### 4.1 正常（七项全过，`passed=True`）
-
-| ID | 各入参取值 | 预期 |
+| 从 | 到 | 前置条件 |
 | --- | --- | --- |
-| R-N01 | 批次 `pending_release`；`sample=pass`；无 open critical；无隔离 SN；证据非空；CAPA 全 verified；复检覆盖齐 + ISO 可解析 | 7/7 Pass，`passed=True` |
+| `new` | `isolated` | `sn_linked` |
+| `isolated` | `assigned` | `owner_assigned` |
+| `isolated` | `scrapped` | — |
+| `assigned` | `pending_recheck` | `reinspection_recorded` |
+| `assigned` | `scrapped` | `scrap_approved` |
+| `pending_recheck` | `closed` | `close_conditions_met` |
+| `pending_recheck` | `rejected` | （空） |
+
+> **⚠️ 没有 `assigned → rejected`，也没有 `new → assigned`。**
+> `new` 必须先 `isolated`；`assigned` 必须先进 `pending_recheck` 才能转 `rejected`。
+
+### 3.3 用例
+
+| ID | 调用 | 预期 |
+| --- | --- | --- |
+| T-N01 | batch `draft → pending_intake`（∅） | `accepted=True` |
+| T-N02 | batch `pending_judge → pending_release`（`all_pass, sample_pass`） | `accepted=True` |
+| T-N03 | batch `pending_recheck → pending_release`（`recheck_passed, measures_effective`） | `accepted=True` |
+| T-N04 | batch `pending_release → released`（`assertions_passed, human_approved`） | `accepted=True` |
+| T-N05 | batch `released → archived`（∅） | `accepted=True` |
+| T-N06 | batch `rejected → archived`（∅） | `accepted=True` |
+| T-N07 | incident `new → isolated`（`sn_linked`） | `accepted=True` |
+| T-N08 | incident `isolated → assigned`（`owner_assigned`） | `accepted=True` |
+| T-N09 | incident `pending_recheck → closed`（`close_conditions_met`） | `accepted=True` |
+| T-B01 | batch `pending_judge → pending_release`（只给 `all_pass`） | `accepted=False`，`reason` 含 `precondition(s) not met: sample_pass` |
+| T-B02 | batch `pending_release → released`（只给 `assertions_passed`） | `accepted=False`，`reason` 含 `precondition(s) not met: human_approved` |
+| T-B03 | incident `new → isolated`（∅，缺 `sn_linked`） | `accepted=False`，`reason` 含 `precondition(s) not met: sn_linked` |
+| T-B04 | incident `assigned → pending_recheck`（只给 `measures_confirmed`） | `accepted=False`，`reason` 含 `precondition(s) not met: reinspection_recorded` |
+| T-B05 | incident `assigned → scrapped`（∅） | `accepted=False`，`reason` 含 `precondition(s) not met: scrap_approved` |
+| T-F01 | batch `draft → released`（跳态） | `accepted=False`，`reason = "no transition batch:draft -> released (skip/invalid)"` |
+| T-F02 | batch `archived → pending_intake` | `accepted=False`，`archived` 无出边 |
+| T-F03 | incident `new → assigned`（直跳） | `accepted=False`，`no transition incident:new -> assigned` |
+| T-F04 | **incident `assigned → rejected`** | `accepted=False`，`no transition incident:assigned -> rejected` |
+| T-F05 | batch `rejected → rejected`（重复拒绝） | `accepted=False`，`no transition batch:rejected -> rejected` |
+| T-F06 | `kind="foo"` | `accepted=False`，`reason = "unknown kind: foo"` |
+| T-F07 | batch `new → isolated`（把异常状态当批次用） | `accepted=False`，`no transition batch:new -> isolated` |
+
+---
+
+## 4. 放行断言 `assert_release()`（七项）
+
+七项名称固定（`app/skills/release_inputs.py::RELEASE_ASSERTION_NAMES`）：
+`state` / `sample_passed` / `no_open_critical_incident` / `no_isolated_sn` / `all_evidence_present` / `all_capa_verified` / `reinspection_scope_covered`。
+
+### 4.1 正常
+
+| ID | 输入 | 预期 |
+| --- | --- | --- |
+| R-N01 | 批次 `pending_release`；抽样最新结论 `pass`；无 open critical；无隔离 SN；证据非空且都带 `object_ref`；所有 CAPA `verified=True`；复检范围覆盖齐且 ISO 可解析 | 7/7 `passed=True` |
 
 ### 4.2 边界（逐项单独阻断，逐项指名）
 
-每项单独造一个 Fail，其余 6 项保持 Pass，验证「逐条返回 + 指名未满足项」：
-
-| ID | 阻断项 | 输入变化 | 预期 reason |
+| ID | 阻断项 | 输入变化 | 预期 `reason`（实测原文） |
 | --- | --- | --- | --- |
-| R-B01 | ① state | 批次 `status=pending_recheck`（非 pending_release） | `state` Fail，「expected pending_release」 |
-| R-B02 | ② sample_passed | `sample.result=fail` | `sample_passed` Fail |
-| R-B03 | ③ no_open_critical | 存在 open critical 异常（`severity=critical, status=isolated`） | `no_open_critical_incident` Fail（列异常 id） |
-| R-B04 | ④ no_isolated_sn | `isolated_sns=["SN-X"]` 非空 | `no_isolated_sn` Fail（列 SN） |
-| R-B05 | ⑤ all_evidence | `evidence=[]` 或某行 `evidence_id` 空 | `all_evidence_present` Fail |
-| R-B06 | ⑥ all_capa_verified | 某 CAPA `verified=False` | `all_capa_verified` Fail（列异常 id） |
-| R-B07 | ⑦ 复检覆盖 | open 异常无 scope row / scope 未覆盖 required SN / ISO 返 None | `reinspection_scope_covered` Fail（指名缺失 SN 或「ISO」） |
+| R-B01 | ① `state` | 批次 `status='pending_recheck'` | `state` Fail |
+| R-B02 | ② `sample_passed` | `sample.result='fail'` | `"sample result is fail, expected pass"` |
+| R-B03 | ② 无结论 | `sample.result=''` | `"no sampling conclusion for inspection_type <type>"` |
+| R-B04 | ③ `no_open_critical_incident` | 存在 `severity=critical` 且非终态的异常 | `"N open critical incident(s): <ids>"` |
+| R-B05 | ④ `no_isolated_sn` | `isolated_sns=['SN-X']` | `"isolated SNs remain: SN-X"` |
+| R-B06 | ⑤ `all_evidence_present` | `evidence=[]` | `"missing required evidence"` |
+| R-B07 | ⑤ 证据未锚定 | 某证据 `object_ref=None` | `"evidence not traceable to an object (missing id/object_ref): E1"` |
+| R-B08 | ⑥ `all_capa_verified` | 某 CAPA `verified=False` | `"unverified CAPA: <incident_id>"` |
+| R-B09 | ⑦ `reinspection_scope_covered` | open 异常**无** scope 行 | `"open incident I1 has no reinspection scope row"` |
+| R-B10 | ⑦ 覆盖不全 | required `['SN-1','SN-2']`，scope 只覆盖 `['SN-1']` | `"incident I1: scope covers ['SN-1'] but required ['SN-1', 'SN-2']; missing ['SN-2']"` |
+| R-B11 | ⑦ ISO 查不到 | scope 行的 `(type, level, aql, lot)` 在表中无匹配 | `"incident I1: ISO lookup returned None for (iv, normal, AQL=1.0, lot_size=10)"` |
+| R-B12 | ⑦ 规则方案缺项 | scope 行 `plan_error="sample_plan missing ['aql']"` | `"incident I1: sample_plan missing ['aql']"` |
 
-### 4.3 失败（多阻断叠加 + D7）
+### 4.3 失败（叠加 + 端到端）
 
 | ID | 场景 | 预期 |
 | --- | --- | --- |
-| R-F01 | ②④⑦ 同时 Fail | `passed=False`，`checks` 含 3 项 Fail 各带 reason |
-| R-F02 | D7 拒绝批 only incident 报告 | `rejected` 批次调 `report(report_type=release)` → 409（见 §6） |
-
-> **⑦ 两种模式**：传 `required_sns`（权威，来自 `incident_sn_links`）→ 缺口逐项指名；不传（Phase 0 向后兼容）→ 自引用模式（H-3 已知限制，open 异常无 scope row 不阻断，需传 `required_sns` 才捕获）。
+| R-F01 | ②④⑦ 同时不满足 | `passed=False`，`checks` 三项各带 `reason`，其余四项仍为 Pass |
+| R-F02 | API 层：批次非 `pending_release` | `409 {"error": "batch_not_pending_release", "status": "..."}` |
+| R-F03 | API 层：批次已 `archived` | `409 {"error": "batch archived, terminal state"}` |
+| R-F04 | API 层：断言失败（如抽样 fail 未闭环） | **`200`** + `passed=false` + 逐项 `checks`；**不是** 4xx/5xx —— 断言失败是可重试的业务结论，不是错误 |
+| R-F05 | 断言失败后批次状态 | **不变**（实测：`200` 返回后批次仍为 `pending_release`，未写入 `release_decision`） |
 
 ---
 
----
+## 5. 异常关闭 `close_incident()`（五条件）
 
-## 5. 异常关闭 `close_incident()`（五硬约束）
+`close_incident(incident, reinspection, capa_verified) -> CloseResult(can_close, missing)`，缺一即 `can_close=False`。API 层还额外补三项：`sn_not_linked`、`original_decision_evidence`、`containment_action`。
 
-`close_incident(incident, reinspection, capa_verified)` 返回 `can_close` + `missing` 元组。缺一即 `can_close=False`。
-
-### 5.1 正常（五条件全满足）
+### 5.1 正常
 
 | ID | 输入 | 预期 |
 | --- | --- | --- |
-| C-N01 | `owner=ZHL-QA`；根因+纠正措施非空；复检记录 `result=pass`；`capa_verified=True` | `can_close=True, missing=()` |
+| C-N01 | `owner='ZHL-QA'`；根因 + 纠正措施非空；复检 `result='pass'`；`capa_verified=True`；异常已关联 SN；有判定证据；临时措施非空 | `can_close=True, missing=()`，接口 `200` |
 
-### 5.2 边界（单项临界）
+### 5.2 边界（单项缺失，实测 `missing` 原文）
 
-| ID | 输入 | 预期 missing |
+| ID | 缺什么 | 输入 | 预期 `missing` |
+| --- | --- | --- | --- |
+| C-B01 | 责任人 | `owner=""` | `["owner"]`（叠加其他时一起出现） |
+| C-B02 | CAPA 字段 | 根因或纠正措施为空串 | 含 `capa_fields` |
+| C-B03 | 复检记录 | `reinspection=None` | 含 `reinspection_record` |
+| C-B04 | 复检通过 | `reinspection.result='fail'` | 含 `reinspection_passed` |
+| C-B05 | 已验证 | `capa_verified=False` | 含 `capa_verified` |
+| C-B06 | 临时措施 | `containment_action` 为空 | 含 `containment_action`（API 层补） |
+
+### 5.3 失败（叠加 + 状态守卫）
+
+| ID | 场景 | 预期 |
 | --- | --- | --- |
-| C-B01 | `owner=""` | 含 `owner` |
-| C-B02 | 根因或措施空串 | 含 `capa_fields` |
-| C-B03 | `reinspection=None` | 含 `reinspection_record` |
-| C-B04 | `reinspection.result=fail` | 含 `reinspection_passed` |
-| C-B05 | `capa_verified=False` | 含 `capa_verified` |
+| C-F01 | 无复检 + 未勾验证 + 临时措施为空 | `409 {"error": "close_conditions_unmet", "missing": ["reinspection_record", "capa_verified", "containment_action"]}`（**一次全列**） |
+| C-F02 | 复检已有但未勾验证、临时措施已填 | `409 … "missing": ["capa_verified"]` |
+| C-F03 | 异常状态为 `new` | `409 {"error": "incident_not_closeable", "status": "new"}` |
+| C-F04 | 异常状态为 `isolated` | `409 {"error": "incident_not_closeable", "status": "isolated"}` |
+| C-F05 | 异常状态为 `assigned` | `409 {"error": "incident_not_closeable", "status": "assigned"}` |
+| C-F06 | 异常状态为 `rejected` | `409 {"error": "incident_not_closeable", "status": "rejected"}` |
+| C-F07 | 批次已 `archived` | `409 {"error": "batch archived, terminal state"}` |
 
-### 5.3 失败（多项叠加 + 归档守卫）
+### 5.4 CAPA 的「已验证」门禁（L3）
 
-| ID | 输入 | 预期 |
-| --- | --- | --- |
-| C-F01 | 全部缺失 | `missing` 含 owner/capa_fields/reinspection_record/capa_verified（一次全指名，M-5） |
-| C-F02 | 批次已归档后补勾 capa | `409 batch archived, terminal state`（D8，M-8） |
+| ID | 场景 | 输入 | 预期 |
+| --- | --- | --- | --- |
+| C-V01 | `verified=True` 但无复检记录 | `POST /capa`，`verified=true` | `400 {"error": "capa_verified_requires_pass_reinspection"}` |
+| C-V02 | `verified=True` 且复检 `fail` | 同上 | 同上 400 |
+| C-V03 | `verified=True` 且复检 `pass` | 同上 | `200` |
+| C-V04 | `verified=False` | 同上，先不勾 | `200`（允许先填字段，后补勾） |
+| C-V05 | 异常 `pending_recheck` 态补勾 | 复检已有且 `pass` | `200`，无状态转移（只更新字段） |
 
 ---
 
----
-
-## 6. API 守卫层（B3 / D8 / D7 / 跨批冲突 / 404）
-
-路由层错误响应（`AGENT.md` B3 结构化 detail）。
+## 6. 复检范围
 
 ### 6.1 正常
 
+| ID | 输入 | 预期 |
+| --- | --- | --- |
+| RS-N01 | `scope_type="minimal"`，不传 `scope_sns` | 服务端自动填为该异常 `incident_sn_links` 的全部 SN；`scope_applied="minimal"` |
+| RS-N02 | `scope_type="expanded"` 且 `scope_sns` 覆盖最小组件集 | `201`，`scope_applied="expanded"`；轨迹记 `scope_expansion=true` |
+
+### 6.2 边界与失败
+
+| ID | 输入 | 预期 |
+| --- | --- | --- |
+| RS-B01 | `scope_type="expanded"`，不传 `scope_sns` | `400 {"error": "scope_sns_required"}` |
+| RS-B02 | `scope_sns` 未覆盖最小组件集 | `400 {"error": "scope_gap", "missing": [...]}` |
+| RS-B03 | 未知 `scope_type` | `400 {"error": "unknown_scope_type", "scope_type": "..."}` |
+| RS-B04 | 异常状态为 `new` | `409 {"error": "incident_not_reinspectable", "status": "new"}` |
+| RS-B05 | 异常状态为 `closed` | `409 {"error": "incident_not_reinspectable", "status": "closed"}` |
+| RS-B06 | `result="fail"`，异常在 `pending_recheck` | `201`；异常 → `rejected`；批次 → `rejected` |
+| RS-B07 | **`result="fail"`，异常仍在 `assigned`** | **`409 {"error": "incident_transition_denied", "reason": "no transition incident:assigned -> rejected (skip/invalid)"}`** —— 必须先经 `pending_recheck` |
+| RS-B08 | `result="pass"` | `201`，`passed=true`；异常与批次状态**不变**（关闭是后续人工动作） |
+| RS-B09 | 复检写回 `verification_id` | 复检行独立落库，`module_inspections` 原值不变 |
+
+---
+
+## 7. 复检闭环结论（第 2 轮抽样）
+
+**为什么存在**：抽样 `fail` → 隔离 → 异常处置 → 复检 → 关闭 → 待放行。放行断言②读的是「最新一轮抽样结论」（按 `sample_round` 取最大）。若无人回写第 2 轮，批次会**永久卡在断言②**。
+
+`derive_remediation_conclusion(sample)` 判定一个 SN「已解除」的三条硬条件：
+
+1. 该 SN 至少关联一个异常（判 fail 却无异常 = 闭环根本没走）；
+2. 其关联异常**全部**处于 `closed` —— `rejected` / `scrapped` **不算解除**；
+3. 存在 `result='pass'` 且 `scope_sns` 覆盖该 SN 的复检记录。
+
+### 7.1 正常
+
+| ID | 输入 | 预期 |
+| --- | --- | --- |
+| RC-N01 | 样本全部 `judge_result='pass'` | `result='pass'` |
+| RC-N02 | 判 fail 的 SN 有异常且全部 `closed` + 有覆盖它的通过复检 | `result='pass'` |
+| RC-N03 | 走完完整闭环（实测） | 新增 `sample_round=2, result='pass'`；批次 → `pending_release` |
+
+### 7.2 边界与失败
+
+| ID | 输入 | 预期 |
+| --- | --- | --- |
+| RC-B01 | 样本为空列表 | `result='fail'`，`reason='no sampled SN to conclude on'`（**空不等于通过**） |
+| RC-B02 | SN 判 fail 但无任何关联异常 | `fail`，`reason` 含 `judged fail with no incident linked` |
+| RC-B03 | SN 的异常停在 `pending_recheck` | `fail`，`reason` 含 `incident not closed: <id>(pending_recheck)` |
+| RC-B04 | SN 的异常是 `rejected` | `fail`，`reason` 含 `incident not closed: <id>(rejected)` |
+| RC-B05 | SN 的异常是 `scrapped` | `fail`，同上 |
+| RC-B06 | 有 `closed` 异常但无通过复检覆盖 | `fail`，`reason` 含 `no passing reinspection covering this SN` |
+| RC-B07 | 复检 `pass` 但 `scope_sns` 未覆盖该 SN | `fail`，同上 |
+| RC-B08 | 复检覆盖该 SN，但复检属于**别的**异常 | `fail`（覆盖口径绑定 SN 自己的异常） |
+
+### 7.3 API 层 `/recheck`
+
+| ID | 场景 | 预期 |
+| --- | --- | --- |
+| RC-A01 | 批次 `pending_release`，闭环成立 | `200`，`written=true`，`sample_round=2`，随后放行断言②转 Pass |
+| RC-A02 | 再调一次（幂等） | `200`，`written=false`，`skipped="already_passed"`（实测） |
+| RC-A03 | 批次无任何抽样结论 | `200`，`written=false`，`skipped="no_sample_conclusion"` |
+| RC-A04 | 闭环未成立 | `200`，`result="fail"` + `reason` 指名未解除的 SN，**不写任何结论行** |
+| RC-A05 | 批次非 `pending_release` | `409 {"error": "batch_not_pending_release", "status": "..."}` |
+| RC-A06 | 批次已 `archived` | `409 {"error": "batch archived, terminal state"}` |
+
+---
+
+## 8. API 守卫层
+
+### 8.1 正常
+
 | ID | 端点 | 输入 | 预期 |
 | --- | --- | --- | --- |
-| G-N01 | `POST /api/batches` | 合法 rule_version_id + 字段 | `201 status=pending_intake` |
-| G-N02 | `POST /api/batches/{id}/judge` | 全 confirmed | `200`（逐 SN 判定） |
-| G-N03 | `GET /api/batches/{id}` | 已知 UUID | `200`（批次 + 时间线） |
+| G-N01 | `POST /api/batches` | 合法 `rule_version_id`（published） | `201 {"status": "pending_intake"}` |
+| G-N02 | `POST /api/intake` | 全部行以标准值提交 | `200 {"status": "confirmed"}`，批次推进 |
+| G-N03 | `POST /api/batches/{id}/judge` | 全部 SN 已确认 | `200`（逐 SN 判定） |
+| G-N04 | `GET /api/batches/{id}` | 已知 UUID | `200`（批次 + 逐 SN + 抽样结论 + 时间线） |
+| G-N05 | `POST /api/batches/{id}/release` | 断言全过 + `approved_by` | `200 {"passed": true, "status": "released"}` |
 
-### 6.2 边界（UUID 守卫 B3）
+### 8.2 边界
 
 | ID | 端点 | 输入 | 预期 |
 | --- | --- | --- | --- |
-| G-B01 | `GET /api/batches/{id}` | 畸形 UUID（非 UUID 串） | `404`（不 500，`test_batches_uuid_guard`） |
-| G-B02 | `POST /api/batches` | 未知 `rule_version_id` | `400 unknown rule version` |
-| G-B03 | `POST /api/intake` | 低置信（conf<0.8） | `status=pending` + `low_conf_sns` |
+| G-B01 | `GET /api/batches/{id}` | 畸形 UUID `not-a-uuid` | `404 {"detail": {"batch_id": "not-a-uuid"}}`（**不 500**） |
+| G-B02 | `GET /api/batches/{id}` | 不存在的合法 UUID | `404`（同上形状） |
+| G-B03 | `POST /api/batches` | 未知 `rule_version_id` | `400 {"reason": "unknown rule version"}` |
+| G-B04 | `POST /api/batches` | 规则为 `draft` / `disabled` | `400 {"reason": "rule version not published", "status": "draft"}` |
+| G-B05 | `POST /api/intake` | 计划数量 `151` | `200` 但抽样 `rule_missing` → 批次隔离 + 自动建 `rule_missing / major / new` 异常；轨迹 `{"result": "Pass", "sample_result": "rule_missing"}` |
+| G-B05b | `POST /api/intake` | **计划数量 `1`** | 同上（ISO 表最小 lot 区间是 2–8）：抽报 `rule_missing`、批次隔离 |
+| G-B06 | `POST /api/intake` | 含 `SN-LOW-*`（Mock） | `200 {"status": "pending", "confidence": 0.62, "low_conf_sns": ["SN-LOW-001"]}`（批次 `confidence` = 各 SN 最小值） |
+| G-B06b | `POST /api/intake` | 10 个 `SN-N-*`（Mock） | `200 {"status": "confirmed", "confidence": 0.851, "low_conf_sns": []}`（0.851 是这 10 个里最低的 `SN-N-008`） |
+| G-B07 | `POST /api/intake` | 同时传 `raw_source` 与 `inspections` | `400 {"reason": "ambiguous_intake"}` |
+| G-B08 | `POST /api/intake` | 行数 ≠ 9 列 | `400`（`incomplete_inspection`，前端也会先拦） |
 
-### 6.3 失败（409 / 400 守卫）
+### 8.3 失败（409 / 400 守卫）
 
 | ID | 端点 | 场景 | 预期 |
 | --- | --- | --- | --- |
-| G-F01 | `POST /api/batches/{id}/report` | 批次已 `archived` | `409`（D8 `require_not_archived`） |
-| G-F02 | `POST /api/batches/{id}/reject` | 批次已 `archived` | `409`（D8） |
-| G-F03 | `POST /api/batches/{id}/reject` | 未知 batch UUID | `404` |
-| G-F04 | `POST /api/batches/{id}/report` | `rejected` 批次 + `report_type=release` | `409`（D7 仅 incident） |
-| G-F05 | `POST /api/intake` | 跨批同 SN | `400 cross_batch_sn_conflict`（+ 自动建 data_consistency 异常） |
-| G-F06 | `POST /api/batches/{id}/judge` | 含未确认 SN | `400 unconfirmed_sns=[…]`（A4） |
-| G-F07 | `POST /api/incidents/{id}/attribute` | LLM fixture 无该 incident 键 | `200 {hypotheses:[], hint}`（非 404/500，spec §6 Q3） |
+| G-F01 | 任意写端点 | 批次已 `archived` | `409 {"error": "batch archived, terminal state"}`（实测 6 个端点一致） |
+| G-F02 | `POST /api/batches/{id}/report` | `rejected` 批次 + `report_type=release` | `409 {"error": "rejected_batch_only_incident_report", "report_type": "release"}` |
+| G-F03 | `POST /api/batches/{id}/report` | **`isolated` 批次 + `report_type=release`** | `409 {"error": "release_report_requires_released_batch", "status": "isolated", "hint": "..."}` |
+| G-F04 | `POST /api/batches/{id}/judge` | 含未确认 SN | `400 {"detail": {"unconfirmed_sns": [...]}}` |
+| G-F05 | `POST /api/intake` | 跨批同 SN | `400 {"reason": "cross_batch_sn_conflict", "error": "SN 'X' already recorded in a different batch"}` + 在被占用批次上自动建 `data_consistency / critical / new` 异常 |
+| G-F06 | `POST /api/intake` | 同批重复 SN | `400 {"reason": "sn_already_intaked", "duplicate_sns": [...]}` |
+| G-F07 | `POST /api/intake` | 批次不在 `pending_intake` | `409 {"error": "batch_not_pending_intake", "status": "...", "expected": "pending_intake"}` |
+| G-F08 | `POST /api/intake/{id}/confirm` | 批次已离开 `pending_intake` | `409 {"error": "no_pending_confirmation", "status": "...", "expected": "pending_intake"}` |
+| G-F09 | `POST /api/incidents` | 批次非 `isolated` | `409 {"error": "batch_not_isolated", "status": "..."}` |
+| G-F10 | `POST /api/incidents` | `affected_sns` 含批外 SN | `400 {"error": "sn_not_found", "missing": [...]}` |
+| G-F11 | `POST /api/incidents` | 引用了不存在的证据 id | `400 {"error": "evidence_not_found", "missing": [...]}` |
+| G-F12 | `POST /api/incidents/{id}/isolate` | 异常非 `new` | `409 {"error": "incident_not_new", "status": "..."}` |
+| G-F13 | `POST /api/incidents/{id}/assign` | 异常非 `isolated` | `409 {"error": "incident_not_assignable", "status": "..."}` |
+| G-F14 | `POST /api/incidents/{id}/capa` | 异常非 `assigned` 且非 `pending_recheck` | `409 {"error": "incident_not_assigned", "status": "..."}` |
+| G-F15 | `POST /api/batches/{id}/release` | 批次非 `pending_release` | `409 {"error": "batch_not_pending_release", "status": "..."}` |
+| G-F16 | `POST /api/batches/{id}/reject` | 批次已是 `rejected` | `409 {"error": "batch_reject_not_allowed", "from_status": "rejected", "reason": "no transition batch:rejected -> rejected (skip/invalid)"}` |
 
----
+### 8.4 AI 归因端点
 
----
-
-## 7. 汇总表（ID 一览）
-
-| 对象 | 正常 | 边界 | 失败 |
+| ID | 端点 | 场景 | 预期 |
 | --- | --- | --- | --- |
-| 判定 `judge()` | J-N01..05 | J-B01..10 | J-F01..08（+ J-X01..02 未启用） |
-| 抽样 `iso_lookup`/`freeze` | S-N01..03 | S-B01..07 | S-F01..04 |
-| 状态机 `transition()` | T-N01..07 | T-B01..04 | T-F01..04 |
-| 放行 `assert_release()` | R-N01 | R-B01..07 | R-F01..02 |
-| 关闭 `close_incident()` | C-N01 | C-B01..05 | C-F01..02 |
-| API 守卫 | G-N01..03 | G-B01..03 | G-F01..07 |
+| G-A01 | `POST /api/incidents/{id}/attribute`（不带 `decision`） | 正常 | `200 {"status": "awaiting_human", "hypotheses_source": "attribution", "evidence_validation": "skill", "hypotheses": [...]}` |
+| G-A02 | 同上，再调一次 | 已有停驻运行 | `200`，仍 `awaiting_human`（不报错） |
+| G-A03 | `POST /api/incidents/{id}/adopt` | `decision="adopt"` + `hypothesis_index=0` | `200`；`confirmed_root_cause` = **后端存储的假设原文**（前端传的文本被忽略） |
+| G-A04 | 同上 | `decision="modify"` + `modified_cause` | `200`；`confirmed_root_cause` = 修订文本；轨迹 `root_cause_source="modified_hypothesis"` + `hypothesis_index` + 原假设原文 |
+| G-A05 | 同上 | `decision="reject"` | `200`；`confirmed_root_cause` **不变**（不写业务字段） |
+| G-A06 | 同上 | `decision="modify"` 但 `modified_cause` 为空 | `400 {"error": "modify_requires_text", ...}` |
+| G-A07 | 同上 | `decision="adopt"` 但既无假设下标也无 `cause` | `400 {"error": "adopt_requires_cause", ...}` |
+| G-A08 | 同上 | 未知 `decision` | `400 {"error": "bad_decision", "allowed": ["adopt", "reject", "modify", "defer"]}` |
+| G-A09 | 同上 | 该异常**没有**停驻的归因运行 | `409 {"error": "no_parked_attribution", "hint": "..."}` |
+| G-A10 | 同上 | 批次已归档 | `409 {"error": "batch archived, terminal state"}` |
+| G-A11 | `POST .../attribute`（带 `decision`，单发模式） | 未知 incident UUID（Mock 无 fixture 键） | `200 {"hypotheses": [], "hint": "..."}`（**不是** 404/500） |
 
-**合计**：正常 24 / 边界 33 / 失败 29 = 86 条针对性用例。
+---
 
-### 转写建议
+## 9. 汇总与转写建议
 
-- **domain 纯函数单测**（`tests/domain/`，不依赖 DB/模型）：§1–§5 可直接转 pytest 参数化；每个对象一条 `@pytest.mark.parametrize` 覆盖正常/边界/失败三组。
-- **API 集成**（`tests/api/`，SQLite `StaticPool` + `dependency_overrides`）：§6 需真实路由，沿用 `test_release_reject.py`/`test_incident_attribute.py` 的 `_seed` 脚手架（确定性 UUID + 规则/证据/复检行预置）。
-- **与夹具对应**：§1/§2/§4 的边界值已部分钉在 `tests/fixtures/acceptance_*.json` 与 `tests/domain/test_judge.py`、`tests/domain/test_sampling.py`、`tests/domain/test_release.py`；本文件是其**数据设计说明 + 补盲清单**（未覆盖项如 J-F08 分档缺表、R-B07 ⑦ 三种失败分支、G-F07 未知 incident 为空假设可补用例）。
-- 本文件与 `docs/test/01-full-chain-test-data.md` 互补：01 是「链路拓扑 + 逐步请求体」，02 是「单对象 正常/边界/失败 输入→输出矩阵」。
+### 9.1 用例统计
+
+| 对象 | 正常 | 边界 | 失败 | 小计 |
+| --- | --- | --- | --- | --- |
+| 判定 `judge()` | J-N01..13 | J-B01..14 | J-F01..07 | 34 |
+| 判定证据结构 | §1.4 | — | — | 2 |
+| 参数未启用 | J-X01..02 | — | — | 2 |
+| 抽样 `iso_lookup`/`freeze` | S-N01..06 | S-B01..12 | S-F01..05 | 23 |
+| 状态机 `transition()` | T-N01..09 | T-B01..05 | T-F01..07 | 21 |
+| 放行 `assert_release()` | R-N01 | R-B01..12 | R-F01..05 | 18 |
+| 关闭 `close_incident()` | C-N01 | C-B01..06 | C-F01..07 + C-V01..05 | 19 |
+| 复检范围 | RS-N01..02 | RS-B01..09 | — | 11 |
+| 复检结论 | RC-N01..03 | RC-B01..08 | RC-A01..06 | 17 |
+| API 守卫 | G-N01..05 | G-B01..08 | G-F01..16 | 29 |
+| AI 归因端点 | G-A01..04 | G-A05..09 | G-A10..11 | 11 |
+
+**合计：正常 44 / 边界 87 / 失败 56 = 187 条针对性用例。**
+
+### 9.2 转写建议
+
+- **domain 纯函数单测**（`tests/domain/`，不依赖 DB/模型）：§1–§5、§7.1–7.2 可直接 `@pytest.mark.parametrize`。浮点断言用 `pytest.approx` 或容差比较（§1.4）。
+- **API 集成**（`tests/api/`，SQLite `StaticPool` + `dependency_overrides`）：§6、§7.3、§8 需真实路由。脚手架参照 `tests/api/test_reinspections.py::_seed`（确定性 UUID + 规则/证据/复检行预置）与 `tests/e2e/test_demo_path.py::_client`（注入 `MockLLMClient`）。
+- **API 测试必须显式注入 Mock**：`app.main` 会 `load_dotenv`，开发机的 `.env` 里有真实 key 时端点会**真的去调外部模型**（慢、依赖网络、引用的证据 id 会被 D2 闸门正当地拒掉）。两种做法任选：
+  ```python
+  os.environ["ZHL_LLM_MODE"] = "mock"                    # 全局
+  app.dependency_overrides[incidents_router.get_llm] = lambda: MockLLMClient(_FIXTURES)   # 定点
+  ```
+- **边界值必须切 Mock 才能写死**：真模型给什么置信度不可预测（§0.4/§1 §2 的写死值都是 Mock 模式的）。
+
+### 9.3 本文件相对旧版本的**更正**（实测差异）
+
+| 旧表述 | 实测事实 | 影响 |
+| --- | --- | --- |
+| `ff` 界限写作 `[0.784, 0.816]` 但同表另一处写 `±0.02 → 0.78~0.82` | 闭区间是 **[0.784, 0.816]**；`0.78` 与 `0.82` 都 **Fail** | 直接用 0.78/0.82 当边界会误判 |
+| `temp` 容差写作 `22.5~27.5`（当时按 ±10% 记） | 相对容差 `0.10` → **[22.5, 27.5]** 正确，但同表曾标 `24.90~25.10` | `24.90~25.10` 是**绝对** ±0.10 的算法，与实现不符 |
+| `im` 分档边界 `12.0 / 14.0 / 15.5` 预期 `Pass` | 三者实测全 **Fail**（容差先卡） | 分档与容差是两把尺子，必须同时满足 |
+| 「`assigned` 可报废 `scrapped`」 | 边存在但前置是 `scrap_approved`，不带前置条件时 `accepted=False` | 用例须带前置 |
+| 关闭五条件缺失清单只列 5 项 | API 层实为 **8 项**（多 `sn_not_linked` / `original_decision_evidence` / `containment_action`） | 断言 `missing` 时要覆盖全 8 项 |
+| 复检范围「结果 fail → 异常/批次转拒绝」未加限定 | 仅从 `pending_recheck` 成立；从 `assigned` 返回 **409** | 见 RS-B07 |
+| 无第 2 轮抽样结论的用例 | 已补 §7（`materialize_remediation_conclusion` + `/recheck`） | 抽样 fail 批次能否放行的关键 |
+| 无 `/api/batches/{id}/recheck` 端点 | 已存在（`app/api/release.py`） | 见 RC-A01..06 |
+| 无「isolated 批次取放行报告」用例 | 实测 `409 release_report_requires_released_batch` | 见 G-F03 |

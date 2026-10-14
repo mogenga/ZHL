@@ -1,232 +1,618 @@
-# 质慧链 · 全链路连通测试数据
+# 质慧链 · 全链路连通测试用例（逐步操作 + 完整数据）
 
-日期：2026-10-14
-定位：基于**现有实现**（非愿景）设计。覆盖五段主链 + 异常子链全部合法路径，用于全链路连通验证。姊妹文档 `02-targeted-test-data.md`（正常/边界/失败矩阵）。
+日期：2026-10-15
+定位：**基于现有实现的逐步验收脚本**。每条链路给出「点哪里 → 填什么（逐字可粘贴）→ 应看到什么反馈 → 终态是什么」。
+所有数据取自实现里真实存在的规则、ISO 表与判定引擎，**每个数字都是在跑起来的系统上实测出来的**，不是设计意图的转述。
 
-> 所有数据与现有夹具/种子**同源**：规则 `JH-550W v1`、ISO 表 `iso2859_1_aql.json`。
-> 功率边界：铭牌 550.0 ±3% → **下限 533.5 / 上限 566.5**（闭区间，等于边界判 Pass）。
-> 电流分档：`im ∈ [12.0,14.0]=A`、`[14.0,15.5]=B`；`im=16.5` 越档触发异常。
+姊妹文档：`02-targeted-test-data.md`（纯函数/守卫的「正常·边界·失败」输入→输出矩阵）。
+
+---
+
+## 0. 环境准备（照抄即可）
+
+### 0.1 启动
+
+```bash
+# 1) Python 环境
+uv sync
+
+# 2) PostgreSQL 15（Docker）
+.\scripts\start-pg.ps1              # 拉镜像 + 起容器 + 跑 001_init.sql + verify_001.sql
+
+# 3) 灌入一条 published 规则（幂等，可重复执行）
+.\scripts\seed-demo.ps1             # 末尾打印 seederule= <rule_version_id>
+
+# 4) 起服务
+uv run uvicorn app.main:app --reload --port 8000
+```
+
+浏览器打开 **http://localhost:8000** （`app/static/workbench.html`）。
+
+### 0.2 两种模型模式（务必先确定用哪种）
+
+| 模式 | 怎么开 | 抽取置信度 | 速度 | 用途 |
+| --- | --- | --- | --- | --- |
+| **真模型**（默认） | `.env` 里配 `ZHL_LLM_API_KEY` / `ZHL_LLM_BASE_URL` / `ZHL_LLM_MODEL`，不设 `ZHL_LLM_MODE` | 模型自己给，**每次不一样** | 单次 40~90 秒 | 答辩演示「系统真在调模型」 |
+| **Mock（确定性）** | 环境变量 `ZHL_LLM_MODE=mock`，或在 `.env` 追加一行 `ZHL_LLM_MODE=mock` | 由 SN 哈希决定，**可复算**（见 §0.3） | 毫秒级 | 回归测试、可复现验收 |
+
+> **本文件所有写死的置信度数字都按 Mock 模式给出。** 真模型下置信度不可预测，`confidence >= 0.8` 与 `< 0.8` 的分支要现场看返回的 `confidence` 字段，而不是照抄本文档。
+> **AI 归因接口会现场调模型。** 真模型下单次要等约 1 分钟，界面已做「AI 归因中…」提示与 120s 超时；Mock 下秒回。
+
+### 0.3 Mock 模式下的置信度规则（可自行复算）
+
+实现位置 `app/plugins/llm_client.py::_synthetic_confidence`：
+
+- SN **以 `SN-LOW` 开头** → 固定 **0.62**（低于 0.8 阈值，必然走人工确认）
+- 其他 SN → `0.85 ~ 0.999` 之间的稳定值（同一 SN 每次一样）
+
+实测样本（Mock 模式）：
+
+| SN | 置信度 | 是否触发人工确认 |
+| --- | --- | --- |
+| `SN-LOW-001` | **0.620** | ✅ 触发（`low_conf_sns`） |
+| `SN-N-001` | 0.891 | ❌ 自动确认 |
+| `SN-N-002` | 0.884 | ❌ 自动确认 |
+| `SN-N-007` | 0.869 | ❌ 自动确认 |
+| `SN-DEMO-001` | 0.948 | ❌ 自动确认 |
+| `SN-I-OODB` | 0.944 | ❌ 自动确认 |
+
+**为什么只有结构化通道能演示低置信**：走「原始单据（AI 抽取）」通道时，逐行置信度由 `app/plugins/raw_source.py` 固定给 **0.9**，批次置信度因此恒为 0.9。**要演示低置信人工确认，必须选「已结构化数据（逐列粘贴）」并把 SN 写成 `SN-LOW-001`。**
 
 ---
 
 ## 1. 链路总览
 
-批次（10 态机）：
+批次（10 态机，`app/domain/state_machine.py` 实测边表）：
 
 ```
-draft → pending_intake → pending_judge ─全Pass+抽样Pass─→ pending_release ─断言全过+批准─→ released → archived
-                                    └─任一Fail─→ isolated → disposing → pending_recheck ─复检过─→ pending_release
-                                                                      └─复检败─→ rejected → archived
-任意非归档 ─人工拒绝─→ rejected
+draft → pending_intake → pending_judge ─全部 Pass+抽样 Pass─→ pending_release → released → archived
+                                      └─任一 Fail / 抽样 Fail / 规则缺失─→ isolated
+                                                                              ↓
+                                                        disposing → pending_recheck
+                                                                     ├─复检通过+关闭─→ pending_release
+                                                                     └─复检失败──────→ rejected → archived
+任意非归档状态 ──人工拒绝──→ rejected → archived
 ```
 
-异常（7 态机）：`new → isolated → assigned → pending_recheck → closed`（复检败转 `rejected`；`assigned` 可报废 `scrapped`）。
-批次-异常联动：`close` 仅当批次**全部**异常终态才推进批次到 `pending_release`。
+异常（7 态机）：
 
-| # | 链路 | 触发数据 | 关键调用 | 批次终态 | 异常终态 |
-| --- | --- | --- | --- | --- | --- |
-| C1 | 正常放行 | 10 SN 全 Pass | 建批→送检→确认→判定→放行→报告 | archived | 无 |
-| C2 | 功率边界 Pass | pmax=533.5 | 同 C1（小批） | archived | 无 |
-| C3 | 功率边界 Fail | pmax=533.4 | 建批→送检→判定→isolated | isolated | 可建异常 |
-| C4 | 异常复检通过→放行 | im=16.5 越档 | 建异常→隔离→指派→复检(pass)→CAPA→关闭→放行→报告 | archived | closed |
-| C5 | 异常复检失败→拒绝 | 复检 fail | 建异常→…→复检(fail)→拒绝/报告 | archived（经 rejected） | rejected |
-| C6 | 关闭五条件缺失 | 逐项缺 | close 反复 409，detail.missing 指名 | pending_recheck | pending_recheck |
-| C7 | 多异常批次联动 | 2 只异常 | close 第1只→仍待复检；第2只→待放行 | pending_release | closed×2 |
-| C8 | 归档只读守卫 | 已 archived | 任意写操作 → 409 | archived | — |
-| C9 | 跨批同 SN 一致性 | 两批同 SN | 第二批送检 → 400 + 自动建 data_consistency 异常 | 第二批 pending_intake | new(critical) |
-| C10 | 人工拒绝 | 非归档批次 | reject → D7 报告 + D6a 归档 | archived（经 rejected） | — |
-| C11 | 归因三选一 | 隔离批次 | attribute(decision=adopt/reject/defer) | 不变 | 不变 |
+```
+new → isolated → assigned → pending_recheck → closed
+                                    └──→ rejected
+              isolated / assigned ──→ scrapped
+```
 
-**C1–C4 为 spec 四组样例主链；C5–C8 异常分支；C9–C11 守卫 + 新增端点。**
+**批次-异常联动（实测）**：`close` 只在**该批次全部异常都处于终态**时才把批次推到 `pending_release`；否则批次停在 `pending_recheck`。
+
+| # | 链路 | 触发数据 | 批次终态 | 异常终态 |
+| --- | --- | --- | --- | --- |
+| C1 | 正常放行 | 10 SN 全 Pass | `archived` | 无 |
+| C2 | 功率边界 Pass | `pmax = 533.5` | `pending_release` | 无 |
+| C3 | 功率边界 Fail / 越档 Fail | `pmax = 533.4`；`im = 16.5` | `isolated` | `new`（自动） |
+| C4 | 完整闭环：归因→复检→放行 | `im = 16.5` 越档 | `archived` | `closed` |
+| C5 | 复检失败 → 拒绝 | 复检 `result=fail` | `archived`（经 `rejected`） | `rejected` |
+| C6 | 关闭五条件逐项缺失 | 逐项不满足 | 不变 | 不变 |
+| C7 | 多异常批次联动 | 同批 2 只异常 | 最后一只关闭后才 `pending_release` | `closed`×2 |
+| C8 | 归档只读 | 已 `archived` | `archived` | — |
+| C9 | 跨批同 SN 一致性 | 两批同 SN | 第二批 `pending_intake` | `data_consistency` / critical |
+| C10 | 人工拒绝 | 任意非归档批次 | `archived` | — |
+| C11 | 归因三选一 | 已隔离批次 | 不变 | 不变 |
+| C12 | 低置信人工确认 | `SN-LOW-001` | `pending_intake` → 确认后推进 | — |
+| C13 | 复检结论重算 `/recheck` | 历史批次 | `pending_release` | — |
 
 ---
 
 ## 2. 共用种子数据
 
-### 2.1 规则版本（幂等键 `P-DEFAULT+JH-550W+1`）
+### 2.1 规则版本
 
-```json
-{
-  "project_id": "P-DEFAULT", "model": "JH-550W", "version_no": 1,
-  "nameplate_power": 550.0, "power_tolerance": 0.03,
-  "parameter_standards": {
-    "temp": {"std_value": 25.0, "tolerance": 0.10},
-    "isc":  {"std_value": 10.5, "tolerance": 0.05},
-    "voc":  {"std_value": 48.0, "tolerance": 0.05},
-    "vm":   {"std_value": 40.0, "tolerance": 0.05},
-    "im":   {"std_value": 13.0, "tolerance": 0.05},
-    "ff":   {"std_value": 0.80, "tolerance": 0.02}
-  },
-  "current_bands": [
-    {"lower": 12.0, "upper": 14.0, "grade": "A"},
-    {"lower": 14.0, "upper": 15.5, "grade": "B"}
-  ],
-  "sample_plan": {"inspection_type": "iv", "inspection_level": "normal", "aql": 1.0}
-}
-```
+工作台「规则库」tab 里必须有一条**已发布**的规则，否则「新建批次」的规则下拉是空的、提交按钮禁用。用 `scripts/seed-demo.ps1` 灌入后应为：
 
-### 2.2 标准值基准（规则 `JH-550W v1` 的 parameter_standards）
+| 字段 | 值 |
+| --- | --- |
+| `rule_version_id` | `11111111-1111-1111-1111-111111111111` |
+| 名称 | `JH-550W 演示规则（published）` |
+| 项目 / 型号 | `P-DEFAULT` / `JH-550W` |
+| 铭牌功率 | `550.0` W |
+| 功率容差 | `0.03`（±3%） |
+| 状态 | `published` |
 
-判定读的是**检验行数据库列**（`judge.py:_inspection_in` 直接取 `row.pmax/temp/isc/voc/vm/im/ff/appearance_result`），不是 LLM 抽取值。每个 SN 一行，电参数默认取标准值，只改「变量列」：
+参数标准（`parameter_standards`）：
 
-| 参数 | 标准值 | 容差 | 通过区间 |
+| 参数 | 标准值 | 容差 | 闭区间（= 标准值 ×(1±容差)） | 实测边界 Pass |
+| --- | --- | --- | --- | --- |
+| `pmax` (W) | 550.0 | ±3% | **[533.5, 566.5]** | 533.5 ✅ / 566.5 ✅ |
+| `temp` (°C) | 25.0 | ±0.10 | [22.5, 27.5] | 22.5 ✅ / 27.5 ✅ |
+| `isc` (A) | 10.5 | ±0.05 | [9.975, 11.025] | — |
+| `voc` (V) | 48.0 | ±0.05 | [45.6, 50.4] | — |
+| `vm` (V) | 40.0 | ±0.05 | [38.0, 42.0] | — |
+| `im` (A) | 13.0 | ±0.05 | [12.35, 13.65] | ⚠️ 见下 |
+| `ff` | 0.80 | ±0.02 | [0.784, 0.816] | 0.784 ✅ / 0.816 ✅ |
+
+> **⚠️ 电流分档与容差是两把独立的尺子（最容易踩的坑）**：`im` 先被容差校验（必须落在 `[12.35, 13.65]`），再被电流分档校验（必须落在 `[12.0,14.0]=A` 或 `[14.0,15.5]=B`）。**两条都必须满足**。所以：
+> - `im = 12.0`（A 档下界）→ **Fail**（容差不过，实测已确认）
+> - `im = 14.0`（A/B 交界）→ **Fail**（容差不过）
+> - `im = 15.5`（B 档上界）→ **Fail**（容差不过）
+> - `im = 13.0`（标准值）→ Pass
+>
+> **要演示「越档」请用 `im = 16.5`**：它同时违反容差（>13.65）与分档（不在任何区间），`current_band` 检查项会明确 Fail。
+
+电流分档定义（`current_bands`）：
+
+| 档位 | 区间 |
+| --- | --- |
+| A | `[12.0, 14.0]` |
+| B | `[14.0, 15.5]` |
+
+抽样方案（`sample_plan`）：`{"inspection_type":"iv","inspection_level":"normal","aql":1.0}`
+
+### 2.2 ISO 抽样表（`migrations/001_init.sql` 种子，`iv` / `normal` / `aql=1.0`）
+
+**`lot_size` 取的是「计划数量」，不是「送检行数」。**
+
+| 计划数量区间 | n | ac | re |
 | --- | --- | --- | --- |
-| pmax (W) | 550.0 | ±3% | **533.5 ~ 566.5**（闭区间） |
-| temp (°C) | 25.0 | ±0.10 | 24.90 ~ 25.10 |
-| isc (A) | 10.5 | ±0.05 | 10.45 ~ 10.55 |
-| voc (V) | 48.0 | ±0.05 | 47.95 ~ 48.05 |
-| vm (V) | 40.0 | ±0.05 | 39.95 ~ 40.05 |
-| im (A) | 13.0 | ±0.05 | 12.95 ~ 13.05 |
-| ff | 0.80 | ±0.02 | 0.78 ~ 0.82 |
-| appearance | pass | — | pass |
+| 2 – 8 | 8 | 0 | 1 |
+| 9 – 15 | 13 | 0 | 1 |
+| 16 – 25 | 20 | 1 | 2 |
+| 26 – 50 | 32 | 1 | 2 |
+| 51 – 90 | 50 | 2 | 3 |
+| 91 – 150 | 80 | 3 | 4 |
+| **1** | **查不到 → `rule_missing`** | — | — |
+| **151** | **查不到 → `rule_missing`** | — | — |
 
-电流分档（judge 额外检查）：`im ∈ [12.0,14.0]=A`、`[14.0,15.5]=B`；**`im=16.5` 越档 → 触发 `current_band_oob` 异常**。
+> **⚠️ 计划数量必须 ≥ 2。** 实测：计划数量 `=1` 时 ISO 表查不到（`lot_size_min` 最小是 2），判定结果虽是 `Pass`、但抽样结论为 `rule_missing`，批次照样 `isolated` 并自动建 `rule_missing` 异常。**每条链路建批次时计划数量请填 ≥ 2。**
 
-### 2.3 各链路送检数据（完整 9 列：SN,pmax,temp,isc,voc,vm,im,ff,外观）
+### 2.3 送检数据（9 列：`SN,pmax,temp,isc,voc,vm,im,ff,外观`）
 
-每 SN 一行、只改变量列，其余列取 §2.2 标准值。下表为**完整可粘贴行**，其余电参数同标准值：
+> ### ⚠️ 最关键的一条：判定读的是**你提交的列**，不是「AI 抽取结果」里显示的值
+>
+> 判定引擎（`app/domain/judge.py`）读的是 `module_inspections` 表的**原始列**。而「入场结果」面板里「AI 抽取结果（逐组件）」显示的是**模型的输出**，两者是**两套数**，实测对照如下：
+>
+> | SN | 提交的 9 列 `pmax` | 面板「AI 抽取结果」显示 | DB 列 `pmax` | 最终判定 |
+> | --- | --- | --- | --- | --- |
+> | `SN-N-001` | 533.5 | **547.3**（Mock 合成值） | 533.5 | **合格** |
+> | `SN-N-002` | 533.4 | **551.94**（Mock 合成值） | 533.4 | **不合格** |
+>
+> 也就是说：**要演示什么判定结果，就改提交的那一列**；面板上的抽取值是模型的产物，与判定无关。（真模型下它也是模型的产物，同样与判定无关。）看到面板数字和判定对不上时，这不是 bug。
 
-| 用途 | SN | pmax | im | 其余列 | 说明 |
-| --- | --- | --- | --- | --- | --- |
-| C1 正常 | SN-N-001 ~ 010 | 550.0 | 13.0 | 标准值 | 10 行全 Pass |
-| C2 边界 Pass | SN-B-LOW | **533.5** | 13.0 | 标准值 | pmax=下限，判 Pass |
-| C3 边界 Fail | SN-B-BELOW | **533.4** | 13.0 | 标准值 | pmax<下限，判 Fail |
-| C4/C5 越档 | SN-I-OODB | 550.0 | **16.5** | 标准值 | im 越档，触发异常 |
-| C9 跨批冲突 | SN-SHARED | 550.0 | 13.0 | 标准值 | 同 SN 送两批 |
+前端「检测数据」框每行 9 列，缺列或非数字会被前端直接拦下（后端再校验一次，返回 400 `incomplete_inspection`）。
 
-完整行示例（判定引擎按这 9 列取值）：
+默认列（除被改变的那一列外，全部取标准值）：`temp=25.0, isc=10.5, voc=48.0, vm=40.0, im=13.0, ff=0.80, appearance=pass`
+
+| 用途 | SN | pmax | im | 外观 |
+| --- | --- | --- | --- | --- |
+| C1 正常 | `SN-N-001` … `SN-N-010` | 550.0 | 13.0 | pass |
+| C2 边界 Pass | `SN-B-LOW` | **533.5** | 13.0 | pass |
+| C3 边界 Fail（越下限） | `SN-B-BELOW` | **533.4** | 13.0 | pass |
+| C3b 越档 Fail | `SN-I-OODB` | 550.0 | **16.5** | pass |
+| C4/C5 闭环 | `SN-I-OK` / `SN-I-OODB` | 550.0 | 13.0 / **16.5** | pass |
+| C9 跨批冲突 | `SN-SHARED` | 550.0 | 13.0 | pass |
+| C12 低置信 | `SN-LOW-001` | 550.0 | 13.0 | pass |
+
+可直接粘贴的完整行（C1 用后 10 行）：
 
 ```
 SN-N-001,550.0,25.0,10.5,48.0,40.0,13.0,0.80,pass
+SN-N-002,548.0,25.0,10.5,48.0,40.0,13.0,0.80,pass
+SN-N-003,552.0,25.0,10.5,48.0,40.0,13.0,0.80,pass
+SN-N-004,550.0,25.0,10.5,48.0,40.0,13.5,0.80,pass
+SN-N-005,549.0,25.0,10.5,48.0,40.0,12.5,0.80,pass
+SN-N-006,551.0,25.0,10.5,48.0,40.0,13.0,0.81,pass
+SN-N-007,550.0,25.0,10.5,48.0,40.0,13.0,0.80,pass
+SN-N-008,547.5,25.0,10.5,48.0,40.0,13.0,0.80,pass
+SN-N-009,553.0,25.0,10.5,48.0,40.0,13.0,0.80,pass
+SN-N-010,550.0,25.0,10.5,48.0,40.0,13.0,0.79,pass
+```
+
+其余链路单行：
+
+```
 SN-B-LOW,533.5,25.0,10.5,48.0,40.0,13.0,0.80,pass
 SN-B-BELOW,533.4,25.0,10.5,48.0,40.0,13.0,0.80,pass
 SN-I-OODB,550.0,25.0,10.5,48.0,40.0,16.5,0.80,pass
 SN-SHARED,550.0,25.0,10.5,48.0,40.0,13.0,0.80,pass
+SN-LOW-001,550.0,25.0,10.5,48.0,40.0,13.0,0.80,pass
 ```
 
-> 注：工作台前端「检测数据」textarea 与 API 路径均提交**完整 9 列**（`intake.js` 每行解析 SN + 7 电参 + 外观，缺列/非数前端即拦截；后端 `intake.py` 再校验一次，缺列返回 B3 400 `incomplete_inspection` 而非 500）。判定结果以 DB 列为准，9 列即「送检数据」完整形态。
+**原始单据通道**（C1' 演示 AI 抽取与 FR-1.4 校验拦截）可粘贴：
 
-### 2.4 ISO 抽样（放行断言 ⑦ 用）
+```
+# 设备 UT-2200 导出 / 2026-06-01
+SN,pmax,temp,isc,voc,vm,im,ff,appearance
+SN-DEMO-001,551.2,25.0,10.5,48.0,40.0,13.0,0.80,pass
+SN-DEMO-002,549.8,25.0,10.5,48.0,40.0,13.0,0.79,pass
+SN-DEMO-003,470.0,25.0,10.5,47.2,40.0,12.4,0.74,fail
+SN-DEMO-004,548500.0,25.0,10.5,48.0,40.0,13.0,0.80,pass
+```
 
-| type | lot 区间 | n | ac | re |
-| --- | --- | --- | --- | --- |
-| iv | 2–8 | 8 | 0 | 1 |
-| iv | 9–15 | 13 | 0 | 1 |
-| iv | 16–25 | 20 | 1 | 2 |
-
-C4/C5 另预置一条 `level=full, aql=0.65, lot=1–100, n=2/ac=0/re=1`（供 item ⑦ 解析）。
+实测结果：解析出 **3 行有效**，第 4 行被 FR-1.4 校验拦截（`pmax=548500.0` 超出合理范围 `[1.0, 1000.0]`）。`SN-DEMO-003` 功率 470.0 W（< 533.5）且外观 `fail` → 判定 Fail → 批次隔离 + 自动建 `rule_fail` 异常。
 
 ---
 
-## 3. 人工验收操作流程
+## 3. 逐步操作流程
 
-> 入口：浏览器打开工作台页（`workbench.html`）。左栏四 tab（批次 / 规则库 / 异常 / 报告）+ 中央流水线节点面板。
-> 每条链路 = 一系列「点击 → 输入 → 理想反馈」。**批次创建 / 检测数据 / 复检六参**均已给出完整值，可直接照填。
+### C1 · 正常放行（10 SN 全 Pass）
 
-### C1 正常放行（10 SN 全 Pass）
+**目标终态**：批次 `archived`，无异常，报告 v1 已生成。
 
-| 步骤 | 点击哪里 | 输入什么 | 理想反馈 |
+| 步 | 点击哪里 | 输入什么 | 应看到什么 |
 | --- | --- | --- | --- |
-| 1 | 左栏「＋ 新建批次」 | **批次号** `B-20261014-001`、**项目** `P-DEFAULT`、**型号** `JH-550W`、**计划数量** `10`、**规则版本** `JH-550W 检验规则 v1`（须已发布） | 批次出现在「批次」tab，状态「待入场」，toast「批次已创建，进入数据入场」 |
-| 2 | 中栏流水线节点「送检」（数据入场面板）→点「提交送检数据」 | 数据来源=`检测数据`；检测数据框粘贴 10 行（§2.3 的 C1 完整 9 列：`SN-N-001,550.0,25.0,10.5,48.0,40.0,13.0,0.80,pass` … 至 `SN-N-010`） | 置信度≥0.8（mock 0.81）→ 自动确认，批次转「待判定」 |
-| 3 | 若出现「确认入场」（conf<0.8） | 点「确认入场」 | 批次转「待判定」 |
-| 4 | 流水线节点「判定」 | 点「执行判定」 | 10/10 Pass；批次转「待放行」，右栏「判定合格=10」 |
-| 5 | 流水线节点「放行」 | **批准人** `ZHL-ENG`，点「确认放行」 | 7 项断言全 ✓，批次转「已放行」 |
-| 6 | 左栏「报告」tab →点「生成」 | **报告类型**=`放行报告` | 生成 v1 放行报告；批次自动转「已归档」 |
+| 1 | 左栏「＋ 新建批次」 | 批次号 `B-20261015-001`<br>项目 `P-DEFAULT`<br>型号 `JH-550W`<br>计划数量 `10`<br>规则版本 = 下拉选 `JH-550W 演示规则（published） v1（JH-550W）` | 批次出现在左栏「批次」tab，状态 **待入场**，toast「批次已创建，进入数据入场」 |
+| — | *（可选前置）* 左栏「规则库」tab 检查规则是否已发布 | — | 卡的 `JH-550W 演示规则 v1` 状态应为 **已发布**。若是「草稿」，点该卡的「**发布**」→「确认发布」，操作人随意填。**下拉里只列已发布且已生效的规则**，没发布就建不了批次 |
+| 2 | 中栏流水线节点「数据入场」→ 点「提交送检数据」 | 数据来源 = `检测数据`<br>录入方式 = **`已结构化数据（逐列粘贴）`**<br>检测数据框粘贴 §2.3 的 10 行 | 弹窗关闭，toast「已自动确认入场，批次转待判定，下一步：查看判定」 |
+| 3 | 观察「入场结果」面板 | — | 「已自动确认入场 · 置信度 **85%**」（Mock 模式实测值 = 10 个 SN 里**最低**的那个；真模型看实际值）<br>「AI 抽取结果（逐组件）」逐行列出 10 个 SN 与各自置信度：0.851 ~ 0.958 |
+| 4 | 流水线节点「判定」 | 点「执行判定」 | 逐组件明细表：10 行「合格」；抽样结论 **合格**（n=13 / ac=0 / re=1） |
+| 5 | 流水线节点「放行」 | 确认放行弹窗里点「确认放行」，批准人填 `ZHL-ENG` | 放行前校验 7 项全部 ✓；放行后批次 **已放行**，toast「已放行，批次进入已放行」 |
+| 6 | 批次头「生成报告」 | 报告类型 = `放行报告` | 生成 **v1** 放行报告，批次自动转 **已归档** |
+| 7 | 左栏「报告」tab → 点刚生成的报告 | — | 报告正文含：批次信息、判定统计（`decision_counts: {"pass": 10}`）、抽样结论、**7 项放行断言逐条 [PASS]**、放行结论「**通过**」 |
 
-**理想终态**：批次 `archived`，流水线全绿，右侧轨迹含 判定/放行/报告 记录。
+**实测留痕**（走完后 `agent_task_traces` 应有）：
 
-### C4 异常复检通过→放行（核心闭环）
+```
+judge   / pass
+release / pass
+report  / pass
+report_api / pass
+```
 
-前置：先按 C3 走一遍判定把批次判成「已隔离」（`SN-I-OODB.im=16.5` 越档）。
+证据类型（`evidence.evidence_type`）应有：
+`source_file`、`extraction_result`（每 SN 一条，共 10 条）、`human_confirmation`、`decision_snapshot`、`task_trace`、`report_snapshot`。
 
-| 步骤 | 点击哪里 | 输入什么 | 理想反馈 |
+> **注意**：报告节的「留痕引用 → 轨迹（agent_task_traces）／证据（evidence）」实测显示「（无轨迹引用）」。报告渲染层拿到了空的 `trace_refs` / `evidence_refs`；轨迹与证据本身都真实存在（见上），是报告正文里的引用列表没接上。这不影响放行结论与断言结果的正确性（它们引用的是真实数据）。
+
+---
+
+### C2 · 功率边界 Pass（`pmax = 533.5`）
+
+**目标终态**：批次 `pending_release`，`SN-B-LOW` 判定 **合格**。
+
+| 步 | 点击哪里 | 输入什么 | 应看到什么 |
 | --- | --- | --- | --- |
-| 1 | 左栏「异常」tab，点「创建异常」 | 触发原因=规则失败、严重度=较严重、受影响条码=SN-I-OODB（每行一个）、证据引用=判定快照 ID | 异常 `new`，挂到批次 |
-| 2 | 异常节点「隔离」 | 无（直接点） | 异常→`isolated` |
-| 3 | 异常节点「指派」 | 责任人=`ZHL-QA`、处置期限=日期、临时措施=隔离该组件 | 异常→`assigned`，批次→`disposing` |
-| 4 | 流水线「复检」节点 | 复检组件=`SN-I-OODB`、结果=`通过`、Pmax=`550.0`/Temp=`25.0`/Isc=`10.5`/Voc=`48.0`/Vm=`40.0`/Im=`13.0`/Ff=`0.80`、执行人=`ZHL-QA`、执行时间=当前、范围=`最小集` | 复检 201 `passed:true`，批次→`pending_recheck` |
-| 5 | 异常节点「CAPA 确认」 | 确认根因=电芯虚焊致 Impp 漂移、纠正措施=更换主电芯、勾选「已验证」 | 批次→`pending_recheck` |
-| 6 | 异常节点「关闭」 | 无（点） | 异常→`closed`，批次→`pending_release` |
-| 7 | 放行节点 | 批准人=`ZHL-ENG`，点「确认放行」 | 7 项全 ✓，批次→`released` |
-| 8 | 报告 tab「生成」 | 放行报告 | 报告 v1 + 批次→`archived` |
+| 1 | 「＋ 新建批次」 | 批次号 `B-20261015-002`<br>项目 `P-DEFAULT` / 型号 `JH-550W`<br>**计划数量 `8`**<br>规则版本同上 | 状态 **待入场** |
+| 2 | 「数据入场」→「提交送检数据」 | 录入方式 = `已结构化数据`<br>粘贴 `SN-B-LOW,533.5,25.0,10.5,48.0,40.0,13.0,0.80,pass` | 自动确认入场 |
+| 3 | 「判定」节点 | 点「执行判定」 | `SN-B-LOW` **合格**；批次 **待放行** |
 
-**理想终态**：批次 `archived`，异常 `closed`，轨迹含 归因/放行/报告。
+实测确认：`pmax=533.5`（= 下限）判 **Pass**，闭区间语义成立。
 
-### C5 异常复检失败→拒绝
+> **计划数量必须 ≥ 2**：实测计划数量填 `1` 时，即使判定 Pass，抽样仍报 `rule_missing`（ISO 表最小 lot 区间是 2–8），批次照样隔离。
 
-同 C4 至步骤 4，但「结果」选 **不通过**（`pmax=540`）。
+---
 
-| 步骤 | 点击哪里 | 输入什么 | 理想反馈 |
+### C3 · 功率边界 Fail（`pmax = 533.4`）
+
+**目标终态**：批次 `isolated`，自动建 `rule_fail` / `major` / `new` 异常。
+
+| 步 | 点击哪里 | 输入什么 | 应看到什么 |
 | --- | --- | --- | --- |
-| 4' | 复检节点 | 结果=`不通过`、Pmax=`540.0`（<下限 533.5 判 Fail）、其余同 C4 步骤 4 | 复检 `passed:false`，异常→`rejected`，批次→`rejected` |
-| 5' | 放行节点切「拒绝」 | 拒绝原因=复检不通过、操作人=`ZHL-QA`，点「确认拒绝」 | 生成 异常处置报告，批次自动→`archived` |
+| 1 | 「＋ 新建批次」 | 批次号 `B-20261015-003`，计划数量 `8`，其余同 C2 | 待入场 |
+| 2 | 「数据入场」→「提交送检数据」 | 粘贴 `SN-B-BELOW,533.4,25.0,10.5,48.0,40.0,13.0,0.80,pass` | 自动确认入场 |
+| 3 | 「判定」节点 | 点「执行判定」 | `SN-B-BELOW` **不合格**；批次 **已隔离** |
+| 4 | 左栏「异常」tab | — | 自动出现 1 条异常：`规则失败` · `较严重` · **新建**，带「自动」标记；受影响组件 `SN-B-BELOW` |
+| 5 | 「判定」节点点失败行的「规则结果」列 | — | 展开判定证据：`power_range` → `input.pmax = 533.4`，`computed = {"lower": 533.5, "upper": 566.5}`，`result = "Fail"` |
 
-**理想终态**：批次 `archived`（经 `rejected`），异常 `rejected`。
+**同一个引擎的上边界对照组**：`pmax = 566.6` → 同样 `power_range` Fail，`computed = {"lower": 533.5, "upper": 566.5}`。
 
-### C6 关闭五条件缺失（逐条指名）
+---
 
-异常停在「待复检」时反复点「关闭」，看右侧提示逐条缺失：
+### C3b · 电流越档 Fail（`im = 16.5`）
 
-| 缺什么 | 理想反馈（detail.missing） |
+| 步 | 点击哪里 | 输入什么 | 应看到什么 |
+| --- | --- | --- | --- |
+| 1 | 「＋ 新建批次」 | 批次号 `B-20261015-003B`，计划数量 `8` | 待入场 |
+| 2 | 「数据入场」→「提交送检数据」 | 粘贴 `SN-I-OODB,550.0,25.0,10.5,48.0,40.0,16.5,0.80,pass` | 自动确认入场 |
+| 3 | 「判定」节点 | 点「执行判定」 | `SN-I-OODB` **不合格**；批次 **已隔离** |
+
+失败项是 **两个**：`parameter_tolerances`（`im=16.5` 超出 `[12.35, 13.65]`）与 `current_band`（不在任何声明档位）。这是 C4 闭环的入口数据。
+
+---
+
+### C4 · 完整闭环：归因 → 指派 → 复检 → 关闭 → 放行（**核心链路**）
+
+**目标终态**：批次 `archived`，异常 `closed`，抽样结论出现**第 2 轮 pass**，报告 v1 已生成。
+
+前置：先跑完 C3b，得到 `isolated` 批次 + `new` 异常。
+
+| 步 | 点击哪里 | 输入什么 | 应看到什么 |
+| --- | --- | --- | --- |
+| 1 | 左栏「异常」tab → 该异常卡片 → 点「**隔离异常**」 | 无 | 异常状态 → **已隔离**；toast「已隔离该异常」 |
+| 2 | 同卡片 → 点「**AI 归因**」 | 无 | 按钮位置变成「AI 归因中，正在调用模型，请稍候（约 1 分钟）…」（真模型需等约 1 分钟；Mock 秒回）<br>随后弹出「AI 归因 · xxxxxxxx」窗，列出**带单选按钮**的假设列表 |
+| 3 | 在归因弹窗里选一条假设 | 点第 1 条的单选按钮 | 底部文本框自动填入这条假设的原文 |
+| 4 | 点主按钮「**采纳选中假设**」 | 无 | 该弹窗关闭，卡片上出现「已采纳假设 #1：…」；toast「已记录归因决定：采纳」<br>卡片「确认根因」一行显示被采纳的假设原文 |
+| 5 | 同卡片 → 点「**指派责任人**」 | 责任人 `ZHL-QA`<br>处置期限 `2026-06-10T17:00`（任意今天之后的）<br>临时措施 `隔离该组件并暂停该工位投料` | 异常 → **已指派**；批次 → **处置中** |
+| 6 | 同卡片 → 点「**填报整改措施**」 | 确认根因 `电芯失配致 Impp 越档`（若第 4 步已采纳，这里已预填）<br>纠正措施 `更换主电芯并复测`<br>**不勾**「已验证」 | 异常 → **待复检**；批次 → **待复检**<br>（不勾是因为此时还没有通过的复检记录，勾了会被 400 拒绝） |
+| 7 | 流水线节点「**复检**」→ 点该异常的「录入复检」 | 复检组件 = `SN-I-OODB`<br>结果 = `通过`<br>Pmax `550.0` / Temp `25.0` / Isc `10.5` / Voc `48.0` / Vm `40.0` / Im `13.0` / Ff `0.80`<br>执行人 `ZHL-QA`<br>执行时间 `2026-06-02T10:00`<br>范围 = `最小集` | toast「复检通过，请在异常卡片补勾整改措施已验证后确认关闭」<br>`scope_sns` 服务端自动填为该异常的全部受影响 SN（本例 `["SN-I-OODB"]`） |
+| 8 | 回「异常」tab → 同卡片 → 点「**补勾整改措施已验证**」 | 确认根因 / 纠正措施保持第 6 步的值<br>**勾选**「已验证（需已有通过的复检记录）」 | 异常保持 **待复检**；toast「整改措施已更新」 |
+| 9 | 同卡片 → 点「**确认关闭异常**」 | 无 | 异常 → **已关闭**；批次 → **待放行**；toast「异常已关闭，批次转待放行」 |
+| 10 | 流水线节点「**放行**」 | 点「确认放行」→ 批准人 `ZHL-ENG` | 7 项断言全 ✓ → 批次 **已放行** |
+| 11 | 批次头「生成报告」 | 报告类型 `放行报告` | 报告 v1；批次 **已归档** |
+| 12 | 「报告」tab → 点该报告 | — | 判定统计 `decision_counts: {"pass": 1, "fail": 1}`<br>抽样结论含**两轮**：`sample_round: 2 … "result": "pass"` 与 `sample_round: 1 … "result": "fail"`<br>7 项断言全 `[PASS]`，放行结论「**通过**」 |
+
+**第 3 步的假设内容**（Mock 模式实测；真模型内容不同）：
+
+```
+#1  rank=1  confidence=0.82  evidence_ids=[2 条真实证据 id]
+    cause = rule_fail：受影响批次存在同源偏差（基于 2 条证据）
+    recommended_action = 隔离同批次待检组件并复核该证据涉及的工序
+    impact_scope = {"affected_sns": 2, "cross_batch_hits": 0}
+
+#2  confidence=0.55  evidence_ids=[]        ← 故意不带证据
+    cause = rule_fail：设备参数漂移（待补充校准记录）
+    recommended_action = 调取该设备校准记录复核
+```
+
+> **假设 #2 会被 D2 证据闸门丢弃**（`evidence_ids` 为空）。这是设计使然：归因结果里只保留引用了**真实存在**证据的假设。若所有假设都被闸门拦掉，弹窗显示「归因假设均未通过证据校验（D2），请人工填写根因」，主按钮变成「人工填写根因」。
+
+**关键：三选一的行为分别是什么**（FR-3.6 / §11.3）
+
+| 选项 | 点哪里 | 写库结果 | 轨迹留痕 |
+| --- | --- | --- | --- |
+| **采纳** | 选假设 → 主按钮「采纳选中假设」 | `confirmed_root_cause` = **后端存储的假设原文**（前端改不了它，后端按 `hypothesis_index` 取） | `root_cause_source = "hypothesis"`，带 `hypothesis_index` |
+| **修改** | 选假设 → 次按钮「修改后采纳」→ 填「修订后的根因」→ 提交 | `confirmed_root_cause` = **人工修订文本** | `root_cause_source = "modified_hypothesis"`，同时留**原假设原文**与 `hypothesis_index` |
+| **驳回** | 次按钮「驳回」 | **不写**任何业务字段 | `decision = "reject"` |
+
+实测「修改」轨迹（`agent_task_traces.params_summary`）：
+
+```json
+{"decision": "modify", "cause": "现场确认：焊接虚焊（非隐裂）",
+ "root_cause_source": "modified_hypothesis", "hypothesis_index": 0,
+ "hypothesis_cause": "rule_fail：受影响批次存在同源偏差（基于 2 条证据）"}
+```
+
+**闭环后实测状态**：
+
+| 观察点 | 值 |
 | --- | --- |
-| 没指派责任人 | `owner` |
-| CAPA 根因/措施空 | `capa_fields` |
-| 没做复检 | `reinspection_record` |
-| 没勾「已验证」 | `capa_verified` |
-| 没证据引用 | `original_decision_evidence` |
+| 批次 | `archived` |
+| 异常 | `closed` |
+| `sample_conclusions` | `sample_round=1 result=fail`、**`sample_round=2 result=pass`** |
+| 轨迹序列 | `incident_auto` → `judge` → `incident_isolate` → `attribution`×2 → `incident_attribute` → `incident_assign` → `incident_capa` → `reinspection` → `incident_capa` → `incident_close` → `release` → `report` |
+| 7 项断言 | `state` / `sample_passed` / `no_open_critical_incident` / `no_isolated_sn` / `all_evidence_present` / `all_capa_verified` / `reinspection_scope_covered` 全部 `True` |
 
-全缺时一次性列出全部。
-
-### C7 多异常批次联动
-
-同批 2 只异常（`SN-I-OODB` + 另一 SN）。关闭第 1 只 → 批次**仍**「待复检」；关闭第 2 只 → 批次才「待放行」。
-
-### C8 归档只读
-
-批次「已归档」后，再点「生成报告 / CAPA / 改状态」→ 一律提示 `409 批次已归档，终态只读`。
-
-### C9 跨批同 SN 一致性
-
-批次 A 送检 `SN-SHARED`；批次 B 再送检同 `SN-SHARED` → 批次 B 提示 `400 跨批次 SN 冲突`，并在**批次 A** 自动挂一条 `data_consistency` 严重异常；B 维持「待入场」。
-
-### C10 人工拒绝
-
-批次处于任意非归档态 → 放行节点切「拒绝」，填 拒绝原因 + 操作人 → 生成 异常处置报告 + 批次自动「已归档」。
-
-### C11 归因三选一
-
-异常节点「归因」→ 系统出假设排序；操作人选 `采纳/驳回/修改`，采纳时填根因描述 → 写确认根因；无匹配 fixture 时提示「该异常 UUID 无归因 fixture」。
+> **第 2 轮结论是闭环的关键。** 第 1 轮抽样是 `fail`，若没有人把「复检已通过并关闭」落成 `sample_round=2`，放行断言②（`sample_passed`）会读「最新一轮 = fail」而**永久阻断**该批次。关闭端点会在批次转入 `pending_release` 的同一事务里自动补写；对历史批次可用 C13 的 `/recheck` 手动补。
 
 ---
 
-## 4. 走查顺序与复现
+### C5 · 复检失败 → 拒绝
 
-推荐剧本（每链路独立会话，互不污染）：
+**目标终态**：批次 `archived`（经 `rejected`），异常 `rejected`。
+
+前置：先按 C3b 得到 `isolated` 批次，再走 C4 的第 1–6 步（隔离 → 指派 → 填报整改措施，**不勾已验证**）。
+
+| 步 | 点击哪里 | 输入什么 | 应看到什么 |
+| --- | --- | --- | --- |
+| 1 | 「复检」节点 →「录入复检」 | 复检组件 `SN-I-OODB`<br>**结果 = `不通过`**<br>Pmax **`470.0`**（< 533.5，重演同一个不合格）<br>Temp `25.0` / Isc `10.5` / Voc `48.0` / Vm `40.0` / Im `13.0` / Ff `0.80`<br>执行人 `ZHL-QA`<br>执行时间 `2026-06-02T10:00`<br>范围 `最小集` | toast「**复检不通过，异常与批次转拒绝**」<br>异常 → **已拒绝**；批次 → **已拒绝** |
+| 2 | 「异常」tab 看该卡片 | — | 状态 **已拒绝**；「确认关闭异常」不再出现 |
+| 3 | 流水线节点「放行」→ 点「**拒绝本批**」 | 拒绝原因 `复检仍不合格，同批拒收`<br>操作人 `ZHL-QA` | toast「已拒绝并归档，异常处置报告已生成」<br>批次 → **已归档**；生成 **异常处置报告 v1** |
+
+**实测确认的 409 守卫**：
+
+| 操作 | 结果 |
+| --- | --- |
+| 复检失败后调 `POST /api/incidents/{id}/close` | `409 {"error": "incident_not_closeable", "status": "rejected"}` |
+| 复检失败后调 `POST /api/batches/{id}/reject` | `409 {"error": "batch_reject_not_allowed", "from_status": "rejected", …}`（批次已是 `rejected`，不重复拒绝） |
+| 批次 `rejected` 时取放行报告 | `409 {"error": "rejected_batch_only_incident_report", "report_type": "release"}`（D7：只能出处置报告） |
+
+> **⚠️ 「复检失败 → 拒绝」不适用于从「已指派」直接复检**。异常合法边只有 `assigned → pending_recheck` 与 `pending_recheck → rejected`，**没有 `assigned → rejected`**。若跳过「填报整改措施」直接从「已指派」登记 `result=fail`，实测返回 **`409 {"error": "incident_transition_denied", "reason": "no transition incident:assigned -> rejected (skip/invalid)"}`**。必须先走完「填报整改措施」把异常推到 **待复检**，再登记复检。
+
+---
+
+### C6 · 关闭五条件逐项缺失（应逐条指名）
+
+五条件是：① 已关联 SN ② 有原始判定证据 ③ 责任人 + 临时措施 + 确认根因 + 纠正措施 ④ 独立复检记录 ⑤ 复检通过且已验证。
+
+前置：C3b 得到 `isolated` 批次 + `new` 异常（自动创建的异常已带 SN 关联与判定证据）。
+
+| 步 | 当前状态 | 点「确认关闭异常」应看到 |
+| --- | --- | --- |
+| 1 | 异常 `new` | `409 {"error": "incident_not_closeable", "status": "new"}`（状态就不对，先隔离） |
+| 2 | 点「隔离异常」后 `isolated` | `409 {"error": "incident_not_closeable", "status": "isolated"}`（先指派） |
+| 3 | 指派后 `assigned`，未填 CAPA | `409 {"error": "incident_not_closeable", "status": "assigned"}`（先填报整改措施） |
+| 4 | 填报整改措施后 `pending_recheck`，**无复检记录**、**未勾验证**、**临时措施为空** | `409 {"error": "close_conditions_unmet", "missing": ["reinspection_record", "capa_verified", "containment_action"]}` |
+| 5 | 录入通过的复检后，仍未勾验证（临时措施已填） | `409 … "missing": ["capa_verified"]` |
+| 6 | 补勾「已验证」后再点 | `200`，异常 → **已关闭**，批次 → **待放行** |
+
+**实测确认的一组对照**：指派时临时措施留空 → 第 4/5 步的 `missing` 里会多一项 `containment_action`；把临时措施填上后该项消失。所以**第 5 步只缺 `capa_verified` 的前提是临时措施已填**。
+
+前端对 `missing` 项的中文映射（`app/static/wb/stages/incident.js::MISSING_CN`）：
+
+| missing 代码 | 界面文案 |
+| --- | --- |
+| `owner` | 未指派责任人 |
+| `sn_not_linked` | 异常未关联受影响组件 |
+| `original_decision_evidence` | 缺少原始判定证据 |
+| `containment_action` | 未填报临时措施 |
+| `capa_fields` | 整改措施未填报完整（确认根因 / 纠正措施） |
+| `reinspection_record` | 无独立复检记录 |
+| `reinspection_passed` | 复检未通过 |
+| `capa_verified` | 整改措施未勾选已验证 |
+
+---
+
+### C7 · 多异常批次联动
+
+**目标终态**：关闭第 1 只后批次**仍**「待复检」；关闭第 2 只后批次才「待放行」。
+
+| 步 | 点击哪里 | 输入什么 | 应看到什么 |
+| --- | --- | --- | --- |
+| 1 | 「＋ 新建批次」 | 批次号 `B-20261015-007`，计划数量 `8` | 待入场 |
+| 2 | 「数据入场」→「提交送检数据」 | 粘贴两行：<br>`SN-N-001,533.4,25.0,10.5,48.0,40.0,13.0,0.80,pass`<br>`SN-N-002,550.0,25.0,10.5,48.0,40.0,16.5,0.80,pass` | 自动确认入场；判定后批次 **已隔离** |
+| 3 | 「异常」tab → 点「＋ 再建一条异常」 | 触发原因 = `外观人工触发`<br>严重度 = `轻微`<br>受影响条码（每行一个）：`SN-N-001`<br>证据引用留空 | 本批出现 **2 只**异常（1 只系统自动建的 `规则失败`，1 只手工的 `外观人工触发`） |
+| 4 | 对**第 1 只**异常依次：隔离 → 指派 → 填报整改措施（不勾验证）→ 复检节点录入 `通过`（组件选该异常对应的 SN，Pmax/Temp/… 全填标准值）→ 补勾已验证 → 确认关闭 | 见 C4 第 1–9 步 | 关闭成功，但**批次仍是「待复检」**（还有一只没关） |
+| 5 | 对**第 2 只**异常重复第 4 步 | 同上，组件选它自己对应的 SN | 关闭成功，**批次转「待放行」** |
+
+实测确认：关闭第 1 只 → `incident_status=closed` 但 `batch_status=pending_recheck`；关闭第 2 只（最后一只）→ `batch_status=pending_release`。
+
+> 该联动有自动化用例钉住：`tests/e2e/test_closure.py::test_close_gates_on_all_incidents_terminal`。
+
+---
+
+### C8 · 归档只读
+
+前置：任意一条走完的链路（批次已是 `archived`）。
+
+| 步 | 点击哪里 | 应看到什么 |
+| --- | --- | --- |
+| 1 | 批次头「生成报告」 | toast「批次已归档，内容只读」，接口 `409 {"error": "batch archived, terminal state"}` |
+| 2 | 放行节点「确认放行」 | 同上 409 |
+| 3 | 放行节点「拒绝本批」 | 同上 409 |
+| 4 | 「异常」卡片上的任何写操作（隔离/指派/填报/关闭） | 同上 409 |
+| 5 | 「数据入场」再提交送检数据 | 同上 409 |
+
+实测六个写端点（`report` / `release` / `reject` / `recheck` / `intake` / `confirm`）全部返回 `409 {"error": "batch archived, terminal state"}`。
+
+---
+
+### C9 · 跨批同 SN 一致性
+
+**目标终态**：第二批被 400 拒绝且**保持待入场**；一致性异常挂在**第一批**上。
+
+| 步 | 点击哪里 | 输入什么 | 应看到什么 |
+| --- | --- | --- | --- |
+| 1 | 「＋ 新建批次」 | 批次号 `B-20261015-009A`，计划数量 `8` | 待入场 |
+| 2 | 「数据入场」→「提交送检数据」 | 粘贴 `SN-SHARED,550.0,25.0,10.5,48.0,40.0,13.0,0.80,pass` | 自动确认入场；批次推进到 **待放行** |
+| 3 | 「＋ 新建批次」 | 批次号 `B-20261015-009B`，计划数量 `8` | 待入场 |
+| 4 | 「数据入场」→「提交送检数据」 | 粘贴**同样一行** `SN-SHARED,…` | 红色错误：toast「**组件条码已存在于其他批次**」；批次**仍是待入场** |
+| 5 | 左栏「异常」tab | — | 新增 1 条异常：`数据一致性` · **严重** · **新建**，挂在**批次 A** 上 |
+
+实测返回：`400 {"detail": {"reason": "cross_batch_sn_conflict", "error": "SN 'SN-SHARED' already recorded in a different batch"}}`；批次 A 保持 `pending_release`，批次 B 保持 `pending_intake`；自动异常 `('data_consistency', 'critical', 'new')` 挂在 A 的 `batch_id` 上。
+
+---
+
+### C10 · 人工拒绝
+
+**目标终态**：批次 `archived`（经 `rejected`），自动生成异常处置报告。
+
+| 步 | 点击哪里 | 输入什么 | 应看到什么 |
+| --- | --- | --- | --- |
+| 1 | 建一个落在 `isolated` 的批次（同 C3，`pmax=533.4`） | 批次号 `B-20261015-010`，计划数量 `8` | 已隔离 |
+| 2 | 「放行」节点 → 点「**拒绝本批**」 | 拒绝原因 `同批组件存在系统性功率偏差，本批拒收`<br>操作人 `ZHL-QA` | toast「已拒绝并归档，异常处置报告已生成」；批次 → **已归档** |
+| 3 | 左栏「报告」tab | — | 出现 1 份 **异常处置报告 v1** |
+
+实测返回：`200 {"status": "archived", "auto_archived": true, "reason": "同批组件存在系统性功率偏差，本批拒收", "report_id": "<uuid>"}`，同事务内生成 `report_type = incident` v1 并自动归档。
+
+---
+
+### C11 · 归因三选一（单独验证，不进入后续流程）
+
+前置：`isolated` 批次 + 已隔离的异常（同 C4 第 1 步）。
+
+| 步 | 操作 | 应看到什么 |
+| --- | --- | --- |
+| 1 | 点「AI 归因」 | 假设列表带单选按钮，每条显示「置信度 xx% · 证据 n 条」 |
+| 2 | 选第 1 条 → 点「**采纳选中假设**」 | 「已采纳假设 #1：<假设原文>」；「确认根因」一行 = 假设原文 |
+| 3 | 重新点「AI 归因」→ 选第 1 条 → 点「**修改后采纳**」 | 弹出「修改假设」窗，**底稿是这条假设的原文**；填「修订后的根因」`现场确认：焊接虚焊（非隐裂）`，可另填「修改理由」；提交后「确认根因」= 修订文本 |
+| 4 | 重新点「AI 归因」→ 点「**驳回**」 | 「已驳回全部假设，需人工填写根因后才能关闭异常」；「确认根因」**保持原值不变**（驳回不写业务字段） |
+
+实测「修改」后的 `confirmed_root_cause` = `现场确认：焊接虚焊（非隐裂）`，轨迹 `root_cause_source = "modified_hypothesis"`，同时留原假设原文与下标 `0`。
+
+**未先归因就直接点「采纳」**：若该异常没有停驻的归因运行，接口返回 `409 {"error": "no_parked_attribution", …}`，界面 toast「状态冲突，请刷新后重试」。
+
+---
+
+### C12 · 低置信人工确认（**必须选「已结构化数据」通道**）
+
+**目标终态**：批次停在 `pending_intake` 等人工确认；确认后推进，拒绝则保持待入场。
+
+| 步 | 点击哪里 | 输入什么 | 应看到什么 |
+| --- | --- | --- | --- |
+| 1 | 「＋ 新建批次」 | 批次号 `B-20261015-012`，计划数量 `8` | 待入场 |
+| 2 | 「数据入场」→「提交送检数据」 | 数据来源 `检测数据`<br>录入方式 = **`已结构化数据（逐列粘贴）`**<br>粘贴两行：<br>`SN-LOW-001,550.0,25.0,10.5,48.0,40.0,13.0,0.80,pass`<br>`SN-N-002,548.0,25.0,10.5,48.0,40.0,13.0,0.80,pass` | toast「批次待处理：待人工确认入场→判定」；「入场结果」面板显示「**待人工确认 · 置信度 62%**」与「**低置信组件（1）：SN-LOW-001**」；批次仍是 **待入场** |
+| 3 | 面板「**确认入场**」 | 无 | toast「已确认入场」；批次推进到 **待放行**（本批全 Pass，计划数量 8） |
+| 4 | *（另起一批，验证拒绝分支）* 同第 1–2 步建 `B-20261015-012R`，粘贴 `SN-LOW-001,…` | 点「**拒绝入场**」 | toast「已拒绝入场，批次仍待入场」；**批次保持待入场**，逐 SN 入场状态 = **`rejected`** |
+
+实测：Mock 下 `SN-LOW-001` 置信度 **0.62**，接口返回 `status=pending`、`low_conf_sns=["SN-LOW-001"]`；确认后批次直接到 `pending_release`（全 Pass）。拒绝后批次停在 `pending_intake`，该 SN 的 `intake_status` 变为 `rejected`。
+
+**未确认就点「执行判定」**：`400 {"detail": {"unconfirmed_sns": ["SN-LOW-001", "SN-N-002"]}}`，界面提示「请先完成入场确认」。
+
+---
+
+### C13 · 复检结论重算（`/recheck`，历史批次补写）
+
+**用途**：修复前就已关闭完异常、但结论侧没回写第 2 轮的批次（表现：批次停在 `pending_release`，但放行断言② `sample_passed` 一直失败）。
+
+| 步 | 点击哪里 | 输入什么 | 应看到什么 |
+| --- | --- | --- | --- |
+| 1 | 流水线节点「放行」 | 无（面板自动跑校验） | 7 项里 `抽样结论通过` 显示 ✗；下方出现按钮「**重算复检结论**」 |
+| 2 | 点「**重算复检结论**」 | 无 | 闭环成立 → toast「已补写第 2 轮抽样结论（pass）」并自动重跑校验，7 项转全 ✓<br>闭环未走完 → toast「复检闭环未走完：<未解除的 SN 原因>」<br>本批本就没有抽样结论 → toast「该批次没有抽样结论，无需重算」 |
+| 3 | 再点一次 | 无 | toast「第 2 轮抽样结论已在，无需重算」（幂等） |
+
+实测幂等返回：`{"sample_round": 2, "result": "pass", "written": false, "skipped": "already_passed"}`（第 2 轮结论已存在）。
+
+**前置条件**：批次必须是 `pending_release`。其他状态下接口返回 `409 {"error": "batch_not_pending_release", "status": "..."}`；已归档则返回 `409 {"error": "batch archived, terminal state"}`。
+
+---
+
+## 4. 走查顺序
+
+每条链路**独立建批次**，互不污染。建议顺序：
 
 ```
-C1 正常放行  →  C2 边界 Pass vs C3 边界 Fail
-C4 复检通过放行  vs  C5 复检失败拒绝
-C6 五条件缺失 → C7 多异常联动 → C8 归档只读
-C9 跨批冲突  →  C10 人工拒绝  →  C11 归因三选一
+C1  正常放行            （先跑通，确认环境 OK）
+C2  边界 Pass  vs  C3/C3b 边界 Fail / 越档 Fail   （闭区间语义 + 隔离自动建异常）
+C12 低置信人工确认      （auto-confirm 阈值的另一侧）
+C4  完整闭环            （核心：归因三选一 → 复检 → 第 2 轮结论 → 放行）
+C5  复检失败拒绝  vs  C6 关闭五条件缺失
+C7  多异常联动
+C8  归档只读  →  C9 跨批冲突  →  C10 人工拒绝
+C11 归因三选一（可并入 C4）
+C13 /recheck            （对历史批次）
 ```
+
+自动化回归（与本文件覆盖同一批路径）：
 
 ```bash
-# 全量 E2E / 验收样例
-uv run pytest tests/api/test_e2e_acceptance.py tests/e2e/ -v
-# 起容器后查批次状态
-docker exec -e PGCLIENTENCODING=UTF8 zhl-pg psql -U postgres -d zhl -c "SELECT batch_no, status FROM delivery_batches;"
+# 全量
+uv run pytest
+
+# 四组验收样例 + 端到端
+uv run pytest tests/e2e/ tests/api/test_e2e_acceptance.py -v
+
+# 本文件的链路 ↔ 用例对应
+uv run pytest tests/api/test_reinspections.py tests/api/test_incident_attribute.py -v
+uv run pytest tests/e2e/test_closure.py tests/e2e/test_demo_path.py -v
+uv run pytest tests/api/test_remediation_conclusion_flow.py tests/static/test_wb_release_recheck.js -v
+
+# 查批次状态
+docker exec -e PGCLIENTENCODING=UTF8 zhl-pg psql -U postgres -d zhl \
+  -c "SELECT batch_no, status FROM delivery_batches ORDER BY created_at DESC;"
 ```
 
 ---
 
-## 5. 与现有夹具对应
+## 5. 链路 ↔ 夹具/用例对应
 
-| 链路 | 夹具 / 测试 |
-| --- | --- |
-| C1 | `acceptance_normal.json` + `test_e2e_acceptance.py`（样例一） |
-| C2/C3 | `acceptance_boundary.json`（样例二 / 对照组） |
-| C4/C5 | `acceptance_incident.json` + `test_sample3_incident_closure.py` / `test_closure.py` |
-| C6/C7/C8 | `test_closure.py` |
-| C9 | `acceptance_consistency.json` + `test_sample4_consistency.py` |
-| C10/C11 | 本分支 `test_release_reject.py` / `test_incident_attribute.py` |
+| 链路 | 夹具 | 自动化用例 |
+| --- | --- | --- |
+| C1 | `acceptance_normal.json` | `tests/api/test_e2e_acceptance.py`（样例一） |
+| C2 / C3 / C3b | `acceptance_boundary.json` | `tests/domain/test_judge.py`、`test_e2e_acceptance.py`（样例二） |
+| C4 | `acceptance_incident.json` | `tests/e2e/test_sample3_incident_closure.py`、`test_closure.py` |
+| C5 | `acceptance_incident.json` | `tests/e2e/test_closure.py::test_reinspection_fail_then_close_is_rejected` |
+| C6 | `acceptance_incident.json` | `test_closure.py::test_close_names_all_missing_conditions_at_once` |
+| C7 | `acceptance_incident.json` | `test_closure.py::test_close_gates_on_all_incidents_terminal` |
+| C8 | — | `tests/api/test_archival.py` |
+| C9 | `acceptance_consistency.json` | `tests/e2e/test_sample4_consistency.py` |
+| C10 | — | `tests/api/test_release_reject.py` |
+| C11 | `mock_llm_attribution.json` | `tests/api/test_incident_attribute.py` |
+| C12 | `mock_llm_outputs.json` | `tests/api/test_intake.py` |
+| C13 | — | `tests/api/test_remediation_conclusion_flow.py`、`tests/skills/test_remediation_conclusion.py` |
+| 全链演示（原始单据入口） | — | `tests/e2e/test_demo_path.py` |
+
+---
+
+## 6. 已知限制与易踩坑（实测确认）
+
+| # | 现象 | 原因 | 规避方式 |
+| --- | --- | --- | --- |
+| 1 | 计划数量填 `1` 时批次被隔离，异常类型是「规则缺失」而非「规则失败」 | ISO 表最小 lot 区间是 2–8，`lot=1` 查不到 | 计划数量填 **≥ 2** |
+| 2 | `im = 12.0 / 14.0 / 15.5` 都判 Fail，看着像「分档边界应该过」 | **容差 `[12.35,13.65]` 与分档 `A/B` 是两把独立的尺子**，两条都要满足 | 演示越档用 `im = 16.5`；演示分档 Pass 用 `im = 13.0` |
+| 3 | 走「原始单据（AI 抽取）」通道时演示不出低置信 | 该通道逐行置信度固定 `0.9` | 低置信必须用「**已结构化数据**」+ `SN-LOW-*` |
+| 4 | 从「已指派」直接登记复检 `result=fail` 返回 409 | 异常状态机**没有 `assigned → rejected` 边** | 先「填报整改措施」把异常推到**待复检**，再登记复检 |
+| 5 | Mock 模式置信度 0.95 / 0.62，真模型下完全不一样 | 两条路径的置信度来源不同 | 验收写死数字时切 `ZHL_LLM_MODE=mock` |
+| 6 | 真模型下点「AI 归因」要等约 1 分钟 | 现场调用真实模型，单次 40~90 秒 | 界面已有「AI 归因中…」提示与 120s 超时；演示前先跑一次预热 |
+| 7 | 自动创建的异常「严重度」恒为「较严重」 | `ensure_incident` 自动路径固定 `major`，不自动升 critical | 需要 critical 请手工建异常并选「严重」 |
+| 8 | 报告正文的「留痕引用」显示「（无轨迹引用）」 | 报告渲染层拿到的 `trace_refs`/`evidence_refs` 为空 | 轨迹与证据可在右栏「批次轨迹」与数据库核实；不影响断言结论 |
+| 8b | 「AI 抽取结果」里的 `pmax` 和判定结果对不上 | 判定读 **DB 原始列**，面板显示的是**模型输出**，两套数（见 §2.3） | 改提交的那 9 列，不要改面板数字；对不上是预期行为 |
+| 8c | `im` 是全项目最容易被真模型改写的一列 | 判定读 DB 列（不会被改），但如果源数据本身 `im` 异常，判定的失败项会同时出现 `parameter_tolerances` 与 `current_band` | 看到两个失败项属正常（§0.2） |
+| 9 | 归因「修改后采纳」刚打开的表单被立刻关掉 | 已修（`ui.js` 的 extraButtons 回调返回 `false` 表示不关窗） | 若复现，检查该分支的 `return false` 是否还在 |
+| 10 | 待办异常重复创建 | `ensure_incident` 对「同批次 + 同触发原因 + 未关闭」幂等；**人工端点不做此约束**（业务允许多条同因异常） | 创建表单会提示「本批已有 N 条未关闭的同因异常」，按钮变「仍要新建」 |
