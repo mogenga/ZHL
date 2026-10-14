@@ -82,6 +82,15 @@ def build_router(get_deps: object) -> APIRouter:
                 status_code=400,
                 detail={"rule_version_id": body.rule_version_id, "reason": "unknown rule version"},
             )
+        if rule.status != "published":
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "rule_version_id": body.rule_version_id,
+                    "reason": "rule version not published",
+                    "status": rule.status,
+                },
+            )
         batch = BatchRepository().create_batch(
             s,
             body.batch_no,

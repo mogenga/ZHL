@@ -20,7 +20,6 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
 from uuid import UUID
 
 from fastapi.testclient import TestClient
@@ -57,11 +56,14 @@ def test_judge_fail_auto_creates_rule_fail_incident() -> None:
 
     assert env["state"]["batch_status"] == "isolated"
     batch_id = UUID(env["batch_id"])
-    assert session.get(__import__("app.infra.models", fromlist=["DeliveryBatch"]).DeliveryBatch, batch_id).status == "isolated"
-
-    incidents = (
-        session.query(QualityIncident).filter(QualityIncident.batch_id == batch_id).all()
+    assert (
+        session.get(
+            __import__("app.infra.models", fromlist=["DeliveryBatch"]).DeliveryBatch, batch_id
+        ).status
+        == "isolated"
     )
+
+    incidents = session.query(QualityIncident).filter(QualityIncident.batch_id == batch_id).all()
     assert len(incidents) == 1, f"应自动创建一只异常：{incidents}"
     inc = incidents[0]
     assert inc.trigger_type == "rule_fail"
@@ -81,25 +83,15 @@ def test_judge_fail_auto_creates_rule_fail_incident() -> None:
     # §8.2 组件级隔离：失败 SN 标记 isolated，合格 SN 不受影响（§9.8 #3）
     from app.infra.models import ModuleInspection as _MI
 
-    failing_row = (
-        session.query(_MI)
-        .filter(_MI.batch_id == batch_id, _MI.sn == failing_sn)
-        .one()
-    )
+    failing_row = session.query(_MI).filter(_MI.batch_id == batch_id, _MI.sn == failing_sn).one()
     assert failing_row.intake_status == "isolated"
-    ok_row = (
-        session.query(_MI)
-        .filter(_MI.batch_id == batch_id, _MI.sn != failing_sn)
-        .first()
-    )
+    ok_row = session.query(_MI).filter(_MI.batch_id == batch_id, _MI.sn != failing_sn).first()
     assert ok_row is not None and ok_row.intake_status == "confirmed"
 
     # 轨迹留痕
     from app.plugins.trace_store import TraceStore
 
-    assert "incident_auto" in {
-        t.skill_name for t in TraceStore().list_for_batch(session, batch_id)
-    }
+    assert "incident_auto" in {t.skill_name for t in TraceStore().list_for_batch(session, batch_id)}
 
 
 def test_rule_missing_creates_rule_missing_incident() -> None:
@@ -116,9 +108,7 @@ def test_rule_missing_creates_rule_missing_incident() -> None:
     assert state["batch_status"] == "isolated"
     batch_id = UUID(env["batch_id"])
     assert session.get(DeliveryBatch, batch_id).status == "isolated"
-    inc = (
-        session.query(QualityIncident).filter(QualityIncident.batch_id == batch_id).one()
-    )
+    inc = session.query(QualityIncident).filter(QualityIncident.batch_id == batch_id).one()
     assert inc.trigger_type == "rule_missing"
     # 规则缺失影响全批：sn_links 覆盖全部 10 个组件
     linked = (
@@ -156,7 +146,6 @@ def test_cross_batch_conflict_creates_consistency_incident() -> None:
     from sqlalchemy.orm import sessionmaker
     from sqlalchemy.pool import StaticPool
 
-    from app.main import create_unified_app
     from app.infra.models import (
         Base,
         DeliveryBatch,
@@ -165,6 +154,7 @@ def test_cross_batch_conflict_creates_consistency_incident() -> None:
         QualityIncident,
         QualityRuleVersion,
     )
+    from app.main import create_unified_app
     from tests.fixtures.loader import load_acceptance
 
     sample = load_acceptance("incident")
@@ -187,6 +177,7 @@ def test_cross_batch_conflict_creates_consistency_incident() -> None:
         current_bands=raw["current_bands"],
         sample_plan=raw["sample_plan"],
         effective_at=ts,
+        status="published",
         version_no=raw["version_no"],
     )
     batch_a = DeliveryBatch(
@@ -279,8 +270,7 @@ def test_cross_batch_conflict_creates_consistency_incident() -> None:
         assert linked == 1
         # 新批次 B 不产生孤儿异常
         assert (
-            session.query(QualityIncident).filter(QualityIncident.batch_id == batch_b).count()
-            == 0
+            session.query(QualityIncident).filter(QualityIncident.batch_id == batch_b).count() == 0
         )
     finally:
         session.close()
