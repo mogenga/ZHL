@@ -73,15 +73,21 @@ td.num,th.num{font-family:var(--mono)}
 .kv .k{font-size:12px;color:var(--ink3)}
 .kv .v{font-family:var(--mono);font-size:14px}
 
-/* pipeline */
+/* pipeline：.pipe::before 为灰色底层连线；locked 回看时 JS 插入 .line（灰）与 .line.filled（绿，宽度=实际进度区间）
+   覆盖其上，使「实际已完成」与「当前查看节点」两条信息线并存不混淆 */
 .pipe{display:flex;align-items:flex-start;margin-top:20px;position:relative}
-.pipe::before{content:'';position:absolute;top:15px;left:7%;right:7%;height:2px;background:var(--line)}
+.pipe::before{content:'';position:absolute;top:15px;left:7%;right:7%;height:2px;background:var(--line);z-index:0}
+.pipe .line{display:none;position:absolute;top:15px;left:7%;right:7%;height:2px;background:var(--line);z-index:0}
+.pipe.locked .line{display:block}
+.pipe.locked .line.filled{right:auto;width:var(--done-pct,0%);background:var(--ok)}
 .stage{position:relative;flex:1;text-align:center;background:none;border:none;padding:0}
 .stage .dot{width:32px;height:32px;border-radius:50%;margin:0 auto 6px;display:grid;place-items:center;background:#fff;border:2px solid var(--line);color:var(--ink3);position:relative;z-index:1;font-size:13px}
 .stage.done .dot{border-color:var(--ok);background:var(--ok-soft);color:var(--ok)}
 .stage.cur .dot{border-color:var(--accent);background:var(--accent);color:#fff;box-shadow:0 0 0 4px var(--accent-soft)}
+.stage.review .dot{border-color:var(--accent);background:var(--accent-soft);color:var(--accent);box-shadow:0 0 0 4px var(--accent-soft)}
 .stage .lbl{font-size:12px;color:var(--ink2)}
 .stage.cur .lbl{color:var(--accent);font-weight:700}
+.stage.review .lbl{color:var(--accent);font-weight:700}
 .stage:disabled{cursor:default}
 .stage:not(:disabled):hover .lbl{color:var(--accent)}
 .stage-panel h3{font-size:15px;margin-bottom:4px}
