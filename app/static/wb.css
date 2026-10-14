@@ -173,6 +173,14 @@ td.num,th.num{font-family:var(--mono)}
 .report-md .md-table tr:nth-child(even) td{background:rgba(0,0,0,.02)}
 /* 关键数据表（jsonBlock）：长值换行不挤压 */
 .report-json .md-table td.json-cell{word-break:break-all;white-space:pre-wrap;font-family:var(--mono);font-size:12px}
+/* 关键数据可折叠：标题 + 摘要表 + 原始数据入口 */
+.report-json .jblock-head{display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none}
+.report-json .jblock-head:hover{color:var(--accent,#2563eb)}
+.report-json .jblock-caret{font-size:11px;color:var(--ink2,#666)}
+.report-json .jblock-body{margin-top:6px}
+.report-json .jblock-raw-table td.json-cell{font-size:11.5px}
+.report-json .jblock-raw-table tr:nth-child(even) td{background:transparent}
+.report-json .jblock-summary{border-left:3px solid var(--accent,#2563eb);padding-left:10px}
 .report-body{min-width:0}
 .report-detail-host .report-md h1{font-size:16px;margin-top:0}
 

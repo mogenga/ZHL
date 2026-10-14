@@ -67,24 +67,38 @@ WB.report = (function () {
         continue;
       }
       if (/^\s*[-*]\s/.test(ln)) {
+        // 先看完整列表段：裸子项（“-” 后无内容）视为装饰分隔线跳过，
+        // 避免报告正文里的准备段掉落字符产出数颗空项
         const ul = WB.h('ul', {});
+        let items = 0;
         while (i < lines.length && /^\s*[-*]\s/.test(lines[i])) {
-          const item = WB.h('li', { innerHTML: _inlineHtml(lines[i].replace(/^\s*[-*]\s*/, '')) });
-          _liBadge(item);
-          ul.append(item);
+          const text = lines[i].replace(/^\s*[-*]\s?/, '');
+          if (!/^\s*$/.test(text)) {
+            const item = WB.h('li', { innerHTML: _inlineHtml(text) });
+            _liBadge(item);
+            ul.append(item);
+            items++;
+          }
           i++;
         }
-        wrap.append(ul); continue;
+        if (items) wrap.append(ul);
+        continue;
       }
       if (/^\s*\d+\.\s/.test(ln)) {
         const ol = WB.h('ol', {});
+        let items = 0;
         while (i < lines.length && /^\s*\d+\.\s/.test(lines[i])) {
-          const item = WB.h('li', { innerHTML: _inlineHtml(lines[i].replace(/^\s*\d+\.\s*/, '')) });
-          _liBadge(item);
-          ol.append(item);
+          const text = lines[i].replace(/^\s*\d+\.\s?/, '');
+          if (!/^\s*$/.test(text)) {
+            const item = WB.h('li', { innerHTML: _inlineHtml(text) });
+            _liBadge(item);
+            ol.append(item);
+            items++;
+          }
           i++;
         }
-        wrap.append(ol); continue;
+        if (items) wrap.append(ol);
+        continue;
       }
       // 水平线
       if (/^\s*(---+|\*\*\*+)\s*$/.test(ln)) {
@@ -98,28 +112,94 @@ WB.report = (function () {
     return wrap;
   }
 
-  // 关键数据块（content_json 里若有 checks/summary 等；嵌套结构美化，长值换行）
+  /* ---- 关键数据块：默认折叠为人类可读摘要，原始 JSON 收进「查看原始数据」，
+     避免整页被紧凑 JSON 淹没 ---- */
   function _fmtJsonVal(v) {
     if (v === null || v === undefined) return '—';
     if (typeof v === 'object') {
-      // 数组/对象：紧凑 JSON（对象/数组保持单行，超长换行由 CSS 处理）
       try { return JSON.stringify(v); } catch (e) { return String(v); }
     }
     return String(v);
   }
+  // 人类可读摘要：只展示有信息量的顶层键
+  function _summaryRows(contentJson) {
+    const rows = [];
+    const batch = contentJson.batch;
+    if (batch) {
+      if (batch.model) rows.push(['型号', batch.model]);
+      if (batch.status) rows.push(['批次状态', batch.status]);
+      if (batch.batch_id) rows.push(['批次号', batch.batch_id]);
+    }
+    const inc = contentJson.incidents || [];
+    const rei = contentJson.reinspections || [];
+    const dec = contentJson.decisions || [];
+    const asserts = contentJson.assertions;
+    const checks = (asserts && asserts.checks) || [];
+    const nPass = checks.filter(function (c) { return c.passed; }).length;
+    if (checks.length) rows.push(['放行断言', nPass + '/' + checks.length + ' 项通过' + (asserts && asserts.passed === false ? '（未通过）' : '（全部通过）')]);
+    if (inc.length) rows.push(['异常', inc.length + ' 条']);
+    if (rei.length) rows.push(['复检', rei.length + ' 条']);
+    if (dec.length) rows.push(['决策记录', dec.length + ' 条']);
+    if (contentJson.refusal_reason) rows.push(['拒绝原因', contentJson.refusal_reason]);
+    if (contentJson.report_type) rows.push(['报告类型', contentJson.report_type]);
+    return rows;
+  }
+  // 可折叠：默认收起摘要，点标题展开；「查看原始数据」再展开紧凑 JSON
   function jsonBlock(contentJson) {
     if (!contentJson || !Object.keys(contentJson).length) return null;
-    const box = WB.h('div', { class: 'report-json' });
-    box.append(WB.h('div', { class: 'hint-line', style: 'font-weight:600', text: '关键数据' }));
-    const tbl = WB.h('table', { class: 'md-table' });
-    tbl.append(WB.h('tr', {}, WB.h('th', { text: '项' }), WB.h('th', { text: '值' })));
+    const box = WB.h('div', { class: 'report-json', style: 'margin-top:12px' });
+    const head = WB.h('div', { class: 'jblock-head', style: 'display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none' },
+      WB.h('span', { class: 'jblock-title', style: 'font-weight:600', text: '关键数据' }),
+      WB.h('span', { class: 'jblock-caret', text: '▾' }));
+    const collapse = WB.h('div', { class: 'jblock-body' });
+    const summary = WB.h('div', { class: 'jblock-summary' });
+    const srows = _summaryRows(contentJson);
+    if (srows.length) {
+      const stbl = WB.h('table', { class: 'md-table' });
+      stbl.append(WB.h('tr', {}, WB.h('th', { text: '项' }), WB.h('th', { text: '值' })));
+      srows.forEach(function (r) {
+        stbl.append(WB.h('tr', {}, WB.h('td', { text: r[0] }), WB.h('td', { class: 'num', text: r[1] })));
+      });
+      summary.append(stbl);
+    } else {
+      summary.append(WB.h('div', { class: 'hint-line muted', text: '无摘要项，可展开原始数据查看完整字段' }));
+    }
+    collapse.append(summary);
+    // 「查看原始数据」入口
+    const rawBtn = WB.h('button', { class: 'newbtn jblock-raw', style: 'font-size:12px;padding:2px 10px;margin-top:8px', text: '查看原始数据' });
+    const rawBox = WB.h('div', { class: 'jblock-rawbox', style: 'display:none' });
+    const rawTbl = WB.h('table', { class: 'md-table jblock-raw-table' });
+    rawTbl.append(WB.h('tr', {}, WB.h('th', { text: '项' }), WB.h('th', { text: '值' })));
     Object.keys(contentJson).forEach((k) => {
       const v = contentJson[k];
       const isObj = v !== null && typeof v === 'object';
       const td = WB.h('td', { class: isObj ? 'json-cell' : 'num', text: _fmtJsonVal(v) });
-      tbl.append(WB.h('tr', {}, WB.h('td', { text: k }), td));
+      rawTbl.append(WB.h('tr', {}, WB.h('td', { text: k }), td));
     });
-    box.append(tbl);
+    rawBox.append(rawTbl);
+    rawBtn.addEventListener('click', function () {
+      if (rawBox.style.display !== 'none') {
+        rawBox.style.display = 'none';
+        rawBtn.textContent = '查看原始数据';
+      } else {
+        rawBox.style.display = '';
+        rawBtn.textContent = '收起原始数据';
+      }
+    });
+    collapse.append(rawBtn);
+    collapse.append(rawBox);
+    head.addEventListener('click', function () {
+      const caret = head.querySelector('.jblock-caret');
+      if (collapse.style.display !== 'none') {
+        collapse.style.display = 'none';
+        if (caret) caret.textContent = '▸';
+      } else {
+        collapse.style.display = '';
+        if (caret) caret.textContent = '▾';
+      }
+    });
+    box.append(head);
+    box.append(collapse);
     return box;
   }
 
