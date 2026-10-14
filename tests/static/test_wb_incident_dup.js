@@ -71,7 +71,15 @@ function makeEl(tag) {
       const p = e.parentNode;
       if (p) { const i = p.children.indexOf(e); if (i >= 0) p.children.splice(i, 1); }
     },
-    setAttribute(k, v) { e['_attr_' + k] = v; },
+    setAttribute(k, v) {
+      e['_attr_' + k] = v;
+      // 浏览器会把这几个特性反射成 IDL 属性（input.type / min / step …），而应用
+      // 代码确实读 i.type（ui.js:91 的 checkbox 取值分支）——shim 不反射，复选框
+      // 字段在测试里就会走错分支，测出来的行为与浏览器不一致。
+      if (e._tag === 'input' && ['type', 'min', 'max', 'step', 'placeholder'].indexOf(k) >= 0) {
+        e[k] = v;
+      }
+    },
     addEventListener(type, fn) { (e._ev[type] = e._ev[type] || []).push(fn); },
     removeEventListener(type, fn) {
       const a = e._ev[type] || []; const i = a.indexOf(fn); if (i >= 0) a.splice(i, 1);
@@ -134,6 +142,17 @@ const ctx = vm.createContext({
   setTimeout, clearTimeout, setInterval, clearInterval, console,
   fetch: () => Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve('null') }),
   AbortController: function () {},
+  // CSV 解码用（浏览器同样有）：UTF-8 优先、GBK 回退
+  TextDecoder: TextDecoder,
+  // FileReader 桩：readAsArrayBuffer 同步回调（浏览器是异步，但"谁读谁解析"
+  // 的语义一致）；测试用例用 fakeFile._bytes 提供字节
+  FileReader: function () {
+    const self = this;
+    self.readAsArrayBuffer = function (f) {
+      self.result = (f && f._bytes) || new ArrayBuffer(0);
+      if (self.onload) self.onload({ target: self });
+    };
+  },
 });
 
 let failed = 0;
@@ -592,6 +611,190 @@ function openCreateForm(list) {
       'M8: 返回按钮所在行不在 .pipe 内（不参与节点均分）');
     ret.fire('click');
     assert(WB.state.viewStage === null, 'M9: 点击返回 → 回到当前节点');
+  }
+
+  // ---- N. 新建批次「计划数量」：数字输入 + 严格校验（2026-10-15 反馈）----
+  // 旧实现是文本框 + parseInt：'12abc' 被静默截断成 12 直接建批次，且没有任何
+  // 步进入口。改成 number 输入（自带上下箭头/加减）并按整数严格校验。
+  {
+    WB.state.ruleVersions = { available: true, items: [
+      { rule_version_id: '11111111-1111-1111-1111-111111111111', name: 'JH-550W 默认规则',
+        version_no: 1, model: 'JH-550W', status: 'published' },
+    ] };
+    let created = null;
+    WB.api.createBatch = function (body) {
+      created = body;
+      return Promise.resolve({ ok: true, data: { batch_id: BATCH_ID } });
+    };
+    WB.loadBatches = function () { return Promise.resolve({ ok: true, data: [] }); };
+    WB.selectBatch = function () {};
+
+    WB.newBatchForm();
+    const qty = WB._modal.inputs[3];
+    assert(qty.type === 'number', 'N1: 计划数量是数字输入（浏览器自带步进/加减）');
+    assert(Number(qty.min) === 1, 'N2: 下限 1');
+    assert(Number(qty.step) === 1, 'N3: 步进 1');
+
+    WB._modal.inputs[0].value = 'B-N-001';
+    WB._modal.inputs[1].value = 'P-1';
+    WB._modal.inputs[2].value = 'JH-550W';
+
+    // 非整数不得静默截断（旧实现 parseInt('12abc') → 12 直接放过）
+    WB._modal.inputs[3].value = '12abc';
+    WB._modal.submitBtn.fire('click');
+    await flush();
+    assert(created === null, 'N4: 非整数数量不发起创建');
+    assert(!!WB._modal, 'N5: 校验失败保留表单');
+    assert(byId.toast.textContent.indexOf('整数') >= 0, 'N6: 提示需填正整数');
+
+    WB._modal.inputs[3].value = '0';
+    WB._modal.submitBtn.fire('click');
+    await flush();
+    assert(created === null, 'N7: 0 不发起创建');
+
+    WB._modal.inputs[3].value = '12';
+    WB._modal.submitBtn.fire('click');
+    await flush();
+    assert(!!created && created.planned_quantity === 12, 'N8: 合法整数按数字提交');
+    assert(WB._modal === null, 'N9: 成功后关闭表单');
+    WB.closeModal();
+  }
+
+  // ---- O. 数据入场：CSV 解析（2026-10-15 需求：检测数据支持文件上传）----
+  // 仪器导出的检测数据本来就是 CSV；解析器必须是纯函数（无时钟、无 DOM），
+  // 9 列契约与「已结构化数据（逐列粘贴）」通道完全一致，取数走同一套校验。
+  {
+    const P = WB.stages.intake.parseInspectionCsv;
+    assert(typeof P === 'function', 'O0: 解析器已导出（可单测）');
+    const row = (sn, ap) => sn + ',550.0,25.0,10.5,48.0,40.0,13.0,0.80,' + ap;
+
+    // O1 正常两行
+    const ok = P(row('SN-001', 'pass') + '\n' + row('SN-002', 'fail'));
+    assert(ok.errors.length === 0 && ok.rows.length === 2, 'O1: 两行均解析且无错误');
+    assert(ok.rows[0].sn === 'SN-001' && ok.rows[0].pmax === 550
+      && ok.rows[1].appearance_result === 'fail' && ok.sns.join() === 'SN-001,SN-002',
+      'O2: 列值按 9 列契约映射，sns 与行同序');
+
+    // O3 表头行跳过（仅当首行形如 sn,pmax,…）
+    const withHdr = P('SN,pmax,temp,isc,voc,vm,im,ff,外观\n' + row('SN-001', 'pass'));
+    assert(withHdr.skippedHeader === true && withHdr.rows.length === 1, 'O3: 表头行被跳过');
+    // O4 数据行不会被误判成表头（首列是 SN-xxx 而非 sn）
+    const noHdr = P(row('SN-001', 'pass'));
+    assert(noHdr.skippedHeader === false && noHdr.rows.length === 1, 'O4: 数据行不会被当成表头');
+
+    // O5 列数不足：报行号，且该行不进 rows
+    const short = P(row('SN-001', 'pass') + '\nSN-002,550,25');
+    assert(short.rows.length === 1 && short.errors.length === 1
+      && short.errors[0].indexOf('第 2 行') === 0 && short.errors[0].indexOf('9 列') > 0,
+      'O5: 列数不足报行号且不产出该行');
+
+    // O6 非数字 / O7 外观非 pass|fail
+    const badNum = P('SN-003,abc,25,10.5,48,40,13,0.8,pass');
+    assert(badNum.rows.length === 0 && badNum.errors[0].indexOf('pmax') > 0
+      && badNum.errors[0].indexOf('abc') > 0, 'O6: 非数字列指名列名与取值');
+    const badAp = P('SN-004,550,25,10.5,48,40,13,0.8,OK');
+    assert(badAp.rows.length === 0 && badAp.errors[0].indexOf('pass/fail') > 0,
+      'O7: 外观非 pass/fail 被挡下');
+
+    // O8 全角逗号 / O9 空行与 CRLF
+    const full = P('SN-005，550，25，10.5，48，40，13，0.80，pass');
+    assert(full.rows.length === 1 && full.errors.length === 0, 'O8: 全角逗号同样可解析');
+    const messy = P('\r\n' + row('SN-006', 'pass') + '\r\n\r\n');
+    assert(messy.rows.length === 1 && messy.errors.length === 0, 'O9: 空行与 CRLF 被忽略');
+
+    // O10 文件内重复 SN：后端只查"已入库的同批 SN"，载荷内重复会撞唯一约束
+    // 变成 500 —— 必须在预览阶段拦下（第 2 次出现的那行报错）
+    const dup = P(row('SN-007', 'pass') + '\n' + row('SN-007', 'pass'));
+    assert(dup.errors.length === 1 && dup.errors[0].indexOf('第 2 行') === 0
+      && dup.errors[0].indexOf('SN-007') > 0 && dup.errors[0].indexOf('重复') > 0,
+      'O10: 文件内重复 SN 在第 2 次出现处报错');
+
+    // O11 UTF-8 BOM（Excel 另存 UTF-8 CSV 会带）
+    const bom = P('﻿' + row('SN-008', 'pass'));
+    assert(bom.rows.length === 1 && bom.rows[0].sn === 'SN-008', 'O11: BOM 被剥离');
+
+    // O12 GBK 回退：Excel 导出的中文 CSV 常见编码，UTF-8 解码会出替换字符
+    const gbkBytes = new Uint8Array([
+      0x53, 0x4E, 0x2D, 0x30, 0x30, 0x39, 0x2C, 0x35, 0x35, 0x30, 0x2C, 0x32, 0x35, 0x2C,
+      0x31, 0x30, 0x2E, 0x35, 0x2C, 0x34, 0x38, 0x2C, 0x34, 0x30, 0x2C, 0x31, 0x33, 0x2C,
+      0x30, 0x2E, 0x38, 0x2C, 0xCD, 0xE2, 0xB9, 0xDB,   // 末列用 GBK 的「外观」兜底验证
+    ]);
+    const decoded = WB.stages.intake.decodeCsvBytes(gbkBytes);
+    assert(decoded.indexOf('�') < 0 && decoded.indexOf('外观') > 0,
+      'O12: 非 UTF-8 字节回退 GBK 解码');
+  }
+
+  // ---- P. 数据入场「从 CSV 导入」：选文件 → 预览行数与 SN → 确认导入 ----
+  {
+    const batch = { batch_id: BATCH_ID, batch_no: 'B-5', status: 'pending_intake' };
+    WB.state.selected = batch; WB.state.batchId = BATCH_ID;
+    const panel = WB.stages.intake.render(batch, {});
+    const entry = findText(panel, '从 CSV 导入');
+    assert(!!entry, 'P1: 入场面板提供「从 CSV 导入」入口（粘贴通道保留）');
+    assert(!!findText(panel, '提交送检数据'), 'P2: 原有粘贴入口不受影响');
+
+    entry.fire('click');
+    assert(!!WB._modal, 'P3: 打开导入弹窗');
+    const fileInput = WB._modal.inputs[0];
+    assert(fileInput.type === 'file', 'P4: 首个字段是文件选择');
+    assert(hasText(WB._modal.box, '下载模板'), 'P5: 提供模板下载入口');
+    assert(!findText(WB._modal.box, '确认导入') || findText(WB._modal.box, '确认导入').disabled,
+      'P6: 未选文件时不给"确认导入"（避免空提交）');
+
+    // 选文件 → 解析 → 预览（行数 + SN）
+    const csv = 'SN,pmax,temp,isc,voc,vm,im,ff,外观\n'
+      + 'SN-001,550.0,25.0,10.5,48.0,40.0,13.0,0.80,pass\n'
+      + 'SN-002,548.0,25.0,10.5,48.0,40.0,13.0,0.80,fail\n';
+    const bytes = new TextEncoder().encode(csv);
+    const fakeFile = { name: 'iv-export-20261015.csv', size: bytes.length, _bytes: bytes.buffer };
+    fileInput.files = [fakeFile];
+    fileInput.fire('change');
+    await flush(); await flush();
+    assert(hasText(WB._modal.box, 'iv-export-20261015.csv'), 'P7: 预览显示文件名');
+    assert(hasText(WB._modal.box, '2 行'), 'P8: 预览显示有效行数');
+    assert(hasText(WB._modal.box, 'SN-001') && hasText(WB._modal.box, 'SN-002'),
+      'P9: 预览列出 SN');
+
+    // 确认导入 → 提交 inspections[]（列契约与粘贴通道一致）
+    let sent = null;
+    WB.api.submitIntake = function (body) {
+      sent = body;
+      return Promise.resolve({ ok: true, data: { status: 'pending', confidence: 0.9 } });
+    };
+    const okBtn = findText(WB._modal.box, '确认导入');
+    assert(!!okBtn && !okBtn.disabled, 'P10: 解析无误后「确认导入」可用');
+    okBtn.fire('click');
+    await flush(); await flush();
+    assert(!!sent && sent.batch_id === BATCH_ID, 'P11: 以该批次提交');
+    assert(sent.inspections && sent.inspections.length === 2, 'P12: 提交两行 inspections');
+    assert(sent.inspections[0].sn === 'SN-001' && sent.inspections[0].pmax === 550
+      && sent.inspections[1].appearance_result === 'fail', 'P13: 行内容按 9 列契约');
+    assert(sent.inspections[0].source_type === 'IV_CSV'
+      && typeof sent.inspections[0].captured_at === 'string',
+      'P14: 补齐 source_type 与 captured_at（解析器保持无时钟）');
+  }
+
+  // ---- Q. 导入预览必须拦住坏文件（与后端同一契约，避免 500/400 往返）----
+  {
+    const batch = { batch_id: BATCH_ID, batch_no: 'B-5', status: 'pending_intake' };
+    WB.state.selected = batch; WB.state.batchId = BATCH_ID;
+    let sent = null;
+    WB.api.submitIntake = function (body) { sent = body; return Promise.resolve({ ok: true, data: {} }); };
+    WB.stages.intake.render(batch, {}).querySelectorAll('button')
+      .filter(function (b) { return b.textContent === '从 CSV 导入'; })[0].fire('click');
+
+    const bad = 'SN-001,550.0,25.0,10.5,48.0,40.0,13.0,0.80,pass\nSN-002,550,25\n';
+    const bytes = new TextEncoder().encode(bad);
+    const fileInput = WB._modal.inputs[0];
+    fileInput.files = [{ name: 'broken.csv', _bytes: bytes.buffer }];
+    fileInput.fire('change');
+    await flush(); await flush();
+    assert(hasText(WB._modal.box, '第 2 行'), 'Q1: 预览逐行指出问题（带行号）');
+
+    const okBtn = findText(WB._modal.box, '确认导入');
+    okBtn.fire('click');
+    await flush();
+    assert(sent === null, 'Q2: 有错误行时整批不提交');
   }
 
   console.log(failed === 0 ? '\nALL PASS' : '\n' + failed + ' FAILED');

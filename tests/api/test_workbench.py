@@ -221,3 +221,19 @@ def test_static_mount_serves_workbench(sqlite_env) -> None:
     assert on.get("/static/workbench.html").status_code == 200
     off = _rule_versions_client(factory, mount_static=False)
     assert off.get("/static/workbench.html").status_code == 404
+
+
+def test_static_mount_serves_intake_csv_template(sqlite_env) -> None:
+    """「从 CSV 导入」弹窗里的「下载模板」链接必须真能取到文件。
+
+    链接是前端写死的 ``/static/templates/inspection_template.csv``；模板放在
+    static 下若不被挂载（或改名/挪目录），用户点下载会拿到 404，而界面上没有任何
+    提示——这条把"链接可直接下载"钉在服务端。
+    """
+    factory, _ = sqlite_env
+    client = _rule_versions_client(factory, mount_static=True)
+    resp = client.get("/static/templates/inspection_template.csv")
+    assert resp.status_code == 200, resp.text
+    # 带 BOM：中文 Windows 上 Excel 直接双击打开不乱码（与模板守卫同一要求）
+    assert resp.content.startswith(b"\xef\xbb\xbf")
+    assert b"SN,pmax," in resp.content.split(b"\xef\xbb\xbf", 1)[1]

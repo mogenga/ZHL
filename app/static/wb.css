@@ -29,7 +29,12 @@ td.num,th.num{font-family:var(--mono)}
 .topbar{display:flex;align-items:center;gap:16px;padding:10px 20px;background:#fff;border-bottom:1px solid var(--line)}
 .brand{display:flex;align-items:center;gap:10px;font-weight:700}
 .brand .logo{width:26px;height:26px;border-radius:7px;background:linear-gradient(135deg,#0b5cad,#12a3a8);display:grid;place-items:center;color:#fff;font-size:13px}
-.topbar .env{font-size:12px;color:var(--ink3);border:1px solid var(--line);border-radius:99px;padding:2px 10px}
+/* 品牌行 = 产品名 + 副标题，同处一行（design-demos 定稿方案 A 的写法）。
+   副标题原先做成描边胶囊，与按钮同款（白底 + 1px --line 描边），看起来像个
+   点不动的控件、层级也和产品名几乎平齐（2026-10-15 反馈：视觉怪）。
+   现在用「细分隔线 + 弱色 + 小一号」表达从属关系。 */
+.brand .brand-name{font-size:15px;letter-spacing:.02em}
+.brand .brand-sub{font-size:12px;font-weight:400;color:var(--ink3);padding-left:10px;border-left:1px solid var(--line)}
 
 .body{display:grid;grid-template-columns:280px 1fr 320px;min-height:0}
 .col{min-height:0;overflow:auto;padding:16px}
