@@ -40,6 +40,10 @@ WB.goHome = function () {
 /* ---- 视图切换（左列四标签）---- */
 WB.switchView = function (name) {
   WB.state.view = name;
+  // 标签选中态跟着视图状态走：程序性切换（_locateBatch / 报告抽屉等）不会经过
+  // 标签的点击处理器，高亮若只在那里维护，就会出现「主区已回批次、上面还亮着
+  // 异常」（2026-10-15 反馈）。选中态从此只有一个来源。
+  WB._syncLeftTabs(name);
   // 报告视图：拉取全局报告列表（跨批次所有报告，默认展示全部）
   // 左侧导航 + 主区报告页共用 WB.state.reports
   if (name === 'reports') {
@@ -56,12 +60,14 @@ WB.switchView = function (name) {
   if (name !== 'batch') WB.state._search = '';
   WB._renderCenterAndRight();
 };
+WB._syncLeftTabs = function (name) {
+  document.querySelectorAll('[data-view]').forEach((b) => {
+    b.classList.toggle('on', b.dataset.view === name);
+  });
+};
 WB._bindLeftTabs = function () {
   document.querySelectorAll('[data-view]').forEach((b) => {
-    b.addEventListener('click', () => {
-      document.querySelectorAll('[data-view]').forEach((x) => x.classList.toggle('on', x === b));
-      WB.switchView(b.dataset.view);
-    });
+    b.addEventListener('click', () => WB.switchView(b.dataset.view));
   });
   const nb = WB.el('newBatchBtn');
   if (nb) nb.addEventListener('click', WB._onNewBatch);
@@ -245,13 +251,13 @@ WB._pipeline = function (detail) {
       WB.h('div', { class: 'dot', text: i <= cs ? '✓' : String(i + 1) }),
       WB.h('div', { class: 'lbl', text: s }));
   });
-  const wrap = WB.h('div', { class: 'pipe' + (locked ? ' locked' : '') }, btns);
+  /* 节点线自身在回看模式下必须逐像素不变：.pipe 是 flex 容器、.stage{flex:1}，
+     任何追加进去的元素都会参与均分，把六个节点挤窄——这正是「切个节点整条线
+     都变了」的成因（2026-10-15 反馈）。返回按钮因此放在 .pipe 之外，单独一行；
+     回看也不再加画线（旧的绿线是为"回看会清掉前面的 ✓"补的说明，而 ✓ 现在由
+     实际进度 cs 决定、与回看位置解耦，那条线既不必要又会改线形）。 */
+  const wrap = WB.h('div', { class: 'pipe-wrap' }, WB.h('div', { class: 'pipe' }, btns));
   if (locked) {
-    /* 灰色底层线 + 绿色已实际通过区间：回看时两条线并存，
-       绿线标出「实际完成到哪里」，避免用户误以为后面的 ✓ 被清掉 */
-    const donePct = (cs / (WB.STAGES.length - 1)) * 86;
-    wrap.append(WB.h('div', { class: 'line' }));
-    wrap.append(WB.h('div', { class: 'line filled', style: '--done-pct:' + donePct + '%' }));
     wrap.append(WB.h('div', { class: 'actions' },
       WB.h('button', { onclick: () => { WB.state.viewStage = null; WB._renderCenterAndRight(); }, text: '返回当前节点' })));
   }

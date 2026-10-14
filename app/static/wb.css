@@ -74,13 +74,12 @@ td.num,th.num{font-family:var(--mono)}
 .kv .k{font-size:12px;color:var(--ink3)}
 .kv .v{font-family:var(--mono);font-size:14px}
 
-/* pipeline：.pipe::before 为灰色底层连线；locked 回看时 JS 插入 .line（灰）与 .line.filled（绿，宽度=实际进度区间）
-   覆盖其上，使「实际已完成」与「当前查看节点」两条信息线并存不混淆 */
+/* pipeline：.pipe::before 是唯一连线，当前态与回看态线形完全一致。
+   回看只在被查看节点上加 .review，并把「返回当前节点」放在 .pipe **之外**——
+   .pipe 是 flex 容器、.stage{flex:1}，追加进去的任何元素都会抢宽度、把整条线挤窄
+   （2026-10-15 反馈：切节点整条线都变了） */
 .pipe{display:flex;align-items:flex-start;margin-top:20px;position:relative}
 .pipe::before{content:'';position:absolute;top:15px;left:7%;right:7%;height:2px;background:var(--line);z-index:0}
-.pipe .line{display:none;position:absolute;top:15px;left:7%;right:7%;height:2px;background:var(--line);z-index:0}
-.pipe.locked .line{display:block}
-.pipe.locked .line.filled{right:auto;width:var(--done-pct,0%);background:var(--ok)}
 .stage{position:relative;flex:1;text-align:center;background:none;border:none;padding:0}
 .stage .dot{width:32px;height:32px;border-radius:50%;margin:0 auto 6px;display:grid;place-items:center;background:#fff;border:2px solid var(--line);color:var(--ink3);position:relative;z-index:1;font-size:13px}
 .stage.done .dot{border-color:var(--ok);background:var(--ok-soft);color:var(--ok)}

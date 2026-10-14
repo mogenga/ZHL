@@ -22,11 +22,29 @@ const report = read('report.js');
 
 // ---- browser-like DOM shim（比 test_wb_global 更进一步：记录子树 + 事件可触发）----
 function makeEl(tag) {
+  const cls = new Set();
   const e = {
     _tag: tag, nodeType: 1, children: [], _ev: {}, parentNode: null,
-    style: {}, dataset: {}, className: '', textContent: '', value: '',
+    style: {}, dataset: {}, textContent: '', value: '',
     disabled: false, checked: false, innerHTML: '',
-    classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
+    // classList 必须真记住 class：左列标签的选中态（.on）就是这么表达的，
+    // 用 no-op 桩会让「视图切了、高亮没跟着切」这类缺陷在测试里不可见
+    //（2026-10-15 反馈：异常列表点批次 → 主区回批次，标签仍高亮「异常」）。
+    get className() { return Array.from(cls).join(' '); },
+    set className(v) {
+      cls.clear();
+      String(v == null ? '' : v).split(/\s+/).forEach(function (c) { if (c) cls.add(c); });
+    },
+    classList: {
+      add(c) { cls.add(c); },
+      remove(c) { cls.delete(c); },
+      toggle(c, force) {
+        const on = force === undefined ? !cls.has(c) : !!force;
+        if (on) cls.add(c); else cls.delete(c);
+        return on;
+      },
+      contains(c) { return cls.has(c); },
+    },
     get childNodes() { return e.children; },
     append(...kids) {
       for (const c of kids) {
@@ -85,13 +103,22 @@ function hasText(node, text) {
   return false;
 }
 
+// 左列四个视图标签：workbench.html 的静态标记，shim 不解析 HTML，在此手工立起
+//（标签选中态由 .on 表达，见 makeEl 的 classList 实现）
+const leftTabs = ['batch', 'rules', 'incidents', 'reports'].map(function (v) {
+  const b = makeEl('button');
+  b.dataset.view = v;
+  b.className = v === 'batch' ? 'on' : '';
+  return b;
+});
+
 const byId = {};
 const documentStub = {
   readyState: 'complete',
   getElementById: (i) => (byId[i] = byId[i] || makeEl('div')),
   createElement: (t) => makeEl(t),
   createTextNode: (t) => ({ nodeType: 3, textContent: t, value: t }),
-  querySelectorAll: () => [],
+  querySelectorAll: (sel) => (sel === '[data-view]' ? leftTabs : []),
   querySelector: () => null,
   addEventListener() {},
   body: makeEl('body'),
@@ -497,6 +524,74 @@ function openCreateForm(list) {
     findText(panel2, '补填整改措施').fire('click');
     assert(!hasText(WB._modal.box, '已验证'), 'K8: 待复检态表单不再出现「已验证」勾选');
     WB.closeModal();
+  }
+
+  // ---- L. 视图切换与左列标签高亮同步（2026-10-15 反馈）----
+  // 异常列表里点一条 → 主区回到批次视图，但顶部标签仍高亮「异常」。原因：高亮
+  // 只由标签自己的点击处理器维护，任何**程序性**切换（_locateBatch 等）都不碰它。
+  // 高亮因此归 switchView 统一维护（视图状态只有一个来源）。
+  {
+    const onTab = function () {
+      return leftTabs.filter(function (b) { return b.classList.contains('on'); })
+        .map(function (b) { return b.dataset.view; });
+    };
+    const tabOf = function (v) {
+      return leftTabs.filter(function (b) { return b.dataset.view === v; })[0];
+    };
+    assert(leftTabs.length === 4, 'L1: 左列四个视图标签就位');
+
+    // 用户路径复现：先点「异常」标签（真点击，高亮此时是对的）…
+    WB.state.selected = null;
+    tabOf('incidents').fire('click');
+    assert(onTab().join() === 'incidents', 'L2: 点「异常」标签 → 高亮在异常');
+
+    // …再从异常列表点一条 → 主区回批次，高亮必须跟着回（缺陷点：仍停在「异常」）
+    WB.selectBatch = function () {};   // 只验视图/高亮同步，详情加载不在本用例范围
+    WB._locateBatch({ batch_id: BATCH_ID });
+    assert(WB.state.view === 'batch', 'L3: 点异常条目 → 视图切回批次');
+    assert(onTab().join() === 'batch', 'L4: 标签高亮跟着切（原先停在「异常」）');
+
+    // 程序性切换不止 _locateBatch 一处：switchView 自身就要同步高亮
+    WB.switchView('rules');
+    assert(onTab().join() === 'rules', 'L5: 任意程序性切换都同步高亮');
+    assert(WB.state.view === 'rules', 'L6: 视图状态与高亮同源');
+  }
+
+  // ---- M. 回看节点不得改变节点线本身（2026-10-15 反馈：切节点整条线都变）----
+  // 成因：返回按钮与两条 .line 被追加进 .pipe（display:flex；.stage{flex:1}），
+  // 多出来的 flex 子项把六个节点挤窄。回看与当前态，线的几何必须一致——回看
+  // 只能改变「被查看节点的标记」与「多一个返回入口」。
+  {
+    // 返回节点自身可能就是 .pipe（旧实现直接返回 pipe），也可能是包裹层——
+    // 断言只锁不变量，不锁包裹层是否存在
+    const pipeOf = function (node) {
+      if (node.classList && node.classList.contains('pipe')) return node;
+      return node.querySelectorAll('.pipe')[0];
+    };
+    const d = { status: 'released' };           // 当前节点 = 报告（index 5）
+    WB.state.viewStage = null;
+    const w1 = WB._pipeline(d);
+    const p1 = pipeOf(w1);
+    assert(!!p1, 'M0: 渲染出节点线容器');
+    assert(p1.querySelectorAll('.stage').length === 6, 'M1: 六个节点');
+    assert(p1.children.length === 6, 'M2: .pipe 内只有六个节点（无额外 flex 子项）');
+    assert(w1.querySelectorAll('.line').length === 0, 'M3: 不再注入会改变线形的 .line');
+
+    WB.state.viewStage = 3;                     // 回看「复检」
+    const w2 = WB._pipeline(d);
+    const p2 = pipeOf(w2);
+    assert(p2.children.length === 6, 'M4: 回看时 .pipe 结构不变（仍六个节点）');
+    assert(w2.querySelectorAll('.line').length === 0,
+      'M4b: 回看不注入 .line（线形与当前态一致，不再"整条线变了"）');
+    assert(p2.querySelectorAll('.stage')[3].classList.contains('review'), 'M5: 被回看节点标记 review');
+    assert(p2.querySelectorAll('.stage')[0].classList.contains('done'),
+      'M6: 回看不清除实际完成的 ✓（与回看位置解耦）');
+    const ret = findText(w2, '返回当前节点');
+    assert(!!ret, 'M7: 回看时提供「返回当前节点」');
+    assert(!p2.children.some(function (c) { return c.classList.contains('actions'); }),
+      'M8: 返回按钮所在行不在 .pipe 内（不参与节点均分）');
+    ret.fire('click');
+    assert(WB.state.viewStage === null, 'M9: 点击返回 → 回到当前节点');
   }
 
   console.log(failed === 0 ? '\nALL PASS' : '\n' + failed + ' FAILED');
