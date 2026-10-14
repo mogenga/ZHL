@@ -169,18 +169,26 @@ WB._pipeline = function (detail) {
   const view = WB.state.viewStage == null ? cs : WB.state.viewStage;
   const locked = view !== cs;
   const btns = WB.STAGES.map((s, i) => {
-    const cls = 'stage' + (i < view ? ' done' : '') + (i === view ? ' cur' : '');
+    /* 已完成以实际进度 cs 判定，与回看位置解耦；
+       当前高亮（.cur / .review）跟随点击的 view，不随回看清零前面的 ✓ */
+    let cls = 'stage' + (i <= cs ? ' done' : '');
+    if (i === view) cls += locked ? ' review' : ' cur';
     const disabled = i > cs || detail.status === 'archived';
     return WB.h('button', {
       class: cls,
       ...(disabled ? { disabled: true } : {}),
       onclick: () => { WB.state.viewStage = i; WB._renderCenterAndRight(); },
     },
-      WB.h('div', { class: 'dot', text: i < view ? '✓' : String(i + 1) }),
+      WB.h('div', { class: 'dot', text: i <= cs ? '✓' : String(i + 1) }),
       WB.h('div', { class: 'lbl', text: s }));
   });
-  const wrap = WB.h('div', { class: 'pipe' }, btns);
+  const wrap = WB.h('div', { class: 'pipe' + (locked ? ' locked' : '') }, btns);
   if (locked) {
+    /* 灰色底层线 + 绿色已实际通过区间：回看时两条线并存，
+       绿线标出「实际完成到哪里」，避免用户误以为后面的 ✓ 被清掉 */
+    const donePct = (cs / (WB.STAGES.length - 1)) * 86;
+    wrap.append(WB.h('div', { class: 'line' }));
+    wrap.append(WB.h('div', { class: 'line filled', style: '--done-pct:' + donePct + '%' }));
     wrap.append(WB.h('div', { class: 'actions' },
       WB.h('button', { onclick: () => { WB.state.viewStage = null; WB._renderCenterAndRight(); }, text: '返回当前节点' })));
   }
@@ -530,7 +538,8 @@ WB._renderCenterAndRight = function () {
   WB.renderRight(WB.state.selected);
 };
 WB._onSelectedChanged = function () {
-  // 点击列表项（setBatch 触发）：若选中未变仅重渲染；已变则异步加载
+  // 批次 id 变化时先刷新左栏（让蓝色 .on 边框跟随当前选中项），再处理中右栏
+  WB.renderLeft();
   if (WB.state.selected && WB.state.selected.batch_id === WB.state.batchId) {
     WB._renderCenterAndRight();
   } else if (WB.state.batchId) {
