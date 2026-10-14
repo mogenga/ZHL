@@ -60,6 +60,7 @@ td.num,th.num{font-family:var(--mono)}
 .inc-assigned,.inc-pending_recheck{background:var(--warn-soft);color:var(--warn)}
 .inc-closed,.inc-rejected{background:var(--gray-soft);color:var(--ink2)}
 .inc-scrapped{background:var(--gray-soft);color:var(--ink3)}
+.chip-auto{background:var(--gray-soft);color:var(--ink2);margin-left:6px}
 .newbtn{width:100%;background:var(--accent);border-color:var(--accent);color:#fff;font-weight:500;margin-bottom:10px}
 .newbtn:disabled{background:var(--gray-soft);border-color:var(--line);color:var(--ink3);cursor:default}
 

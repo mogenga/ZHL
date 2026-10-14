@@ -185,6 +185,9 @@ def create_app_with_trace(
                 "validation_result": t.validation_result,
                 "failure_reason": t.failure_reason,
                 "human_action": t.human_action,
+                # 工作台靠 structured_output.incident_id 把 incident_auto 轨迹
+                # 映射回异常行（前端「自动」标记的推导依据）
+                "structured_output": t.structured_output,
                 "started_at": t.started_at.isoformat() if t.started_at else None,
             }
             for t in rows
