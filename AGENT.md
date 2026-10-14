@@ -233,9 +233,16 @@ ReinspectionResult(reinspection_id, incident_id, sn, passed, evidence_ids)
 ### 7.2 LangGraph 工作流
 
 - 节点：LangGraph `add_node` 封装的 callable，接收 `BatchWorkflowState`，返回状态更新字典
-- 人工 interrupt：仅三处（低置信字段确认、归因假设采纳、放行前最终批准）
+- 人工 interrupt：**两处图内 interrupt**（截止 2026-10-14 核实）
+  - 低置信字段确认（`main_chain.human_confirm`，`thread_id = batch_id`）
+  - 归因假设采纳（`incident_subgraph.human_adopt`，`thread_id = incident:<id>`；
+    `POST /api/incidents/{id}/attribute` 落点暂停，`POST .../adopt` 另一次请求 resume）
+  - 放行前最终批准**不是** graph interrupt：`POST /api/batches/{id}/release`
+    以请求体 `approved_by` 作为人工签署，属 API 层动作（需求 R3 只要求
+    "有人工批准才可放行"，状态机前置条件 `human_approved` 已强制）
 - 确定性路径（断言失败 / SN 冲突 / 规则缺失）：直接路由，不 interrupt
-- Checkpointer：PostgreSQL 后端（`langgraph-checkpoint-postgres`），`thread_id = batch_id`
+- Checkpointer：PostgreSQL 后端（`langgraph-checkpoint-postgres`），`thread_id = batch_id`；
+  归因子图用 app 级 checkpointer（默认 `MemorySaver`，重启不保留待办）
 - 故障续跑：节点失败时从最后成功检查点续跑，已成功节点不重放
 - 轨迹留痕：`get_state_history` 即任务轨迹，满足架构 §7.2 可复演
 - 不直接写库：节点通过 `TaskContext.evidence_writer` 写入证据，与 Plugin 契约一致

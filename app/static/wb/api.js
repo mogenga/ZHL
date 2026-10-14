@@ -233,7 +233,15 @@ WB.api = {
     });
   },
   attributeIncident(id, decision, cause) {
-    return WB.api.request('POST', '/api/incidents/' + id + '/attribute', { decision: decision, cause: cause }).then(function (r) {
+    var body = decision == null ? {} : { decision: decision, cause: cause };
+    return WB.api.request('POST', '/api/incidents/' + id + '/attribute', body).then(function (r) {
+      if (!r.ok) return { ok: false, error: r.error, data: null };
+      return { ok: true, data: r.data };
+    });
+  },
+  /* 归因人工采纳（跨请求 HITL）：生成假设后由人另一次请求提交三选一 */
+  adoptAttribution(id, decision, cause) {
+    return WB.api.request('POST', '/api/incidents/' + id + '/adopt', { decision: decision, cause: cause }).then(function (r) {
       if (!r.ok) return { ok: false, error: r.error, data: null };
       return { ok: true, data: r.data };
     });

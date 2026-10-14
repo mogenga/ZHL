@@ -118,41 +118,54 @@ WB.stages.incident = (function () {
     }
   }
 
-  /* ---- AI 归因（spec §2.2 / §4.9）：触发 attribute → 展示假设 → 三选一 ---- */
+  /* ---- AI 归因（spec §2.2 / §4.9）：生成假设（本次请求）→ 人工三选一（另一次请求）---- */
   function attributeModal(i, batch, slot, done, fail) {
-    WB.api.attributeIncident(i.incident_id, 'defer', null).then(function (res) {
+    // 第一步：不带 decision → 后端生成假设并把运行停在 human_adopt 中断点。
+    WB.api.attributeIncident(i.incident_id, null, null).then(function (res) {
       if (!res.ok) { fail(WB.errText(res.error)); return; }
       const hyp = res.data.hypotheses || [];
       const hypBox = WB.h('div', {});
       if (hyp.length) {
-        hyp.forEach(function (h) {
-          const label = (typeof h === 'string') ? h : (h.hypothesis || h.cause || JSON.stringify(h));
-          hypBox.append(WB.h('div', { class: 'hint-line', text: '· ' + label }));
+        hyp.forEach(function (h, idx) {
+          const label = (typeof h === 'string') ? h : (h.cause || h.hypothesis || JSON.stringify(h));
+          const meta = (h && typeof h === 'object')
+            ? '（置信度 ' + Math.round((h.confidence || 0) * 100) + '% · 证据 ' + ((h.evidence_ids || []).length) + ' 条）'
+            : '';
+          hypBox.append(WB.h('div', { class: 'hint-line' }, WB.h('b', { text: '#' + (idx + 1) + ' ' }), WB.h('span', { text: label + ' ' + meta })));
         });
       } else {
         hypBox.append(WB.h('div', { class: 'hint-line', text: res.data.hint || '暂无可用假设，请人工填写根因' }));
       }
       const err = WB.h('div', {});
       const fields = [
-        { label: '归因假设', type: 'textarea', rows: 3, value: res.data.confirmed_root_cause || '' },
+        { label: '根因（采纳时必填；可直接抄上方假设）', type: 'textarea', rows: 3, value: res.data.confirmed_root_cause || '' },
       ];
       WB.openModal('AI 归因 · ' + String(i.incident_id).slice(0, 8), fields, function (vals) {
         const cause = (vals[0] || '').trim();
-        // 三选一：采纳（必填根因）/ 驳回 / 搁置
-        _submitAttr(i, batch, 'adopt', cause || null, err, function () {
+        // 第二步：另一次请求把人工决定 resume 回停住的运行。
+        _resumeAttr(i, batch, 'adopt', cause || null, function () {
           slot.replaceChildren(WB.h('div', { class: 'hint-line', text: '已采纳根因：' + cause }));
           WB.loadIncidents().then(function () { WB._loadDetail(batch.batch_id); });
-        }, fail, hypBox, err);
-      }, { submitLabel: '提交', inline: hypBox });
-      // 补充 驳回 / 搁置 直按
-      setTimeout(function () {
-        // 在弹窗之外提供两个快捷按钮（采用当前 cause）
-      }, 0);
+        }, fail);
+      }, { submitLabel: '采纳', inline: hypBox, extraButtons: [
+        { label: '驳回', cls: 'danger', onclick: function () {
+          _resumeAttr(i, batch, 'reject', null, function () {
+            slot.replaceChildren(WB.h('div', { class: 'hint-line', text: '已驳回全部假设，请人工填写根因' }));
+            WB.loadIncidents().then(function () { WB._loadDetail(batch.batch_id); });
+          }, fail);
+        } },
+        { label: '搁置', cls: '', onclick: function () {
+          _resumeAttr(i, batch, 'defer', null, function () {
+            slot.replaceChildren(WB.h('div', { class: 'hint-line', text: '已搁置，稍后可再次发起归因' }));
+          }, fail);
+        } },
+      ] });
     });
   }
-  function _submitAttr(i, batch, decision, cause, err, ok, fail, hypBox, err2) {
-    WB.api.attributeIncident(i.incident_id, decision, cause).then(function (r) {
-      if (r.ok) ok(r.data); else fail(WB.errText(r.error));
+  function _resumeAttr(i, batch, decision, cause, ok, fail) {
+    WB.api.adoptAttribution(i.incident_id, decision, cause).then(function (r) {
+      if (r.ok) { WB.toast('已记录归因决定：' + decision); ok(r.data); }
+      else fail(WB.errText(r.error));
     });
   }
 

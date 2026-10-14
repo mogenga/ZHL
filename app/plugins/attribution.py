@@ -25,6 +25,7 @@ runs in a single transaction on the caller's session.
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -126,6 +127,7 @@ class AttributionSkill:
         trace: TraceStore,
         session: Any,
         started_at: datetime | None = None,
+        prompt_context: dict | None = None,
     ) -> dict:
         """Run one attribution pass for ``incident`` (a ``QualityIncident``).
 
@@ -133,7 +135,7 @@ class AttributionSkill:
         ``incident.root_cause_hypotheses``) so callers can branch on it.
         """
         incident_id = str(incident.incident_id)
-        prompt = self._build_prompt(incident)
+        prompt = self._build_prompt(incident, prompt_context)
 
         # --- LLM call: OUTSIDE the transaction (AGENT.md §4.3) ------------
         llm_result: dict = self._llm.chat(prompt, _LLM_SCHEMA)
@@ -172,7 +174,7 @@ class AttributionSkill:
         )
         return validated
 
-    def _build_prompt(self, incident: Any) -> str:
+    def _build_prompt(self, incident: Any, context: dict | None = None) -> str:
         """Assemble the prompt the LLM (mock) routes on.
 
         The mock client extracts ``incident_id`` from the prompt via regex,
@@ -180,15 +182,32 @@ class AttributionSkill:
         (``incident_id=<uuid>``). Cross-batch evidence references are
         listed as ``evidence_ids`` so the caller can see the evidence layer
         the LLM will ground in.
+
+        ``context`` (optional, filled by the API layer) carries the *problem*
+        — failing SNs, the batch/model, the actual rule verdicts. Without it
+        a live model can only answer in generalities ("rule mismatch", "data
+        drift"), which reads as noise next to a specific 470 W module; with
+        it the hypotheses name the real failure.
         """
         evidence_ids = list(getattr(incident, "evidence_ids", []) or [])
         incident_uuid = str(incident.incident_id)
         lines = [
-            "Root-cause attribution request.",
+            "You are a photovoltaic module quality engineer doing root-cause "
+            "analysis on a FAILED inspection batch. Base your hypotheses on "
+            "the concrete values below; cite the evidence ids provided.",
             f"incident_id={incident_uuid}",
             f"severity={getattr(incident, 'severity', '')}",
             f"trigger_type={getattr(incident, 'trigger_type', '')}",
             f"evidence_ids={evidence_ids}",
-            "Return hypotheses with cause / confidence / evidence_ids / recommended_action.",
         ]
+        for key in ("batch_no", "model", "failing_sns", "rule_findings"):
+            if context and context.get(key) is not None:
+                lines.append(f"{key}={json.dumps(context[key], ensure_ascii=False, default=str)}")
+        lines.append(
+            "Requirements: give 2-4 ranked hypotheses; every hypothesis except "
+            "at most one must cite at least one of the evidence_ids above "
+            "(a hypothesis with no evidence will be discarded); state confidence "
+            "as a number between 0 and 1. Return hypotheses with "
+            "cause / confidence / evidence_ids / recommended_action."
+        )
         return "\n".join(lines)

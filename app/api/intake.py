@@ -87,6 +87,12 @@ class IntakeRequestIn(BaseModel):
     source_type: str = "IV_CSV"
     inspections: list[dict] = Field(default_factory=list)
     fields: dict | None = None
+    #: FR-1.1/1.2 raw-source entry: raw IV CSV / form transcript. When set,
+    #: ``inspections`` is optional — the parse Skill turns the raw text into
+    #: rows first (LLM proposes, ``validate_rows`` disposes), and the
+    #: resulting rows flow through the exact same graph.
+    raw_source: str | None = None
+    raw_source_kind: str = "iv_csv"
 
 
 class IntakeConfirmIn(BaseModel):
@@ -159,20 +165,66 @@ def build_router(get_deps: object) -> APIRouter:
         batch = _get_batch_by_id(s, body.batch_id, "batch_id")
         # B2: 只有待入场批次可以入场（重复入场 / 归档批次 → 409）。
         _require_intake_ready(s, batch)
-        if not body.inspections:
+
+        # FR-1.1/1.2: raw-source entry. The parse Skill makes the model call
+        # (outside any transaction, AGENT.md §4.3), archives the raw text as
+        # evidence, and FR-1.4-validates every row before anything is written.
+        parse_result: dict | None = None
+        if body.raw_source and body.raw_source.strip() and body.inspections:
             raise HTTPException(
                 status_code=400,
                 detail={
-                    "reason": "no_inspections",
-                    "hint": "本次入场没有任何检验行；空批入场只会把批次推进到没有数据支撑的判定",
+                    "reason": "ambiguous_intake",
+                    "hint": "raw_source 与 inspections 只能二选一",
                 },
             )
+        if body.raw_source and body.raw_source.strip():
+            from app.skills.extract import parse_raw_source
+
+            parse_result = parse_raw_source(
+                llm=d.llm,
+                source_kind=body.raw_source_kind,
+                raw_text=body.raw_source,
+                evidence=d.evidence,
+                object_ref={"kind": "batch", "id": body.batch_id},
+            )
+            if not parse_result["rows"]:
+                # Nothing usable in the source: report WHY (the issues list),
+                # not a generic 400 — the operator has to fix the source file.
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "reason": "raw_source_unparseable",
+                        "issues": parse_result["issues"][:20],
+                        "hint": "原始单据未能解析出任何合法检验行，请检查格式或字段值",
+                    },
+                )
+            now = datetime.now(UTC).isoformat()
+            _derived_only = ("confidence", "appearance_findings")
+            body_inspections = [
+                {
+                    **{k: v for k, v in row.items() if k not in _derived_only},
+                    "source_type": body.source_type,
+                    "captured_at": now,
+                }
+                for row in parse_result["rows"]
+            ]
+        else:
+            if not body.inspections:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "reason": "no_inspections",
+                        "hint": "本次入场没有任何检验行；空批入场会把批次推进到无数据支撑的判定",
+                    },
+                )
+            body_inspections = body.inspections
 
         graph = _graph_for(d, batch)
         cfg = {"configurable": {"thread_id": body.batch_id}}
         rows = [
             {**row, "source_type": row.get("source_type", body.source_type)}
-            for row in body.inspections
+            for row in body_inspections
         ]
         # B3: every inspection row must carry the measured columns the
         # repository's create_inspections reads verbatim (captured_at + 7 e-
@@ -217,6 +269,11 @@ def build_router(get_deps: object) -> APIRouter:
                 detail={"reason": "sn_already_intaked", "duplicate_sns": duplicates},
             )
         initial = {"batch_id": body.batch_id, "inspections": rows}
+        if parse_result is not None:
+            # The parse Skill already extracted + archived each row; hand the
+            # results to the graph so its extract node does not call the model
+            # a second time for the same values.
+            initial["pre_extracted"] = parse_result["extraction"]
         try:
             for _chunk in graph.stream(initial, config=cfg):
                 pass
@@ -290,7 +347,7 @@ def build_router(get_deps: object) -> APIRouter:
             # must fail closed even under `python -O` — an explicit `raise`,
             # not an `assert` (which the optimizer strips out), and a B3
             # structured 500 consistent with the other B3 error responses here.
-            expected = len(body.inspections)
+            expected = len(rows)
             if len(confirmed_rows) != expected:
                 raise HTTPException(
                     status_code=500,
@@ -338,6 +395,17 @@ def build_router(get_deps: object) -> APIRouter:
             "extracted_fields": state.get("extraction") or {},
             "confidence": float(state.get("confidence") or 0.0),
             "low_conf_sns": state.get("low_conf_sns") or [],
+            # Raw-source entry transparency (FR-1.2/1.4): what the parse step
+            # read, what it rejected, and which model path answered.
+            "raw_parse": (
+                {
+                    "rows": len(parse_result["rows"]),
+                    "issues": parse_result["issues"][:20],
+                    "confidence": parse_result["confidence"],
+                }
+                if parse_result is not None
+                else None
+            ),
         }
 
     @router.post("/{task_id}/confirm")

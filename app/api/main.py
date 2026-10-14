@@ -50,6 +50,7 @@ def create_app(
     session_factory: Callable[[], Any] | None = None,
     mount_static: bool = True,
     own_session: bool = True,
+    incident_checkpointer: Any = None,
 ) -> FastAPI:
     """Build the Phase B FastAPI app.
 
@@ -63,11 +64,20 @@ def create_app(
       session after each request (C1). False (tests inject a *shared*
       long-lived session via ``session_factory=lambda: session``) skips the
       close; only rollback on error.
+    - ``incident_checkpointer``: LangGraph checkpointer backing cross-request
+      incident attribution HITL (``POST /attribute`` parks, ``/adopt``
+      resumes). Defaults to an in-process ``MemorySaver``; callers that want
+      restart-surviving runs inject a persistent saver.
     """
     if session_factory is None:
         session_factory = _default_postgres_session()
+    if incident_checkpointer is None:
+        from langgraph.checkpoint.memory import MemorySaver
+
+        incident_checkpointer = MemorySaver()
 
     app = FastAPI(title="ZHL Solar Module QC", version="0.2.0")
+    app.state.incident_checkpointer = incident_checkpointer
 
     # Wire the real session into every router's get_session stub.
     # Each router module defines its own get_session (a stub that raises);
@@ -148,6 +158,7 @@ def create_app_with_trace(
     session_factory: Callable[[], Any] | None = None,
     mount_static: bool = True,
     own_session: bool = True,
+    incident_checkpointer: Any = None,
 ) -> FastAPI:
     """``create_app`` + a read-only per-batch trace timeline (PB Task 10, D1).
 
@@ -161,6 +172,7 @@ def create_app_with_trace(
         session_factory=session_factory,
         mount_static=mount_static,
         own_session=own_session,
+        incident_checkpointer=incident_checkpointer,
     )
 
     from fastapi import APIRouter, Depends

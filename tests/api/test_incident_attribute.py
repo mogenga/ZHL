@@ -212,3 +212,118 @@ def test_attribute_d2_no_evidence_dropped(api_client: Any) -> None:
     # D2 gate: every surviving hypothesis carries >=1 evidence id.
     for h in body["hypotheses"]:
         assert h.get("evidence_ids"), "no-evidence hypotheses must be dropped (D2)"
+
+
+# ---------------------------------------------------------------------------
+# Cross-request HITL (2026-10-14 rework): generate/park -> later adopt
+# ---------------------------------------------------------------------------
+
+
+def test_attribute_without_decision_parks_for_human(api_client: Any) -> None:
+    """Phase 1: POST /attribute with no decision generates + parks.
+
+    The response carries the hypotheses and ``status=awaiting_human`` — the
+    run is waiting on a real human decision, not self-answered.
+    """
+    client, session, _ = api_client
+    _seed(session)
+    resp = client.post(f"/api/incidents/{_ATTRIBUTION_INCIDENT_ID}/attribute", json={})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "awaiting_human"
+    assert body["hypotheses"], "the run must return the generated hypotheses"
+    assert body["hypotheses_source"] == "attribution"
+    # Nothing was adopted yet.
+    incident = session.get(QualityIncident, _ATTRIBUTION_INCIDENT_ID)
+    assert incident.confirmed_root_cause is None
+
+
+def test_adopt_resumes_the_parked_run_on_a_later_request(api_client: Any) -> None:
+    """Phase 2: a separate request resumes the parked run and adopts."""
+    client, session, _ = api_client
+    _seed(session)
+    start = client.post(f"/api/incidents/{_ATTRIBUTION_INCIDENT_ID}/attribute", json={})
+    assert start.status_code == 200, start.text
+    hypotheses = start.json()["hypotheses"]
+
+    adopt = client.post(
+        f"/api/incidents/{_ATTRIBUTION_INCIDENT_ID}/adopt",
+        json={"decision": "adopt", "cause": "隐裂导致功率衰减"},
+    )
+    assert adopt.status_code == 200, adopt.text
+    body = adopt.json()
+    assert body["decision"] == "adopt"
+    assert body["hypotheses"] == hypotheses
+    incident = session.get(QualityIncident, _ATTRIBUTION_INCIDENT_ID)
+    assert incident.confirmed_root_cause == "隐裂导致功率衰减"
+    # The human decision is recorded as the graph's resume value too.
+    assert body["human_decision"] == {"decision": "adopt", "cause": "隐裂导致功率衰减"}
+
+
+def test_adopt_without_a_parked_run_is_409(api_client: Any) -> None:
+    client, session, _ = api_client
+    _seed(session)
+    resp = client.post(
+        f"/api/incidents/{_ATTRIBUTION_INCIDENT_ID}/adopt",
+        json={"decision": "adopt", "cause": "凭空采纳"},
+    )
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["error"] == "no_parked_attribution"
+
+
+def test_adopt_requires_a_cause(api_client: Any) -> None:
+    """Adopting a hypothesis without naming the root cause is a 400.
+
+    ``confirmed_root_cause`` is what the closed-incident checks read; an
+    adopt that writes nothing would let an incident close with an empty
+    root cause.
+    """
+    client, session, _ = api_client
+    _seed(session)
+    client.post(f"/api/incidents/{_ATTRIBUTION_INCIDENT_ID}/attribute", json={})
+    resp = client.post(
+        f"/api/incidents/{_ATTRIBUTION_INCIDENT_ID}/adopt",
+        json={"decision": "adopt"},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["detail"]["error"] == "adopt_requires_cause"
+
+
+def test_reject_decision_does_not_write_a_root_cause(api_client: Any) -> None:
+    client, session, _ = api_client
+    _seed(session)
+    client.post(f"/api/incidents/{_ATTRIBUTION_INCIDENT_ID}/attribute", json={})
+    resp = client.post(
+        f"/api/incidents/{_ATTRIBUTION_INCIDENT_ID}/adopt",
+        json={"decision": "reject"},
+    )
+    assert resp.status_code == 200, resp.text
+    incident = session.get(QualityIncident, _ATTRIBUTION_INCIDENT_ID)
+    assert incident.confirmed_root_cause is None
+
+
+def test_attribute_start_calls_the_model_exactly_once(api_client: Any) -> None:
+    """One business action, one model call.
+
+    The endpoint generates the hypotheses; the subgraph it parks must *reuse*
+    that list rather than regenerating it — a second call would bill twice and
+    write two attribution traces for one action.
+    """
+    from app.plugins.llm_client import MockLLMClient
+
+    client, session, _ = api_client
+    _seed(session)
+    calls: list[str] = []
+    original = MockLLMClient.chat
+
+    def counting(self: Any, prompt: str, schema: dict) -> dict:
+        calls.append(prompt)
+        return original(self, prompt, schema)
+
+    MockLLMClient.chat = counting
+    try:
+        resp = client.post(f"/api/incidents/{_ATTRIBUTION_INCIDENT_ID}/attribute", json={})
+        assert resp.status_code == 200, resp.text
+    finally:
+        MockLLMClient.chat = original
+    assert len(calls) == 1, f"expected exactly one model call, got {len(calls)}"

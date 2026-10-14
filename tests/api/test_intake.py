@@ -286,3 +286,88 @@ def test_repeated_confirm_is_409_not_a_chain_rerun() -> None:
     assert session.get(DeliveryBatch, _uuid.UUID(batch["batch_id"])).status == status_after
     assert session.query(ModuleInspection).count() == rows_after
     session.close()
+
+
+# ---------------------------------------------------------------------------
+# FR-1.1/1.2 raw-source entry
+# ---------------------------------------------------------------------------
+
+
+def test_intake_raw_source_parses_then_runs_the_graph() -> None:
+    """Raw CSV text in, confirmed batch out — same graph, same semantics.
+
+    The parse step (LLM proposes, ``validate_rows`` disposes) must produce
+    rows that the existing intake path accepts unchanged, and the response
+    must report what was parsed and what was rejected.
+    """
+    from tests.api.test_batches import _ISO_TABLE, _make_client, _post_batch, _shared_engine
+
+    engine = _shared_engine()
+    Base.metadata.create_all(engine)
+    s = sessionmaker(bind=engine)
+    client = _make_client(0.9, "SN-I-CONF", [], s, s, _ISO_TABLE)
+    batch = _post_batch(client, planned_quantity=2)
+
+    raw = (
+        "# 设备 UT-2200 导出\n"
+        "SN,pmax,temp,isc,voc,vm,im,ff,appearance\n"
+        "SN-RAW-001,550.0,25.0,10.5,48.0,40.0,13.0,0.80,pass\n"
+        "SN-RAW-002,548.0,25.0,10.5,48.0,40.0,13.0,0.79,合格\n"
+        "SN-RAW-003,999999.0,25.0,10.5,48.0,40.0,13.0,0.79,pass\n"
+    )
+    resp = client.post(
+        "/api/intake",
+        json={"batch_id": batch["batch_id"], "raw_source": raw, "raw_source_kind": "iv_csv"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "confirmed"
+    assert body["raw_parse"]["rows"] == 2
+    # The row with the impossible pmax is reported, not silently dropped.
+    assert any(i["sn"] == "SN-RAW-003" for i in body["raw_parse"]["issues"])
+    # Extraction evidence exists per parsed SN (FR-1.7): the raw text is
+    # archived once by the parse step + the graph's intake node archives its
+    # own source record, so assert presence, not an exact count.
+    stored = client._env["evidence"].rows
+    assert sum(1 for r in stored if r.evidence_type == "source_file") >= 1
+    assert sum(1 for r in stored if r.evidence_type == "extraction_result") == 2
+
+
+def test_intake_raw_source_and_inspections_are_mutually_exclusive() -> None:
+    from tests.api.test_batches import _ISO_TABLE, _make_client, _post_batch, _r_for, _shared_engine
+
+    engine = _shared_engine()
+    Base.metadata.create_all(engine)
+    s = sessionmaker(bind=engine)
+    client = _make_client(0.9, "SN-I-CONF", [], s, s, _ISO_TABLE)
+    batch = _post_batch(client, planned_quantity=1)
+
+    resp = client.post(
+        "/api/intake",
+        json={
+            "batch_id": batch["batch_id"],
+            "raw_source": "SN-RAW-001,550.0,25.0,10.5,48.0,40.0,13.0,0.80,pass\n",
+            "inspections": [_r_for("SN-RAW-009")],
+        },
+    )
+    assert resp.status_code == 400
+    assert resp.json()["detail"]["reason"] == "ambiguous_intake"
+
+
+def test_intake_unparseable_raw_source_reports_issues() -> None:
+    from tests.api.test_batches import _ISO_TABLE, _make_client, _post_batch, _shared_engine
+
+    engine = _shared_engine()
+    Base.metadata.create_all(engine)
+    s = sessionmaker(bind=engine)
+    client = _make_client(0.9, "SN-I-CONF", [], s, s, _ISO_TABLE)
+    batch = _post_batch(client, planned_quantity=1)
+
+    resp = client.post(
+        "/api/intake",
+        json={"batch_id": batch["batch_id"], "raw_source": "这是一张纸质单据的照片，无结构化数据"},
+    )
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert detail["reason"] == "raw_source_unparseable"
+    assert "issues" in detail

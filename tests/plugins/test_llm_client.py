@@ -58,10 +58,53 @@ def test_phase_a_chat_deterministic(phase_a_client: MockLLMClient) -> None:
     assert phase_a_client.chat(prompt, {}) == phase_a_client.chat(prompt, {})
 
 
-def test_phase_a_chat_missing_key_raises(phase_a_client: MockLLMClient) -> None:
+def test_phase_a_unknown_sn_falls_back_to_synthetic_block(
+    phase_a_client: MockLLMClient,
+) -> None:
+    """A demo must not die on SN-N-003 because the frozen fixture pinned one SN.
+
+    Unknown SNs get a deterministically derived synthetic block that still
+    looks like an extraction: the SN echoed back, the fixture's parameter
+    shape, a stable confidence, and ``synthetic=True`` so the evidence meta
+    can mark it as mock-derived rather than frozen fixture data.
+    """
     prompt = "Extract parameters for SN-UNKNOWN [SOURCE_SN:SN-UNKNOWN]"
-    with pytest.raises(KeyError):
-        phase_a_client.chat(prompt, {})
+    block = phase_a_client.chat(prompt, {})
+    assert block["source_sn"] == "SN-UNKNOWN"
+    assert block["synthetic"] is True
+    # Deterministic across calls, and distinct per SN.
+    assert block == phase_a_client.chat(prompt, {})
+    other = phase_a_client.chat("x [SOURCE_SN:SN-OTHER]", {})
+    assert other["source_sn"] == "SN-OTHER"
+    # Same parameter keys as the frozen fixture, values in plausible IV range.
+    assert set(block["extracted_params"]) == {
+        "pmax",
+        "im",
+        "voc",
+        "isc",
+        "ff",
+    }
+    assert 0.0 < block["confidence"] <= 1.0
+
+
+def test_phase_a_low_sn_prefix_pins_low_confidence(phase_a_client: MockLLMClient) -> None:
+    """The 0.8 auto-confirm boundary is demonstrable on demand.
+
+    A demo needs both sides of ``confidence >= 0.8``: SN-LOW-* always lands
+    below it (manual confirmation path), other SNs above it (auto-confirm).
+    """
+    low = phase_a_client.chat("x [SOURCE_SN:SN-LOW-001]", {})
+    assert low["confidence"] < 0.8
+    high = phase_a_client.chat("x [SOURCE_SN:SN-N-001]", {})
+    assert high["confidence"] >= 0.8
+
+
+def test_phase_a_frozen_sn_is_untouched(phase_a_client: MockLLMClient) -> None:
+    """The fixture's own SN keeps the byte-identical frozen block (no
+    ``synthetic`` marker, no re-derived values)."""
+    out = phase_a_client.chat("x [SOURCE_SN:SN-I-OODB]", {})
+    assert out["confidence"] == 0.81
+    assert "synthetic" not in out
 
 
 def test_phase_a_no_source_sn_marker_raises(phase_a_client: MockLLMClient) -> None:
@@ -90,10 +133,36 @@ def test_phase_b_mock_routes_by_incident_id() -> None:
     assert out == fixture["INC-001"]
 
 
-def test_phase_b_mock_unknown_incident_raises() -> None:
+def test_phase_b_unknown_incident_gets_synthetic_hypotheses() -> None:
+    """An incident with no fixture key still gets hypotheses.
+
+    Every real incident gets a fresh UUID, so a fixture keyed by id can never
+    cover a live run — raising here (the old behaviour) meant the demo died
+    at the attribution step on any incident the fixture did not name. The
+    synthetic block cites the evidence ids the *prompt* carries, so the D2
+    gate still validates them against the real store.
+    """
     client = MockLLMClient(fixture_path=_ATTRIBUTION)
-    with pytest.raises(KeyError):
-        client.chat(_prompt("INC-999"), schema={})
+    prompt = (
+        "Root-cause attribution request.\n"
+        "incident_id=INC-999\n"
+        "severity=major\n"
+        "trigger_type=rule_fail\n"
+        "evidence_ids=['ev-a', 'ev-b']\n"
+    )
+    out = client.chat(prompt, schema={})
+    assert out["synthetic"] is True
+    hyps = out["hypotheses"]
+    assert hyps and hyps[0]["evidence_ids"] == ["ev-a", "ev-b"]
+    # One hypothesis deliberately carries no evidence: the "confidence orders,
+    # evidence gates" demonstration survives on every incident.
+    assert any(h["evidence_ids"] == [] for h in hyps)
+
+
+def test_phase_b_synthetic_hypotheses_are_deterministic() -> None:
+    client = MockLLMClient(fixture_path=_ATTRIBUTION)
+    prompt = "incident_id=INC-999\ntrigger_type=rule_fail\nevidence_ids=['ev-a']\n"
+    assert client.chat(prompt, {}) == client.chat(prompt, {})
 
 
 # T2 UUID-shaped fixture key: consumed by the T-1 attribute endpoint (Task 3)

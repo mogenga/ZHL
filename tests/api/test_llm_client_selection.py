@@ -21,6 +21,8 @@ Two failure modes are guarded here:
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from app.main import (
@@ -28,13 +30,23 @@ from app.main import (
     _default_llm_client,
     create_unified_app,
 )
-from app.plugins.llm_client import MockLLMClient, OpenAICompatClient
+from app.plugins.llm_client import (
+    MockLLMClient,
+    OpenAICompatClient,
+    ResilientLLMClient,
+)
 
 
 @pytest.fixture(autouse=True)
 def _clean_llm_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every test starts from "no LLM configured" unless it says otherwise."""
-    for var in ("ZHL_LLM_API_KEY", "ZHL_LLM_BASE_URL", "ZHL_LLM_MODEL"):
+    for var in (
+        "ZHL_LLM_API_KEY",
+        "ZHL_LLM_BASE_URL",
+        "ZHL_LLM_MODEL",
+        "ZHL_LLM_MODE",
+        "ZHL_LLM_FALLBACK",
+    ):
         monkeypatch.delenv(var, raising=False)
 
 
@@ -49,9 +61,55 @@ def test_key_present_selects_real_client(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setenv("ZHL_LLM_MODEL", "deepseek-v4-flash")
 
     client = _default_llm_client()
-    assert isinstance(client, OpenAICompatClient)
-    assert client.base_url == "https://api.deepseek.com"
-    assert client.model == "deepseek-v4-flash"
+    # A key present -> the real client, wrapped in the mock-fallback so a
+    # demo degrades instead of 500-ing (see ResilientLLMClient).
+    assert isinstance(client, ResilientLLMClient)
+    assert isinstance(client._primary, OpenAICompatClient)
+    assert client._primary.base_url == "https://api.deepseek.com"
+    assert client._primary.model == "deepseek-v4-flash"
+    assert client.model_version() == "deepseek-v4-flash"
+
+
+def test_llm_mode_mock_forces_fixture_mock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The one-flag demo downgrade: key present, but ZHL_LLM_MODE=mock wins."""
+    monkeypatch.setenv("ZHL_LLM_API_KEY", "sk-test-not-a-real-key")
+    monkeypatch.setenv("ZHL_LLM_BASE_URL", "https://api.deepseek.com")
+    monkeypatch.setenv("ZHL_LLM_MODEL", "deepseek-v4-flash")
+    monkeypatch.setenv("ZHL_LLM_MODE", "mock")
+
+    assert isinstance(_default_llm_client(), MockLLMClient)
+
+
+def test_llm_fallback_strict_returns_bare_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ZHL_LLM_API_KEY", "sk-test-not-a-real-key")
+    monkeypatch.setenv("ZHL_LLM_BASE_URL", "https://api.deepseek.com")
+    monkeypatch.setenv("ZHL_LLM_MODEL", "deepseek-v4-flash")
+    monkeypatch.setenv("ZHL_LLM_FALLBACK", "strict")
+
+    assert isinstance(_default_llm_client(), OpenAICompatClient)
+
+
+def test_resilient_client_degrades_and_reports_model_version() -> None:
+    """A primary that raises LLMUnavailable falls back to the mock, and the
+    trace-facing model_version() never claims a live model it did not use."""
+    from app.plugins.llm_client import LLMUnavailable, ResilientLLMClient
+
+    class _Dead:
+        model = "agnes-3.0-flash"
+
+        def chat(self, prompt: str, schema: dict) -> dict:
+            raise LLMUnavailable("connection refused")
+
+    mock = MockLLMClient(Path(__file__).resolve().parents[2] / "tests" / "fixtures")
+    resilient = ResilientLLMClient(_Dead(), mock)
+    assert resilient.model_version() == "agnes-3.0-flash"
+
+    out = resilient.chat("x [SOURCE_SN:SN-N-001]", {})
+    assert out["source_sn"] == "SN-N-001"
+    assert resilient.degraded is True
+    assert resilient.model_version() == "mock-degraded"
+    # Sticky: the dead primary is not retried on every subsequent call.
+    assert resilient.chat("x [SOURCE_SN:SN-N-002]", {})["source_sn"] == "SN-N-002"
 
 
 def test_blank_key_is_treated_as_absent(monkeypatch: pytest.MonkeyPatch) -> None:

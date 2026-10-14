@@ -226,25 +226,44 @@ def build_main_chain_graph(
 
         The Skill writes the ``extraction_result`` evidence itself (Task 5);
         the node only aggregates confidence and collects low-conf SNs.
+
+        Raw-source entry (FR-1.1/1.2): the parse Skill already extracted and
+        archived every row before the graph ran, so ``state["pre_extracted"]``
+        carries per-SN results and this node reuses them — extracting again
+        would double the model calls and let the two answers disagree.
         """
         rows = state.get("inspections") or []
+        pre_extracted: dict = state.get("pre_extracted") or {}
         confidences: dict[str, float] = {}
         extraction: dict[str, dict] = {}
         evidence_ids = list(state.get("evidence_ids") or [])
         for row in rows:
             sn = row["sn"]
-            payload = {
-                k: row[k]
-                for k in ("sn", "pmax", "temp", "isc", "voc", "vm", "im", "ff", "appearance_result")
-                if k in row
-            }
-            result = extract_inspection_data(
-                llm=llm,
-                source_type=str(row.get("source_type", "")),
-                payload=payload,
-                evidence=evidence,
-                object_ref={"kind": "batch", "id": state["batch_id"]},
-            )
+            if sn in pre_extracted:
+                result = pre_extracted[sn]
+            else:
+                payload = {
+                    k: row[k]
+                    for k in (
+                        "sn",
+                        "pmax",
+                        "temp",
+                        "isc",
+                        "voc",
+                        "vm",
+                        "im",
+                        "ff",
+                        "appearance_result",
+                    )
+                    if k in row
+                }
+                result = extract_inspection_data(
+                    llm=llm,
+                    source_type=str(row.get("source_type", "")),
+                    payload=payload,
+                    evidence=evidence,
+                    object_ref={"kind": "batch", "id": state["batch_id"]},
+                )
             extraction[sn] = result
             confidences[sn] = float(result["confidence"])
             evidence_ids.append(str(result.get("evidence_id", "")))

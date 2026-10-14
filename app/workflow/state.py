@@ -32,6 +32,12 @@ class BatchWorkflowState(TypedDict):
     rule_version_id: str
     batch_status: str
     inspections: list[dict]
+    #: Per-SN extraction results that already happened *before* the graph
+    #: (raw-source entry: the parse Skill extracted the rows). The extract
+    #: node consumes these instead of calling the model again — otherwise a
+    #: raw-source intake would extract the same values twice and bill two
+    #: LLM calls whose outputs could disagree with each other.
+    pre_extracted: dict
     extraction: dict
     confidence: float
     low_conf_sns: list[str]

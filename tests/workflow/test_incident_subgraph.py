@@ -28,7 +28,16 @@ def _config() -> dict[str, Any]:
     return {"configurable": {"thread_id": _THREAD}}
 
 
-def _initial_state() -> dict[str, Any]:
+def _initial_state(reinspection_result: str | None = "pass") -> dict[str, Any]:
+    """Seed state; ``reinspection_payload.result`` is the *recorded* outcome.
+
+    The subgraph no longer invents a pass: ``run_reinspection`` reports what
+    the payload says the business layer already recorded (the old hardcoded
+    ``{"result": "pass"}`` stub claimed closures that never happened).
+    """
+    payload: dict[str, Any] = {"scope_type": "minimal", "scope_sns": ["SN-1"]}
+    if reinspection_result is not None:
+        payload["result"] = reinspection_result
     return {
         "incident_id": "INC-001",
         "batch_id": "B-001",
@@ -37,7 +46,7 @@ def _initial_state() -> dict[str, Any]:
         ],
         "human_decision": None,
         "reinspection_result": None,
-        "reinspection_payload": {"scope_type": "minimal", "scope_sns": ["SN-1"]},
+        "reinspection_payload": payload,
     }
 
 
@@ -67,9 +76,30 @@ def test_resume_adopt_closes_path() -> None:
     snap = graph.get_state(_config())
     assert snap is not None
     assert snap.values["human_decision"] == {"decision": "adopt", "cause": "cell mismatch"}
-    # Reinspection result should be carried to END.
-    assert snap.values["reinspection_result"] in ("pass", "fail")
+    # The *recorded* reinspection verdict (seeded into the payload) is what
+    # the node reports — nothing is invented when the payload is silent.
+    assert snap.values["reinspection_result"] == "pass"
     assert snap.next == ()  # reached END
+
+
+def test_no_recorded_reinspection_does_not_invent_a_pass() -> None:
+    """Silence is not a pass: with no recorded outcome the run still ends,
+    but the state says ``unknown`` so the business layer (close/release
+    assertions) remains the authority that refuses closure."""
+    from langgraph.types import Command
+
+    graph = build_incident_subgraph(MemorySaver())
+    for _ in graph.stream(_initial_state(reinspection_result=None), config=_config()):
+        pass
+    for _ in graph.stream(
+        Command(resume={"decision": "adopt", "cause": "cell mismatch"}),
+        config=_config(),
+    ):
+        pass
+    snap = graph.get_state(_config())
+    assert snap.values["reinspection_result"] == "unknown"
+    assert snap.values.get("route_marker") is None  # not routed to rejected
+    assert snap.next == ()
 
 
 def test_recheck_pass_routes_closed() -> None:

@@ -674,3 +674,19 @@
 3. **批次 4 AI 归因**：`MockLLMClient` 未命中改抛 `FixtureMissError(KeyError)`（专异常，契约测试不变）；attribute 端点重写为直调 `AttributionSkill`，只捕 `FixtureMissError`——真实 KeyError 不再被吞成"未知 incident"；摘掉同请求自问自答的假 `human_adopt` interrupt 与硬编码 `{"result": "pass"}` 的假复检节点（子图本体保留为独立回放脚手架）；D2 全滤空时返回提示文案。
 4. **批次 5 结构债**：删除死代码 `app/infra/schemas.py` + 其测试（app 侧零引用）；`TERMINAL_INCIDENT_STATUSES` 常量收敛 5 处 closed/rejected/scrapped 字面量（domain/release.py ×2、skills/release_inputs.py ×2、api/release.py 经共享模块）；`_liBadge` 改为只在 innerHTML 上剥前缀——不再用 textContent 覆盖丢内联样式。
 5. **dev-notes 路径**：本文件（本节）。
+
+## 2026-10-14 · Agent 实质化：真抽取入口 + 真 HITL + 真模型加固
+
+1. **功能演示命令**：`.venv\Scripts\pytest.exe tests`；`ruff check app tests` / `black --check app tests` 全绿。真实 Postgres + 真实 agnes 模型现场跑通「原始单据 → 抽取 → 判定 → 隔离 → 归因」全链（见第 6 条记录）。
+2. **审计起点**：核查"Agent 应用成色"，确认四类"名不副实"：模型输出零校验、抽取结果只进 state 不进业务、宣称三处 HITL 只有一处落地、fixture 只覆盖单个 SN（换数据即挂）。用户决定修复方向：演示站得住 + 补齐 Agent 真实职责。
+3. **第 0 层 · 真实模型加固 + 一键降级**（`app/plugins/llm_client.py`）：新增 `LLMUnavailable` 统一承载传输/协议/空响应失败；`OpenAICompatClient` 加超时（`ZHL_LLM_TIMEOUT_S`，默认 60s）、5xx/429 重试一次、choices/content 结构校验、`thinking` 关闭开关；新增 `ResilientLLMClient`——真模型失败自动降级 mock 且 `model_version()` 如实报 `mock-degraded`；`ZHL_LLM_MODE=mock` 一键强制 fixture、`ZHL_LLM_FALLBACK=strict` 恢复失败即报错。`app/api/incidents.py::get_llm` 原本自带一份客户端选择逻辑（`ZHL_LLM_MODE` 管不到归因），已收敛到 `app.main._default_llm_client` 单一入口。
+4. **第 1 层 · 原始单据真抽取入口（FR-1.1/1.2/1.4/1.7）**：新增 `app/plugins/raw_source.py`（确定性 CSV/表单解析 Plugin，纯 stdlib）；`app/skills/extract.py` 新增 `parse_raw_source`（LLM 提议 + `validate_rows` 裁决：类型/量级/SN 格式/同批重复/外观词表；原始文本存 `source_file` 证据，逐 SN 存 `extraction_result`）与 `_model_version`（如实标注模型来源）；`POST /api/intake` 新增 `raw_source`/`raw_source_kind`（与 `inspections` 互斥，解析失败 400 带逐行 issues）；`MockLLMClient` 加 `[RAW_PARSE]` 路由到确定性解析器；图新增 `pre_extracted` 状态——已抽取的行不再二次调用模型（否则一次入场两次抽取、两份证据）。前端入场弹窗加「录入方式：原始单据（AI 抽取）/ 已结构化数据」双通道，结果面板改为逐组件渲染（SN + 置信度 + 字段值 + 外观发现 + 被拦截行）。
+5. **第 2 层 · 归因子图接成真路径（真跨请求 HITL）**：`incident_subgraph` 新增 `start_incident_run` / `resume_incident_run` / `incident_run_config`，`thread_id = incident:<id>`，checkpointer 挂在 `app.state.incident_checkpointer`（默认 `MemorySaver`，可由 factory 注入持久 saver）；`POST /api/incidents/{id}/attribute` 不带 `decision` = 生成假设并停驻（返回 `awaiting_human`），`POST .../adopt` = 另一次请求 resume 并落库（无停驻运行 → 409 `no_parked_attribution`；采纳必填 cause → 400 `adopt_requires_cause`）；`_generate_hypotheses` 尊重调用方已标注的 `hypotheses_source`（endpoint 先跑真 Skill 再把结果 seed 进图，模型只调用一次、只写一条 trace）；`run_reinspection` 不再硬编码 `{"result":"pass"}`——只报告 API 层真实记录的复检结论，无记录即 `unknown`（业务层仍是关闭/放行的权威）。归因 prompt 增补真实上下文（批次号、型号、受影响 SN 及其实测值，`_attribution_prompt_context`），真模型从"泛泛而谈"变为指名道姓。
+6. **第 3 层 · 真实环境验证**：本机 Postgres + `.env` 真 agnes-3.0-flash 跑通全链——原始 CSV 5 行 → 抽取 3 行（量级异常行 `SN-DEMO-004` 以 issues 拦下未判）、批次判 Fail 自动隔离并建 `rule_fail` 异常、归因返回 3 条带证据的假设（如「电池片隐裂导致串联电阻升高：FF 0.74、pmax 470W」并给 EL 复检建议）、`/adopt` 另一次请求落库；UI 工作台与工作流同一进程验证 `ZHL_LLM_MODE=mock` 生效（此前归因绕过该开关）。
+7. **顺带修掉的真缺陷**（均为核查中发现，非本次引入）：
+   - `FileEvidenceStore.get` 只读内存映射，跨请求（新 store 实例）/重启后 D2 证据门查不到历史证据 → 归因假设被全滤。已改为内存未命中时回查 DB + 从 `file_path` 读回内容。
+   - `make_evidence_id` 只以 `(etype, kind, id)` 为键：同一批次逐 SN 的抽取证据全部塌成同一条（文件被覆盖、DB 行去重跳过），FR-1.7「每个模型字段都有原始证据」实为空谈。已在 ref 含额外键时把键纳入哈希（无额外键的旧 id 保持逐字节不变，历史证据仍可寻址）。
+   - 前端 `intake.js` 用 `String(ex[k])` 渲染抽取结果，`extracted_fields` 改为逐 SN 结构后会显示 `[object Object]`，已改为逐组件表格。
+8. **测试**：新增 `tests/skills/test_raw_source.py`（解析 + FR-1.4 校验门）、`tests/e2e/test_demo_path.py`（原始单据→治理隔离；跨请求归因 HITL 两段式）、归因端点跨请求用例 5 条 + 「模型只调用一次」1 条 + mock 合成回退用例。`tests/workflow/test_incident_subgraph.py` 的 `_initial_state` 改为携带已记录复检结论。
+9. **文档与演示**：`AGENT.md §7.2` 如实改述为「两处图内 interrupt + 放行以 `approved_by` 在 API 层签署」；设计文档 §9.3 增补降级开关与 mock 覆盖范围说明；`.env.example` 增补四个演示开关；`scripts/seed-demo.ps1` 末尾打印完整演示步骤与示例原始 CSV（含 470W 失败行与 `SN-LOW-*` 低置信行两种演示分支）。
+10. **dev-notes 路径**：本文件（本节）。

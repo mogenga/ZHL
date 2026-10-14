@@ -71,11 +71,15 @@ def _generate_hypotheses(
     """
     seeded = state.get("hypotheses") or []
     if seeded or attribution_ctx is None:
-        # C9: any path that did NOT run the real Skill keeps the "stub"
-        # marker (existing regression contract — pre-seed pass-through and
-        # the no-ctx empty case are both audit "stub": no LLM, no evidence
-        # gate executed inside this node).
-        return {"hypotheses": seeded, "hypotheses_source": "stub"}
+        # C9: a path that did NOT run the real Skill *inside this node* keeps
+        # the "stub" marker. Exception: when the caller already ran the Skill
+        # it stamps the marker itself (the endpoint generates the hypotheses
+        # and seeds them, so the model is not asked twice) — honour that
+        # stamp rather than understating a validation that did happen.
+        return {
+            "hypotheses": seeded,
+            "hypotheses_source": state.get("hypotheses_source") or "stub",
+        }
     from app.plugins.attribution import AttributionSkill
 
     validated = AttributionSkill(
@@ -126,25 +130,39 @@ def _human_adopt(state: IncidentSubgraphState) -> dict:
 def _run_reinspection(
     state: IncidentSubgraphState, reinspection_callable: Callable[[dict], dict] | None
 ) -> dict:
-    """Node 4: run the reinspection (stub in this task; Task 7 replaces
-    the callable with the real scope-resolving logic)."""
+    """Node 4: report the reinspection outcome the API layer already recorded.
+
+    The reinspection itself is a real business action owned by
+    ``POST /api/incidents/{id}/reinspections`` (it writes a ``Reinspection``
+    row, validates scope, and transitions the incident). This node does NOT
+    invent a verdict: the API layer puts the recorded result into
+    ``reinspection_payload`` before resuming, and here we simply route on it.
+
+    - explicit ``result`` in the payload -> that verdict;
+    - payload present but no result -> ``unknown`` (routes to END, no
+      invented pass — a caller that has not recorded anything gets no
+      closure);
+    - no payload and no injected callable -> ``None`` (the replay/test
+      scaffold path, unchanged).
+    """
     payload = state.get("reinspection_payload") or {}
     if reinspection_callable is not None:
         result = reinspection_callable(payload)
-    else:
-        # Default stub: pass-through so the graph is testable without wiring.
-        result = {"result": "pass"}
-    return {"reinspection_result": result.get("result", "pass")}
+        return {"reinspection_result": result.get("result")}
+    if payload:
+        return {"reinspection_result": str(payload.get("result") or "unknown")}
+    return {"reinspection_result": None}
 
 
 def _route_reinspection_result(state: IncidentSubgraphState) -> str:
-    """Node 5 (conditional router): pass -> END, fail -> rejected_route.
+    """Node 5 (conditional router): fail -> rejected_route, else END.
 
-    A ``None`` / absent ``reinspection_result`` routes to END (pass), NOT
-    ``rejected_route``. This subgraph is a topology scaffold: the API layer
-    (Task 7 ``create_reinspection``) is the authority that maps "no
-    reinspection" to the item-7 release gap. A standalone subgraph replay
-    with no result is therefore "no fail", by design.
+    Only an explicit recorded verdict routes: ``fail`` -> ``rejected_route``;
+    ``pass`` / ``unknown`` / absent -> END. "No failure recorded" is not a
+    pass — the API layer (close endpoint / release assertions) is the
+    authority that refuses closure without a passing reinspection. Inventing
+    a pass here (the old stub) claimed a closure the business layer had never
+    established.
     """
     if state.get("reinspection_result") == "fail":
         return "rejected_route"
@@ -171,6 +189,13 @@ def build_incident_subgraph(
     ``_make_run_reinspection`` pattern), never serialized into
     ``IncidentSubgraphState`` (state is JSON-checkpointed; a live session
     is not serializable).
+
+    Cross-request HITL (2026-10-14 rework): ``build_incident_subgraph``
+    supports the *interrupted* form — run to the ``human_adopt`` interrupt
+    on one request (``start_incident_run``), then resume on a **later**
+    request with the reviewer's decision (``POST /api/incidents/{id}/adopt``).
+    ``run_reinspection`` reports the outcome **already recorded by the API
+    layer** (a real ``Reinspection`` row); it never invents a pass.
     """
     builder = StateGraph(IncidentSubgraphState)
     builder.add_node("generate_hypotheses", _make_generate_hypotheses(attribution_ctx))
@@ -195,6 +220,66 @@ def build_incident_subgraph(
     builder.add_edge("rejected_route", END)
 
     return builder.compile(checkpointer=checkpointer)
+
+
+# ---------------------------------------------------------------------------
+# Cross-request HITL helpers (2026-10-14): start -> [days pass] -> resume
+# ---------------------------------------------------------------------------
+
+
+def incident_run_config(incident_id: str) -> dict:
+    """The subgraph's thread config (one open attribution per incident)."""
+    return {"configurable": {"thread_id": f"incident:{incident_id}"}}
+
+
+def start_incident_run(
+    graph: Any,
+    incident_id: str,
+    seed: dict | None = None,
+) -> dict:
+    """Run the subgraph until the ``human_adopt`` interrupt; return its payload.
+
+    The payload is what a reviewer must decide on (``{"choice": ...,
+    "hypotheses": [...]}``). The graph is checkpointed per-incident, so the
+    resume happens later, on another request — the whole point of a real HITL
+    over the previous same-request "interrupt".
+    """
+    from langgraph.errors import GraphInterrupt  # noqa: F401  (documented import point)
+
+    cfg = incident_run_config(incident_id)
+    initial = {"incident_id": incident_id}
+    if seed:
+        initial.update(seed)
+    state = graph.invoke(initial, config=cfg)
+    pending = graph.get_state(cfg)
+    interrupts = list(getattr(pending, "interrupts", ()) or ())
+    payload = interrupts[0].value if interrupts else None
+    return {
+        "hypotheses": state.get("hypotheses") or [],
+        "hypotheses_source": state.get("hypotheses_source"),
+        "evidence_validation": state.get("evidence_validation"),
+        "pending": bool(pending.next),
+        "interrupt": payload,
+    }
+
+
+def resume_incident_run(graph: Any, incident_id: str, decision: dict) -> dict:
+    """Resume a parked incident run with the reviewer's decision.
+
+    ``decision`` = ``{"decision": "adopt"|"reject"|"defer", "cause"?: str}``.
+    Returns the post-resume state. The *business* persistence of the decision
+    (``confirmed_root_cause`` etc.) belongs to the API endpoint, exactly as
+    the main chain's confirm endpoint owns the confirmation record.
+    """
+    from langgraph.types import Command
+
+    cfg = incident_run_config(incident_id)
+    state = graph.invoke(Command(resume=decision), config=cfg)
+    return {
+        "human_decision": state.get("human_decision"),
+        "reinspection_result": state.get("reinspection_result"),
+        "route_marker": state.get("route_marker"),
+    }
 
 
 def _make_run_reinspection(

@@ -102,3 +102,17 @@ if ($code -ne 0) {
 Write-Host ""
 Write-Host "==> 完成。seed 已幂等写入。上方 seederule= 行即前端可用的 rule_version_id。" -ForegroundColor Green
 Write-Host "    前端工作台刷新后，规则版本下拉将出现 published 项。" -ForegroundColor Green
+Write-Host ""
+Write-Host "==> 演示路径（原始单据 → AI 抽取 → 判定 → 归因）：" -ForegroundColor Cyan
+Write-Host "    1) 建批次（JH-550W，数量 10，选上方 rule_version_id）" -ForegroundColor Gray
+Write-Host "    2) 入场弹窗选「原始单据（AI 抽取）」，粘贴：   " -ForegroundColor Gray
+Write-Host "       SN-DEMO-001,551.2,25.0,10.5,48.0,40.0,13.0,0.80,pass" -ForegroundColor DarkGray
+Write-Host "       SN-DEMO-002,549.8,25.0,10.5,48.0,40.0,13.0,0.79,pass" -ForegroundColor DarkGray
+Write-Host "       SN-DEMO-003,470.0,25.0,10.5,47.2,40.0,12.4,0.74,fail" -ForegroundColor DarkGray
+Write-Host "       SN-DEMO-004,548.5,25.0,10.5,48.0,40.0,13.0,0.80,pass" -ForegroundColor DarkGray
+Write-Host "       （第 3 行功率/外观不合格 → 判定 Fail → 自动隔离并建异常）" -ForegroundColor DarkGray
+Write-Host "       （想演示低置信人工确认：把某行 SN 改成 SN-LOW-001，置信度 0.62）" -ForegroundColor DarkGray
+Write-Host "    3) 异常节点点「AI 归因」→ 展示假设排序 → 采纳/驳回/搁置" -ForegroundColor Gray
+Write-Host "    4) 复检 → 关闭异常 → 放行；报告页看 Agent 轨迹" -ForegroundColor Gray
+Write-Host "    真实模型与降级：.env 配 ZHL_LLM_API_KEY 走真模型；" -ForegroundColor DarkGray
+Write-Host "    现场网络不稳时设 ZHL_LLM_MODE=mock 一键回退 fixture。" -ForegroundColor DarkGray

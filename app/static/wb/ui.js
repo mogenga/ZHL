@@ -93,10 +93,24 @@ WB.openModal = function (title, fields, onOk, opts = {}) {
     if (onOk(vals, inputs) === false) return;
     WB.closeModal();
   }, text: opts.submitLabel || '确定' });
-  box.append(WB.h('div', { class: 'foot' },
+  // extraButtons：三选一等场景的额外动作（如归因的「驳回 / 搁置」）。
+  // 点击后由回调自行决定是否关窗（回调里调用 WB.closeModal()）。
+  const foot = WB.h('div', { class: 'foot' },
     WB.h('button', { onclick: () => WB.closeModal(), text: '取消' }),
     okBtn,
-  ));
+  );
+  if (Array.isArray(opts.extraButtons)) {
+    opts.extraButtons.forEach((b) => {
+      foot.insertBefore(
+        WB.h('button', { class: b.cls || '', text: b.label, onclick: () => {
+          if (b.onclick() === false) return;
+          WB.closeModal();
+        } }),
+        okBtn,
+      );
+    });
+  }
+  box.append(foot);
   document.body.append(ov, box);
   ov.addEventListener('click', (ev) => { if (ev.target === ov) WB.closeModal(); });
   WB._modal = { ov, box, inputs, submitBtn: okBtn };

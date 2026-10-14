@@ -41,7 +41,12 @@ from app.api.intake import build_router as build_intake_router
 from app.api.main import create_app_with_trace as _phase_b_create_app_with_trace
 from app.domain.types import IsoRow
 from app.plugins.evidence_store import EvidenceStore, FileEvidenceStore
-from app.plugins.llm_client import LLMClient, MockLLMClient, OpenAICompatClient
+from app.plugins.llm_client import (
+    LLMClient,
+    MockLLMClient,
+    OpenAICompatClient,
+    ResilientLLMClient,
+)
 from app.workflow.checkpointer import get_checkpointer
 
 __all__ = [
@@ -109,20 +114,34 @@ def _default_llm_client() -> LLMClient:
     runnable with zero credentials while letting a deployment opt into a live
     model purely by configuration — no code edit.
 
+    Two escape hatches, both env-only (no code edit on demo day):
+
+    - ``ZHL_LLM_MODE=mock`` — force the fixture mock even with a key present
+      (the "one flag" demo downgrade).
+    - ``ZHL_LLM_FALLBACK=mock`` (default) — a live client wrapped in
+      ``ResilientLLMClient`` so a network/model failure degrades to the mock
+      for the rest of the process and every trace records ``mock-degraded``.
+      ``ZHL_LLM_FALLBACK=strict`` restores fail-loud behaviour.
+
     Both DeepSeek (``https://api.deepseek.com``) and Zhipu
     (``https://open.bigmodel.cn/api/paas/v4``) expose the OpenAI Chat
     Completion shape this client speaks. The Zhipu *Anthropic* endpoint
     (``/api/anthropic``) is a different protocol and will not work here.
     """
     key = os.environ.get("ZHL_LLM_API_KEY", "").strip()
-    if not key:
+    mode = os.environ.get("ZHL_LLM_MODE", "").strip().lower()
+    if not key or mode == "mock":
         return MockLLMClient(_DEFAULT_FIXTURES)
     try:
-        return OpenAICompatClient()
+        primary = OpenAICompatClient()
     except ValueError:
         # Misconfigured (e.g. key set but no base_url) must not silently
         # degrade to mock data in production — fail loud instead.
         raise
+    fallback_mode = os.environ.get("ZHL_LLM_FALLBACK", "mock").strip().lower()
+    if fallback_mode == "strict":
+        return primary
+    return ResilientLLMClient(primary, MockLLMClient(_DEFAULT_FIXTURES))
 
 
 def create_app(
@@ -175,6 +194,7 @@ def create_unified_app(
     session_factory: sessionmaker | None = None,
     checkpointer_mode: str | None = None,
     mount_static: bool = True,
+    own_session: bool = True,
 ) -> FastAPI:
     """Phase A + Phase B unified app.
 
@@ -188,10 +208,22 @@ def create_unified_app(
 
     ``session_factory`` is threaded into the Phase B factory (Postgres via
     ``ZHL_DATABASE_URL`` when ``None`` — fail-fast, no silent SQLite).
+    ``own_session=False`` is for callers injecting a shared long-lived
+    session (tests / E2E); production keeps the default so per-request
+    sessions are closed.
     """
     unified = _phase_b_create_app_with_trace(
-        session_factory=session_factory, mount_static=mount_static
+        session_factory=session_factory, mount_static=mount_static, own_session=own_session
     )
+    # Cross-request incident attribution HITL needs a checkpointer that
+    # outlives a single request: the /attribute request parks the run and a
+    # later /adopt request resumes it. In-process MemorySaver is the honest
+    # default here (runs do not survive a restart); a deployment that needs
+    # that can inject a persistent saver into create_app_with_trace.
+    if getattr(unified.state, "incident_checkpointer", None) is None:
+        from langgraph.checkpoint.memory import MemorySaver
+
+        unified.state.incident_checkpointer = MemorySaver()
 
     # Phase A: build its router set with its own get_deps closure and mount
     # it onto the unified app. checkpointer_mode only affects Phase A's

@@ -94,7 +94,17 @@ def make_evidence_id(object_ref: dict, etype: str | None = None) -> str:
     skeleton tests) omits it and gets the ``"default"`` branch, preserving the
     old behavior for those callers.
     """
+    # Extra ref keys (beyond kind/id) participate in the identity, sorted for
+    # stability. Without this, every per-SN extraction for one batch hashed
+    # to the SAME id: the second module's evidence overwrote the first's
+    # file, its DB row was skipped as a duplicate, and the chain kept a
+    # single "extraction_result" for a whole batch — the opposite of FR-1.7
+    # ("每个模型字段都有原始证据"). Refs carrying only kind/id keep the
+    # exact ids they had before, so existing evidence rows stay addressable.
+    extras = "&".join(f"{k}={object_ref[k]}" for k in sorted(set(object_ref) - {"kind", "id"}))
     key = f"{etype or 'default'}/{object_ref.get('kind', '')}/{object_ref.get('id', '')}"
+    if extras:
+        key += f"/{extras}"
     return uuid.UUID(hashlib.sha1(key.encode()).hexdigest()[:32]).hex[:36]
 
 
@@ -211,9 +221,45 @@ class FileEvidenceStore:
         db.flush()
 
     def get(self, evidence_id: str) -> EvidencePayload:
-        if evidence_id not in self._by_id:
-            raise KeyError(f"unknown evidence_id: {evidence_id}")
-        return self._by_id[evidence_id]
+        if evidence_id in self._by_id:
+            return self._by_id[evidence_id]
+        if self._db is not None:
+            payload = self._get_from_db(evidence_id)
+            if payload is not None:
+                return payload
+        raise KeyError(f"unknown evidence_id: {evidence_id}")
+
+    def _get_from_db(self, evidence_id: str) -> EvidencePayload | None:
+        """Resolve an evidence id written by an *earlier* store instance.
+
+        The in-memory maps only cover what THIS instance saved. Every request
+        builds a fresh store (a restart loses the maps entirely), so an
+        evidence-existence check that only consults memory fails for exactly
+        the ids written by preceding requests — the D2 gate would then drop
+        every hypothesis and the attribution would come back empty on the
+        second request. The DB row is the durable record; the bytes are
+        re-read from ``file_path`` (they were written to disk).
+        """
+        try:
+            row = self._db.get(EvidenceModel, uuid.UUID(evidence_id))
+        except (ValueError, TypeError, AttributeError):
+            return None
+        if row is None:
+            return None
+        content = b""
+        if row.file_path:
+            try:
+                content = (self.root / row.file_path).read_bytes()
+            except OSError:
+                content = b""
+        return EvidencePayload(
+            evidence_id=str(row.evidence_id),
+            evidence_type=row.evidence_type,
+            object_ref=dict(row.object_ref or {}),
+            content=content,
+            content_hash=row.content_hash,
+            file_path=row.file_path or "",
+        )
 
     def list_by_object(self, object_ref: dict) -> list[EvidenceRef]:
         want = {k: object_ref.get(k) for k in ("kind", "id")}

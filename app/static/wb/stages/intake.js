@@ -15,6 +15,10 @@ WB.stages.intake = (function () {
         { value: 'OCR_FORM', label: '表单识别' },
         { value: 'MANUAL', label: '人工录入' },
       ] },
+      { label: '录入方式', type: 'select', value: 'raw', options: [
+        { value: 'raw', label: '原始单据（AI 抽取）' },
+        { value: 'structured', label: '已结构化数据（逐列粘贴）' },
+      ] },
       { label: '检测数据（每行一条，9 列：SN,pmax,temp,isc,voc,vm,im,ff,外观）', type: 'textarea', rows: 10,
         placeholder: 'SN-N-001,550.0,25.0,10.5,48.0,40.0,13.0,0.80,pass\nSN-N-002,548.0,25.0,10.5,48.0,40.0,13.0,0.80,pass',
         required: true },
@@ -22,10 +26,27 @@ WB.stages.intake = (function () {
     ];
     WB.openModal('提交送检数据', fields, function (vals) {
       const source_type = vals[0];
-      const raw = (vals[1] || '').trim();
-      const overrideStr = (vals[2] || '').trim();
+      const mode = vals[1];
+      const raw = (vals[2] || '').trim();
+      const overrideStr = (vals[3] || '').trim();
       if (!raw) { WB.toast('请填写检测数据'); return; }
-      // 多行 → inspections[]；每行必须含 9 列（SN + 7 电参 + 外观），缺列/非数报错
+      const fieldsOverride = parseOverrides(overrideStr);
+
+      // 原始单据通道（FR-1.1/1.2）：整段原文交给后端 AI 抽取 + 校验（FR-1.4），
+      // 前端不再自行拆列——那才是「系统读懂原始单据」的演示路径。
+      if (mode === 'raw') {
+        _markModalBusy();
+        WB.api.submitIntake({
+          batch_id: batch.batch_id,
+          source_type: source_type,
+          raw_source: raw,
+          raw_source_kind: source_type === 'OCR_FORM' ? 'paper_form' : 'iv_csv',
+          fields: fieldsOverride || null,
+        }).then(_onIntakeSubmitted(batch));
+        return;
+      }
+
+      // 已结构化通道：前端拆列后按原有 9 列契约提交。
       const cols = ['sn', 'pmax', 'temp', 'isc', 'voc', 'vm', 'im', 'ff', 'appearance_result'];
       const inspections = [];
       let err = null;
@@ -44,14 +65,19 @@ WB.stages.intake = (function () {
       });
       if (err) { WB.toast(err); return; }
       if (!inspections.length) { WB.toast('没有可解析的检测数据行'); return; }
-      const fieldsOverride = parseOverrides(overrideStr);
       _markModalBusy();
       WB.api.submitIntake({
         batch_id: batch.batch_id,
         source_type: source_type,
         inspections: inspections,
         fields: fieldsOverride || null,
-      }).then(function (res) {
+      }).then(_onIntakeSubmitted(batch));
+    }, { submitLabel: '提交送检' });
+  }
+
+  /* 提交回调：成功/失败都刷新详情，避免界面停在旧状态 */
+  function _onIntakeSubmitted(batch) {
+    return function (res) {
         if (!res.ok) {
           _unmarkModalBusy();
           WB.toast(WB.errText(res.error));
@@ -67,8 +93,7 @@ WB.stages.intake = (function () {
         WB.loadBatches();
         showIntakeResult(batch, res.data);
         _pollUntilLeftIntake(batch);
-      });
-    }, { submitLabel: '提交送检' });
+    };
   }
 
   /* 发饌进度提示：处理状态 + 下一步动作（依 WB.ST_CN / WB.NEXT_LABEL） */
@@ -116,13 +141,36 @@ WB.stages.intake = (function () {
     if (low.length) {
       body.append(WB.h('div', { class: 'hint-line', text: '低置信组件（' + low.length + '）：' + low.join('、') }));
     }
-    // 抽取字段对照
+    // 原始单据解析结果（FR-1.1/1.2/1.4）：本次解析出多少行、哪些行被校验挡下
+    const rp = data.raw_parse;
+    if (rp) {
+      body.append(WB.h('div', { class: 'hint-line', text: '原始单据解析：' + rp.rows + ' 行有效' }));
+      (rp.issues || []).forEach(function (iss) {
+        body.append(WB.h('div', { class: 'hint-line', text: '· 已拦截 ' + (iss.sn || '?') + ' / ' + iss.field + '：' + iss.problem }));
+      });
+    }
+    // 抽取字段对照（按组件逐行：SN + 置信度 + 字段值）
     const ex = data.extracted_fields || {};
-    const keys = Object.keys(ex);
-    if (keys.length) {
-      const rows = keys.map((k) => WB.h('tr', {},
-        WB.h('td', { text: k }), WB.h('td', { class: 'num', text: String(ex[k]) })));
-      body.append(WB.h('table', {}, WB.h('tr', {}, WB.h('th', { text: '字段' }), WB.h('th', { text: '值' })), rows));
+    const sns = Object.keys(ex);
+    if (sns.length) {
+      body.append(WB.h('div', { class: 'hint-line', style: 'font-weight:600', text: 'AI 抽取结果（逐组件）' }));
+      sns.forEach(function (sn) {
+        const r = ex[sn] || {};
+        const conf = r.confidence != null ? Math.round(r.confidence * 100) + '%' : '—';
+        const lowConf = r.confidence != null && r.confidence < 0.8;
+        const head = WB.h('div', { class: 'hint-line' },
+          WB.h('span', { class: 'tag ' + (lowConf ? 'tag-warn' : 'tag-pass'), text: sn + ' · ' + conf }));
+        body.append(head);
+        const fields = r.fields || {};
+        const rows = Object.keys(fields).map((k) => WB.h('tr', {},
+          WB.h('td', { text: k }), WB.h('td', { class: 'num', text: String(fields[k]) })));
+        if (rows.length) {
+          body.append(WB.h('table', {}, rows));
+        }
+        (r.appearance_findings || []).forEach(function (f) {
+          body.append(WB.h('div', { class: 'hint-line', text: '外观发现：' + f }));
+        });
+      });
     }
     // 操作按钮
     const actions = WB.h('div', { class: 'actions' },

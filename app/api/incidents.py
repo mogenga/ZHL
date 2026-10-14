@@ -27,7 +27,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.api.guards import require_not_archived
@@ -86,7 +86,21 @@ class IncidentOut(BaseModel):
 
 
 class AttributeRequest(BaseModel):
-    """T-1 attribution 3-way request (D9 single-request sync; P1 cross-request)."""
+    """AI attribution request (D9 3-way; cross-request since 2026-10-14).
+
+    ``decision`` omitted -> *start* phase: run the attribution Skill through
+    the incident subgraph and park at the ``human_adopt`` interrupt, returning
+    the hypotheses for a human to review on their own time.
+    ``decision`` present -> legacy single-shot: generate **and** record the
+    decision in one request (kept for compatibility / scripted flows).
+    """
+
+    decision: str | None = None  # "adopt" | "reject" | "defer"
+    cause: str | None = None
+
+
+class AdoptRequest(BaseModel):
+    """Resume a parked attribution run with the reviewer's 3-way decision."""
 
     decision: str  # "adopt" | "reject" | "defer"
     cause: str | None = None
@@ -117,19 +131,15 @@ SessionDep = Annotated[Any, Depends(get_session)]
 def get_llm() -> Any:
     """Attribution LLM client dependency (T-1).
 
-    Mirrors ``app.main._default_llm_client``: env-configured OpenAI-compatible
-    client when ``ZHL_LLM_API_KEY`` is set, otherwise the deterministic
-    fixture-backed mock pointed at ``tests/fixtures``.
+    Delegates to ``app.main._default_llm_client`` — the single selection
+    point (env key -> real client wrapped in the mock fallback, absent ->
+    fixture mock). Keeping a second copy of this logic here meant the
+    ``ZHL_LLM_MODE=mock`` downgrade did not apply to attribution: the demo
+    switch was advertised as one flag but only governed the main chain.
     """
-    import os
-    from pathlib import Path
+    from app.main import _default_llm_client
 
-    from app.plugins.llm_client import MockLLMClient, OpenAICompatClient
-
-    fixtures = Path(__file__).resolve().parents[2] / "tests" / "fixtures"
-    if os.environ.get("ZHL_LLM_API_KEY", "").strip():
-        return OpenAICompatClient()
-    return MockLLMClient(fixtures)
+    return _default_llm_client()
 
 
 LLMDep = Annotated[Any, Depends(get_llm)]
@@ -152,6 +162,26 @@ def get_evidence_store(session: SessionDep) -> Any:
 
 
 EvidenceStoreDep = Annotated[Any, Depends(get_evidence_store)]
+
+
+def get_incident_checkpointer(request: Any) -> Any:
+    """The subgraph checkpointer for cross-request attribution runs.
+
+    Owned by the app factory (``app.state.incident_checkpointer``) so the
+    ``human_adopt`` interrupt survives between the start request and the
+    adopt request — the whole point of a real HITL over the old
+    self-answered one. When the app did not wire one (bare test apps that
+    include this router directly), a per-app ``MemorySaver`` is created on
+    first use and cached on ``app.state`` — the right scope: the parked run
+    must be visible to later requests on the same app, and to no other app.
+    """
+    checkpointer = getattr(request.app.state, "incident_checkpointer", None)
+    if checkpointer is None:
+        from langgraph.checkpoint.memory import MemorySaver
+
+        checkpointer = MemorySaver()
+        request.app.state.incident_checkpointer = checkpointer
+    return checkpointer
 
 
 # --- helpers --------------------------------------------------------------
@@ -634,18 +664,23 @@ def attribute_incident(
     session: SessionDep,
     llm: LLMDep,
     evidence_store: EvidenceStoreDep,
+    request: Request,
 ) -> dict:
-    """T-1 AI attribution trigger (single-request 3-way, D9; P1 cross-request).
+    """AI attribution trigger (D9 3-way; cross-request HITL).
 
-    AGENT.md §4.3: the LLM call runs outside the transaction; the business
-    write + trace row commit in one unit. The endpoint drives the
-    ``AttributionSkill`` directly instead of running the incident subgraph:
-    the subgraph's ``human_adopt`` interrupt was self-answered from the same
-    request body (a fake HITL) and its ``run_reinspection`` node was a
-    hardcoded ``{"result": "pass"}`` stub — neither had any real business
-    effect here. Genuine reinspections go through
-    ``POST /api/incidents/{id}/reinspections``; the subgraph itself remains a
-    standalone topology scaffold for replay tests.
+    Cross-request flow (the real HITL):
+
+    1. ``POST .../attribute`` with **no** ``decision`` — generate hypotheses
+       through a live ``AttributionSkill`` call, park the subgraph run at the
+       ``human_adopt`` ``interrupt()``, and return the hypotheses. The parked
+       thread lives in the app-owned checkpointer keyed by incident id.
+    2. ``POST .../adopt`` with the reviewer's ``{"decision", "cause"}`` —
+       resume the parked run and persist the decision. The graph node records
+       the *fact* of the decision; the DB write (``confirmed_root_cause``)
+       stays here, in the API layer, matching the main chain's split.
+
+    ``decision`` present on this endpoint keeps the single-shot legacy shape
+    (generate + decide in one request) for scripted callers.
 
     Mock with no fixture key for this incident UUID -> 200 + empty + hint
     (spec §6 Q3: not a 404/500). Only ``FixtureMissError`` is treated as
@@ -659,34 +694,260 @@ def attribute_incident(
     # D8: archived terminal guard (shared, single call site).
     require_not_archived(incident.batch_id, session)
 
-    from app.plugins.attribution import AttributionSkill
+    if payload.decision is None:
+        return _start_attribution(
+            incident,
+            session,
+            llm,
+            evidence_store,
+            checkpointer=get_incident_checkpointer(request),
+        )
+    return _single_shot_attribution(
+        incident, session, llm, evidence_store, decision=payload.decision, cause=payload.cause
+    )
+
+
+@router.post("/{incident_id}/adopt")
+def adopt_attribution(
+    incident_id: uuid.UUID,
+    payload: AdoptRequest,
+    session: SessionDep,
+    llm: LLMDep,
+    evidence_store: EvidenceStoreDep,
+    request: Request,
+) -> dict:
+    """Resume a parked attribution run with the reviewer's 3-way decision.
+
+    This is the *later request* half of the HITL: the hypotheses were
+    generated (and parked) by ``POST .../attribute``; a human reviewed them
+    out of band; this endpoint records the decision. Resuming a thread that
+    has no parked run is a 409 — there is nothing to adopt.
+    """
     from app.plugins.llm_client import FixtureMissError
+    from app.workflow.incident_subgraph import build_incident_subgraph, resume_incident_run
+
+    if payload.decision not in ("adopt", "reject", "defer"):
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "bad_decision", "allowed": ["adopt", "reject", "defer"]},
+        )
+    incident = session.get(QualityIncident, incident_id)
+    if incident is None:
+        raise HTTPException(status_code=404, detail="incident_not_found")
+    require_not_archived(incident.batch_id, session)
+
+    checkpointer = get_incident_checkpointer(request)
+    graph = build_incident_subgraph(
+        checkpointer,
+        attribution_ctx=_attribution_ctx(incident, session, llm, evidence_store),
+    )
+    from app.workflow.incident_subgraph import incident_run_config
+
+    parked = graph.get_state(incident_run_config(str(incident.incident_id)))
+    if not parked.next:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "no_parked_attribution",
+                "hint": "该异常没有待采纳的归因运行；请先调用 POST /attribute",
+            },
+        )
+    hypotheses = parked.values.get("hypotheses") or []
+    try:
+        run = resume_incident_run(
+            graph,
+            str(incident.incident_id),
+            {"decision": payload.decision, "cause": payload.cause},
+        )
+    except FixtureMissError:  # pragma: no cover — generation already happened
+        session.rollback()
+        raise HTTPException(status_code=409, detail={"error": "no_parked_attribution"}) from None
+
+    _apply_attribution_decision(
+        session, incident, payload.decision, payload.cause, list(hypotheses)
+    )
+    session.commit()
+    session.refresh(incident)
+    return {
+        "incident_id": str(incident.incident_id),
+        "decision": payload.decision,
+        "human_decision": run["human_decision"],
+        "hypotheses": hypotheses,
+        "confirmed_root_cause": incident.confirmed_root_cause,
+    }
+
+
+def _attribution_ctx(incident: Any, session: Any, llm: Any, evidence_store: Any) -> dict:
+    """Live deps for the subgraph closure (never serialized into state)."""
+    from app.plugins.trace_store import TraceStore
+
+    return {
+        "incident": incident,
+        "session": session,
+        "llm": llm,
+        "evidence_store": evidence_store,
+        "trace": TraceStore(),
+    }
+
+
+def _attribution_prompt_context(session: Any, incident: Any) -> dict:
+    """The concrete failure the model should reason about.
+
+    Without this a live model answers in generalities ("rule mismatch",
+    "data drift"); with it the hypotheses name the actual failing modules and
+    their measured values — the difference between attribution that reads as
+    analysis and attribution that reads as boilerplate.
+    """
+    context: dict = {}
+    try:
+        batch = session.get(DeliveryBatch, incident.batch_id)
+        if batch is not None:
+            context["batch_no"] = batch.batch_no
+            context["model"] = batch.model
+        links = (
+            session.query(IncidentSnLink)
+            .filter(IncidentSnLink.incident_id == incident.incident_id)
+            .all()
+        )
+        rows = [session.get(ModuleInspection, link.inspection_id) for link in links]
+        rows = [r for r in rows if r is not None]
+        context["failing_sns"] = [r.sn for r in rows]
+        context["rule_findings"] = [
+            {
+                "sn": r.sn,
+                "pmax": float(r.pmax),
+                "im": float(r.im),
+                "ff": float(r.ff),
+                "appearance_result": r.appearance_result,
+            }
+            for r in rows[:20]
+        ]
+    except Exception:  # noqa: BLE001 — context is an enhancement, never a blocker
+        return context
+    return context
+
+
+def _generate_hypotheses_persisted(
+    incident: Any, session: Any, llm: Any, evidence_store: Any
+) -> list[dict]:
+    """Run the attribution Skill once and return its validated hypotheses."""
+    from app.plugins.attribution import AttributionSkill
+
+    return AttributionSkill(llm, evidence_store).run(
+        incident,
+        trace=TraceStore(),
+        session=session,
+        prompt_context=_attribution_prompt_context(session, incident),
+    )
+
+
+def _start_attribution(
+    incident: Any, session: Any, llm: Any, evidence_store: Any, *, checkpointer: Any
+) -> dict:
+    """Start phase: generate + park at the ``human_adopt`` interrupt."""
+    from app.plugins.llm_client import FixtureMissError
+    from app.workflow.incident_subgraph import build_incident_subgraph, start_incident_run
 
     try:
-        hypotheses = AttributionSkill(llm, evidence_store).run(
-            incident, trace=TraceStore(), session=session
-        )
+        hypotheses = _generate_hypotheses_persisted(incident, session, llm, evidence_store)
     except FixtureMissError:
-        # Mock LLM has no fixture key for this incident UUID (spec §6 Q3):
-        # graceful 200 + empty hypotheses + hint. The skill raises before any
-        # write, so the rollback discards nothing of value.
         session.rollback()
         return {
             "incident_id": str(incident.incident_id),
-            "decision": payload.decision,
+            "status": "no_fixture",
             "hypotheses": [],
             "confirmed_root_cause": incident.confirmed_root_cause,
             "hint": "该 incident UUID 在归因 Mock 中无 fixture 键（未知 incident）",
         }
 
-    # Business write: adopt persists the confirmed cause; one transaction.
-    if payload.decision == "adopt":
-        incident.confirmed_root_cause = payload.cause
+    graph = build_incident_subgraph(
+        checkpointer,
+        attribution_ctx=_attribution_ctx(incident, session, llm, evidence_store),
+    )
+    # Seed the hypotheses that were just generated: the subgraph's
+    # generate_hypotheses node passes a seeded list straight through, so the
+    # model is not asked the same question twice (two calls would also write
+    # two attribution traces for one business action).
+    run = start_incident_run(
+        graph,
+        str(incident.incident_id),
+        seed={
+            "hypotheses": hypotheses,
+            # The list came from a real AttributionSkill run (above), so the
+            # audit marker must say so; the seeded pass-through would
+            # otherwise stamp it "stub" and understate the validation that
+            # actually ran (D2 gate + trace).
+            "hypotheses_source": "attribution",
+            "evidence_validation": "skill",
+        },
+    )
+    session.commit()
+    session.refresh(incident)
+    return {
+        "incident_id": str(incident.incident_id),
+        "status": "awaiting_human" if run["pending"] else "completed",
+        "hypotheses": hypotheses,
+        "hypotheses_source": run["hypotheses_source"],
+        "evidence_validation": run["evidence_validation"],
+        "confirmed_root_cause": incident.confirmed_root_cause,
+        "hint": (
+            None
+            if hypotheses
+            else "归因假设均未通过证据校验（D2），请人工填写根因；确认后调用 /adopt"
+        ),
+    }
+
+
+def _single_shot_attribution(
+    incident: Any, session: Any, llm: Any, evidence_store: Any, *, decision: str, cause: str | None
+) -> dict:
+    """Legacy single-shot: generate + record the decision in one request."""
+    from app.plugins.llm_client import FixtureMissError
+
+    try:
+        hypotheses = _generate_hypotheses_persisted(incident, session, llm, evidence_store)
+    except FixtureMissError:
+        session.rollback()
+        return {
+            "incident_id": str(incident.incident_id),
+            "decision": decision,
+            "hypotheses": [],
+            "confirmed_root_cause": incident.confirmed_root_cause,
+            "hint": "该 incident UUID 在归因 Mock 中无 fixture 键（未知 incident）",
+        }
+
+    _apply_attribution_decision(session, incident, decision, cause, hypotheses)
+    session.commit()
+    session.refresh(incident)
+    return {
+        "incident_id": str(incident.incident_id),
+        "decision": decision,
+        "hypotheses": hypotheses,
+        "confirmed_root_cause": incident.confirmed_root_cause,
+        "hint": None if hypotheses else "归因假设均未通过证据校验（D2），请人工填写根因",
+    }
+
+
+def _apply_attribution_decision(
+    session: Any, incident: Any, decision: str, cause: str | None, hypotheses: list[dict]
+) -> None:
+    """The one place an attribution decision becomes business state.
+
+    Both entry points (single-shot and ``/adopt`` resume) funnel here so the
+    adopt semantics cannot drift between them.
+    """
+    if decision == "adopt":
+        if not (cause or "").strip():
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "adopt_requires_cause", "hint": "采纳假设必须给出根因描述"},
+            )
+        incident.confirmed_root_cause = cause
     _record_trace(
         session,
         incident,
         "incident_attribute",
-        {"decision": payload.decision, "cause": payload.cause},
+        {"decision": decision, "cause": cause},
         {
             "hypotheses": hypotheses,
             "hypotheses_source": "attribution" if hypotheses else "empty",
@@ -694,12 +955,3 @@ def attribute_incident(
         },
         validation_result="pass" if hypotheses else "partial",
     )
-    session.commit()
-    session.refresh(incident)
-    return {
-        "incident_id": str(incident.incident_id),
-        "decision": payload.decision,
-        "hypotheses": hypotheses,
-        "confirmed_root_cause": incident.confirmed_root_cause,
-        "hint": None if hypotheses else "归因假设均未通过证据校验（D2），请人工填写根因",
-    }
