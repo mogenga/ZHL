@@ -85,6 +85,16 @@ class IncidentOut(BaseModel):
     verification_id: uuid.UUID | None
 
 
+#: FR-3.6 / §11.3 规定的人工三选一：采纳、驳回、**修改**。
+#: ``defer``（搁置）不是三选一之一——它只是"暂时不定"，不写任何业务字段，
+#: 保留它是因为"先放一放"是真实需求，但它不计入 FR 的三选一。
+ATTRIBUTION_DECISIONS = ("adopt", "reject", "modify", "defer")
+
+#: 会写入 ``confirmed_root_cause`` 的决策（FR §8.3：确认根因必须来自
+#: 「人工采纳的 AI 假设」或「人工填写」）。
+ROOT_CAUSE_DECISIONS = ("adopt", "modify")
+
+
 class AttributeRequest(BaseModel):
     """AI attribution request (D9 3-way; cross-request since 2026-10-14).
 
@@ -95,15 +105,22 @@ class AttributeRequest(BaseModel):
     decision in one request (kept for compatibility / scripted flows).
     """
 
-    decision: str | None = None  # "adopt" | "reject" | "defer"
+    decision: str | None = None  # ATTRIBUTION_DECISIONS
     cause: str | None = None
+    #: decision == "modify" 时必填：人工修订后的根因文本。
+    modified_cause: str | None = None
+    #: 被采纳/被修改的那条假设在归因结果里的下标（用于命中率统计，FR §11.4）。
+    hypothesis_index: int | None = None
 
 
 class AdoptRequest(BaseModel):
     """Resume a parked attribution run with the reviewer's 3-way decision."""
 
-    decision: str  # "adopt" | "reject" | "defer"
+    decision: str  # ATTRIBUTION_DECISIONS
     cause: str | None = None
+    #: decision == "modify" 时必填：人工修订后的根因文本（原假设由其下标指认）。
+    modified_cause: str | None = None
+    hypothesis_index: int | None = None
 
 
 class IncidentCloseOut(BaseModel):
@@ -703,7 +720,14 @@ def attribute_incident(
             checkpointer=get_incident_checkpointer(request),
         )
     return _single_shot_attribution(
-        incident, session, llm, evidence_store, decision=payload.decision, cause=payload.cause
+        incident,
+        session,
+        llm,
+        evidence_store,
+        decision=payload.decision,
+        cause=payload.cause,
+        modified_cause=payload.modified_cause,
+        hypothesis_index=payload.hypothesis_index,
     )
 
 
@@ -726,10 +750,10 @@ def adopt_attribution(
     from app.plugins.llm_client import FixtureMissError
     from app.workflow.incident_subgraph import build_incident_subgraph, resume_incident_run
 
-    if payload.decision not in ("adopt", "reject", "defer"):
+    if payload.decision not in ATTRIBUTION_DECISIONS:
         raise HTTPException(
             status_code=400,
-            detail={"error": "bad_decision", "allowed": ["adopt", "reject", "defer"]},
+            detail={"error": "bad_decision", "allowed": list(ATTRIBUTION_DECISIONS)},
         )
     incident = session.get(QualityIncident, incident_id)
     if incident is None:
@@ -764,7 +788,13 @@ def adopt_attribution(
         raise HTTPException(status_code=409, detail={"error": "no_parked_attribution"}) from None
 
     _apply_attribution_decision(
-        session, incident, payload.decision, payload.cause, list(hypotheses)
+        session,
+        incident,
+        payload.decision,
+        payload.cause,
+        list(hypotheses),
+        modified_cause=payload.modified_cause,
+        hypothesis_index=payload.hypothesis_index,
     )
     session.commit()
     session.refresh(incident)
@@ -899,7 +929,15 @@ def _start_attribution(
 
 
 def _single_shot_attribution(
-    incident: Any, session: Any, llm: Any, evidence_store: Any, *, decision: str, cause: str | None
+    incident: Any,
+    session: Any,
+    llm: Any,
+    evidence_store: Any,
+    *,
+    decision: str,
+    cause: str | None,
+    modified_cause: str | None = None,
+    hypothesis_index: int | None = None,
 ) -> dict:
     """Legacy single-shot: generate + record the decision in one request."""
     from app.plugins.llm_client import FixtureMissError
@@ -916,7 +954,15 @@ def _single_shot_attribution(
             "hint": "该 incident UUID 在归因 Mock 中无 fixture 键（未知 incident）",
         }
 
-    _apply_attribution_decision(session, incident, decision, cause, hypotheses)
+    _apply_attribution_decision(
+        session,
+        incident,
+        decision,
+        cause,
+        hypotheses,
+        modified_cause=modified_cause,
+        hypothesis_index=hypothesis_index,
+    )
     session.commit()
     session.refresh(incident)
     return {
@@ -929,25 +975,82 @@ def _single_shot_attribution(
 
 
 def _apply_attribution_decision(
-    session: Any, incident: Any, decision: str, cause: str | None, hypotheses: list[dict]
+    session: Any,
+    incident: Any,
+    decision: str,
+    cause: str | None,
+    hypotheses: list[dict],
+    *,
+    modified_cause: str | None = None,
+    hypothesis_index: int | None = None,
 ) -> None:
     """The one place an attribution decision becomes business state.
 
     Both entry points (single-shot and ``/adopt`` resume) funnel here so the
     adopt semantics cannot drift between them.
+
+    FR-3.6 / §11.3 三选一的业务结果（``defer`` 是保留的第四种"先搁置"）：
+
+    - ``adopt``   → ``confirmed_root_cause`` = 被采纳假设的 cause；
+    - ``modify``  → ``confirmed_root_cause`` = **人工修订后**的文本，且 trace
+      同时留原假设与修订版（FR §9.2「AI 给建议，人工担责任」：事后必须能
+      分辨是模型说错了还是人改对了）；
+    - ``reject``  → 不写任何根因字段，异常保持原状态，需人工另填；
+    - ``defer``   → 同 reject 不写业务字段，语义是"稍后再定"。
+
+    审计要点：旧实现把三种情况一律记成 ``decision="adopt"`` + 一个自由文本，
+    库里无法区分「照抄假设」「改过假设」「纯人工填写」——FR §8.3 的
+    「必须来自人工采纳的 AI 假设或人工填写」因此无法证明，§11.4 的
+    Top-1/Top-3 与模型改正率也统计不出来。现在 trace 显式记录
+    ``root_cause_source``（hypothesis / modified_hypothesis / manual）
+    与被选假设的下标。
     """
+    root_cause_source: str | None = None
+    chosen: dict | None = None
+    if hypothesis_index is not None and 0 <= hypothesis_index < len(hypotheses):
+        maybe = hypotheses[hypothesis_index]
+        if isinstance(maybe, dict):
+            chosen = maybe
+
     if decision == "adopt":
-        if not (cause or "").strip():
+        # 采纳 = 照抄被选假设。优先用后端存下来的假设文本，避免前端传参
+        # 被改写导致"采纳"写入了与原假设不同的内容（那就不是采纳了）。
+        adopted = (chosen or {}).get("cause") if chosen else None
+        text = (adopted or cause or "").strip()
+        if not text:
             raise HTTPException(
                 status_code=400,
                 detail={"error": "adopt_requires_cause", "hint": "采纳假设必须给出根因描述"},
             )
-        incident.confirmed_root_cause = cause
+        incident.confirmed_root_cause = text
+        root_cause_source = "hypothesis" if adopted else "manual"
+    elif decision == "modify":
+        text = (modified_cause or "").strip()
+        if not text:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "modify_requires_text",
+                    "hint": "修改假设必须给出修订后的根因文本",
+                },
+            )
+        incident.confirmed_root_cause = text
+        root_cause_source = "modified_hypothesis"
+    else:
+        # reject / defer：不写业务字段（FR §8.3：未被采纳的内容不得成为确认根因）
+        root_cause_source = None
+
     _record_trace(
         session,
         incident,
         "incident_attribute",
-        {"decision": decision, "cause": cause},
+        {
+            "decision": decision,
+            "cause": incident.confirmed_root_cause if decision in ROOT_CAUSE_DECISIONS else cause,
+            "root_cause_source": root_cause_source,
+            "hypothesis_index": hypothesis_index,
+            "hypothesis_cause": (chosen or {}).get("cause") if chosen else None,
+        },
         {
             "hypotheses": hypotheses,
             "hypotheses_source": "attribution" if hypotheses else "empty",

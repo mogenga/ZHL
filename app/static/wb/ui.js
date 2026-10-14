@@ -93,8 +93,10 @@ WB.openModal = function (title, fields, onOk, opts = {}) {
     if (onOk(vals, inputs) === false) return;
     WB.closeModal();
   }, text: opts.submitLabel || '确定' });
-  // extraButtons：三选一等场景的额外动作（如归因的「驳回 / 搁置」）。
-  // 点击后由回调自行决定是否关窗（回调里调用 WB.closeModal()）。
+  // extraButtons：三选一等场景的额外动作（如归因的「修改后采纳 / 驳回」）。
+  // 默认点击后关窗；回调返回 false 表示"别关"——要么校验没过要保留输入，
+  // 要么它已经自己打开了下一个模态框（如「修改后采纳」→ 修改表单），此时
+  // 再 closeModal 会把刚开的那个关掉。
   const foot = WB.h('div', { class: 'foot' },
     WB.h('button', { onclick: () => WB.closeModal(), text: '取消' }),
     okBtn,

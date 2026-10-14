@@ -331,3 +331,160 @@ def test_attribute_start_calls_the_model_exactly_once(api_client: Any) -> None:
     finally:
         MockLLMClient.chat = original
     assert len(calls) == 1, f"expected exactly one model call, got {len(calls)}"
+
+
+# ---------------------------------------------------------------------------
+# FR-3.6 / §11.3 三选一：采纳 / 驳回 / 修改（+ 保留的 defer）
+# ---------------------------------------------------------------------------
+
+
+def _park(client: Any, incident_id: Any) -> list[dict]:
+    """生成假设并停驻，返回假设列表。"""
+    r = client.post(f"/api/incidents/{incident_id}/attribute", json={})
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "awaiting_human"
+    return r.json()["hypotheses"]
+
+
+def test_modify_writes_revised_text_and_keeps_original_in_trace(api_client: Any) -> None:
+    """「修改」是 FR-3.6 的第三个选项：写人工修订版，trace 保留原假设。
+
+    FR §9.2「AI 给建议，人工担责任」——事后必须能分辨是模型说错了还是
+    人改对了，所以原假设与修订版都要留痕。
+    """
+    client, session, _ = api_client
+    _seed(session)
+    hyps = _park(client, _ATTRIBUTION_INCIDENT_ID)
+    original = hyps[0]["cause"]
+
+    resp = client.post(
+        f"/api/incidents/{_ATTRIBUTION_INCIDENT_ID}/adopt",
+        json={"decision": "modify", "modified_cause": "现场确认是焊接虚焊", "hypothesis_index": 0},
+    )
+    assert resp.status_code == 200, resp.text
+    incident = session.get(QualityIncident, _ATTRIBUTION_INCIDENT_ID)
+    assert incident.confirmed_root_cause == "现场确认是焊接虚焊"
+    assert incident.confirmed_root_cause != original, "修改必须写入修订版而非原假设"
+
+    from app.infra.models import AgentTaskTrace
+
+    trace = (
+        session.query(AgentTaskTrace)
+        .filter(AgentTaskTrace.skill_name == "incident_attribute")
+        .order_by(AgentTaskTrace.started_at.desc())
+        .first()
+    )
+    summary = trace.params_summary
+    assert summary["decision"] == "modify"
+    assert summary["root_cause_source"] == "modified_hypothesis"
+    assert summary["hypothesis_cause"] == original, "原假设必须留在轨迹里（可复盘模型错在哪）"
+    assert summary["hypothesis_index"] == 0
+
+
+def test_modify_requires_text(api_client: Any) -> None:
+    client, session, _ = api_client
+    _seed(session)
+    _park(client, _ATTRIBUTION_INCIDENT_ID)
+    resp = client.post(
+        f"/api/incidents/{_ATTRIBUTION_INCIDENT_ID}/adopt",
+        json={"decision": "modify"},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["detail"]["error"] == "modify_requires_text"
+
+
+def test_adopt_uses_stored_hypothesis_not_client_text(api_client: Any) -> None:
+    """采纳 = 照抄后端存下来的假设。
+
+    前端传的 cause 改不动它——否则"采纳"与"人工填写"在数据上无法区分，
+    FR §8.3「确认根因必须来自人工采纳的假设或人工填写」就证明不了。
+    """
+    client, session, _ = api_client
+    _seed(session)
+    hyps = _park(client, _ATTRIBUTION_INCIDENT_ID)
+
+    resp = client.post(
+        f"/api/incidents/{_ATTRIBUTION_INCIDENT_ID}/adopt",
+        json={"decision": "adopt", "cause": "前端瞎传的文本", "hypothesis_index": 1},
+    )
+    assert resp.status_code == 200, resp.text
+    incident = session.get(QualityIncident, _ATTRIBUTION_INCIDENT_ID)
+    assert incident.confirmed_root_cause == hyps[1]["cause"], "采纳必须落库被选假设的原文"
+
+    from app.infra.models import AgentTaskTrace
+
+    trace = (
+        session.query(AgentTaskTrace)
+        .filter(AgentTaskTrace.skill_name == "incident_attribute")
+        .order_by(AgentTaskTrace.started_at.desc())
+        .first()
+    )
+    assert trace.params_summary["root_cause_source"] == "hypothesis"
+    assert trace.params_summary["hypothesis_index"] == 1
+
+
+def test_manual_adopt_marks_source_manual(api_client: Any) -> None:
+    """无假设/不认假设时的人工填写走 adopt+cause，trace 记 manual 以区分。"""
+    client, session, _ = api_client
+    _seed(session)
+    resp = client.post(
+        f"/api/incidents/{_ATTRIBUTION_INCIDENT_ID}/attribute",
+        json={"decision": "adopt", "cause": "纯人工判断：来料批次异常"},
+    )
+    assert resp.status_code == 200, resp.text
+    incident = session.get(QualityIncident, _ATTRIBUTION_INCIDENT_ID)
+    assert incident.confirmed_root_cause == "纯人工判断：来料批次异常"
+
+    from app.infra.models import AgentTaskTrace
+
+    trace = (
+        session.query(AgentTaskTrace)
+        .filter(AgentTaskTrace.skill_name == "incident_attribute")
+        .order_by(AgentTaskTrace.started_at.desc())
+        .first()
+    )
+    assert trace.params_summary["root_cause_source"] == "manual", "人工填写与采纳必须可区分"
+
+
+def test_reject_and_defer_write_no_root_cause(api_client: Any) -> None:
+    """驳回/搁置都不写业务字段（FR §8.3：未被采纳的不得成为确认根因）。
+
+    两种决策分别在两只异常上验证（同一 fixture 只能播一次种）。
+    """
+    client, session, _ = api_client
+    _seed(session)
+    for decision, incident_id in (
+        ("reject", _ATTRIBUTION_INCIDENT_ID),
+        ("defer", _UNKNOWN_INCIDENT_ID),
+    ):
+        _park(client, incident_id)
+        resp = client.post(
+            f"/api/incidents/{incident_id}/adopt",
+            json={"decision": decision},
+        )
+        assert resp.status_code == 200, (decision, resp.text)
+        incident = session.get(QualityIncident, incident_id)
+        assert incident.confirmed_root_cause is None, decision
+
+
+def test_defer_is_not_part_of_the_three_way_choice(api_client: Any) -> None:
+    """defer 保留但不再是 FR 三选一之一；三选一集合显式可查。"""
+    from app.api.incidents import ATTRIBUTION_DECISIONS, ROOT_CAUSE_DECISIONS
+
+    assert set(ROOT_CAUSE_DECISIONS) == {"adopt", "modify"}
+    assert "modify" in ATTRIBUTION_DECISIONS
+    assert "defer" in ATTRIBUTION_DECISIONS, "搁置作为第四个轻量动作保留"
+
+
+def test_unknown_decision_lists_allowed_set(api_client: Any) -> None:
+    client, session, _ = api_client
+    _seed(session)
+    _park(client, _ATTRIBUTION_INCIDENT_ID)
+    resp = client.post(
+        f"/api/incidents/{_ATTRIBUTION_INCIDENT_ID}/adopt",
+        json={"decision": "approve"},
+    )
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert detail["error"] == "bad_decision"
+    assert "modify" in detail["allowed"]

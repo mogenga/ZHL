@@ -411,6 +411,8 @@ WB._gotoReportInMain = function (r) {
 /* spec §5 术语对照表 */
 WB.TRIG_CN = { rule_fail: '规则失败', sample_fail: '抽样失败', appearance_manual: '外观人工触发', data_consistency: '数据一致性', rule_missing: '规则缺失' };
 WB.SEV_CN = { critical: '严重', major: '较严重', minor: '轻微' };
+/* FR-3.6 / §11.3 人工三选一（+ 保留的「搁置」）中文标签 */
+WB.DECISION_CN = { adopt: '采纳', reject: '驳回', modify: '修改', defer: '搁置' };
 WB.REP_CN = WB.REP_CN || { release: '放行报告', incident: '异常处置报告', summary: '批次汇总' };
 WB._onSearch = function (e) {
   WB.state._search = e.target.value;

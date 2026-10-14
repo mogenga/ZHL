@@ -244,9 +244,15 @@ WB.api = {
       return { ok: true, data: r.data };
     });
   },
-  /* 归因人工采纳（跨请求 HITL）：生成假设后由人另一次请求提交三选一 */
-  adoptAttribution(id, decision, cause) {
-    return WB.api.request('POST', '/api/incidents/' + id + '/adopt', { decision: decision, cause: cause }, { timeoutMs: 30000 }).then(function (r) {
+  /* 归因人工采纳（跨请求 HITL）：生成假设后由人另一次请求提交三选一。
+     opts {modifiedCause, hypothesisIndex} 供「修改」与命中率统计（FR §11.4）。 */
+  adoptAttribution(id, decision, cause, opts) {
+    var body = { decision: decision, cause: cause };
+    if (opts) {
+      if (opts.modifiedCause != null) body.modified_cause = opts.modifiedCause;
+      if (opts.hypothesisIndex != null) body.hypothesis_index = opts.hypothesisIndex;
+    }
+    return WB.api.request('POST', '/api/incidents/' + id + '/adopt', body, { timeoutMs: 30000 }).then(function (r) {
       if (!r.ok) return { ok: false, error: r.error, data: null };
       return { ok: true, data: r.data };
     });
