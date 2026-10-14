@@ -149,6 +149,33 @@ td.num,th.num{font-family:var(--mono)}
 .md p{margin:6px 0}.md ul,.md ol{margin:6px 0 6px 18px}
 .md table{margin:8px 0}.md code{font-family:var(--mono);font-size:12px;background:var(--bg);padding:1px 5px;border-radius:4px}
 
+/* 报告正文（工作台主区 / 抽屉通用）：.report-md 排版 + PASS/FAIL 徒标 + 代码块 + 表格 */
+.report-md{font-size:13px;line-height:1.65;color:var(--ink,#1f2937)}
+.report-md h1{font-size:18px;margin:4px 0 10px;padding-bottom:8px;border-bottom:2px solid var(--accent,#2563eb)}
+.report-md h2{font-size:15px;margin:16px 0 8px;padding-left:8px;border-left:3px solid var(--accent,#2563eb)}
+.report-md h3{font-size:14px;margin:12px 0 6px}
+.report-md h4,.report-md h5,.report-md h6{font-size:13px;margin:10px 0 4px}
+.report-md p{margin:6px 0}
+.report-md ul,.report-md ol{margin:6px 0 6px 20px;padding:0}
+.report-md li{margin:3px 0}
+.report-md li.li-pass::before{content:'✓ ';color:#16a34a;font-weight:700}
+.report-md li.li-fail{color:#dc2626;font-weight:600}
+.report-md li.li-fail::before{content:'✗ ';font-weight:700}
+.report-md blockquote{margin:8px 0;padding:6px 12px;border-left:3px solid var(--line,#ddd);background:var(--bg,#f6f8fa);color:var(--ink2,#555);font-size:12.5px}
+.report-md hr{border:none;border-top:1px solid var(--line,#ddd);margin:14px 0}
+.report-md code{font-family:var(--mono);font-size:12px;background:var(--bg,#f6f8fa);padding:1px 5px;border-radius:4px}
+.report-md pre.md-code{background:#0f172a;color:#e2e8f0;padding:10px 12px;border-radius:8px;overflow:auto;font-size:12px;line-height:1.5}
+.report-md pre.md-code code{background:none;color:inherit;padding:0}
+.report-md strong{font-weight:700}
+.report-md table.md-table{width:100%;border-collapse:collapse;margin:10px 0;font-size:12.5px}
+.report-md .md-table th,.report-md .md-table td{border:1px solid var(--line,#e5e7eb);padding:6px 10px;text-align:left}
+.report-md .md-table th{background:var(--bg,#f6f8fa);font-weight:600}
+.report-md .md-table tr:nth-child(even) td{background:rgba(0,0,0,.02)}
+/* 关键数据表（jsonBlock）：长值换行不挤压 */
+.report-json .md-table td.json-cell{word-break:break-all;white-space:pre-wrap;font-family:var(--mono);font-size:12px}
+.report-body{min-width:0}
+.report-detail-host .report-md h1{font-size:16px;margin-top:0}
+
 /* footer */
 .footer{display:flex;gap:12px;align-items:center;padding:10px 20px;background:#fff;border-top:1px solid var(--line)}
 @media(max-width:1100px){.body{grid-template-columns:240px 1fr}.right{display:none}}

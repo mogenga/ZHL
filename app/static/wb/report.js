@@ -4,46 +4,120 @@
 'use strict';
 
 WB.report = (function () {
-  // 轻量 Markdown→DOM（标题/列表/粗体/代码/表格）；不引外部库
+  /* ---- 轻量 Markdown→DOM（标题/列表/粗体/斜体/行内代码/围栏代码/表格/
+     PASS·FAIL 徽标），不引外部库。行内样式先转义再替换，安全。 ---- */
+  function _esc(t) { return String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+  // 行内：粗体/斜体/行内代码；返回 innerHTML 字符串（输入已转义）
+  function _inlineHtml(text) {
+    let out = _esc(text);
+    out = out.replace(/`([^`]+)`/g, function (_, c) { return '<code>' + c + '</code>'; });
+    out = out.replace(/\*\*([^*]+)\*\*/g, function (_, b) { return '<strong>' + b + '</strong>'; });
+    out = out.replace(/(^|[^*])\*([^*]+)\*(?!\*)/g, function (_, pre, it) { return pre + '<em>' + it + '</em>'; });
+    return out;
+  }
+  // 列表项里的 [PASS] / [FAIL] 徽标着色
+  function _liBadge(el) {
+    const t = el.textContent || '';
+    if (/^\[PASS\]/.test(t)) { el.classList.add('li-pass'); el.textContent = t.slice(6); }
+    else if (/^\[FAIL\]/.test(t)) { el.classList.add('li-fail'); el.textContent = t.slice(6); }
+  }
   function mdToDom(md) {
     const wrap = WB.h('div', { class: 'report-md' });
     if (!md) { wrap.append(WB.h('div', { class: 'empty', text: '暂无报告正文' })); return wrap; }
-    const lines = md.split(/\r?\n/);
+    const lines = String(md).split(/\r?\n/);
     let i = 0;
     while (i < lines.length) {
       const ln = lines[i];
+      // 围栏代码块
+      if (/^\s*```/.test(ln)) {
+        const buf = [];
+        i++;
+        while (i < lines.length && !/^\s*```/.test(lines[i])) { buf.push(lines[i]); i++; }
+        if (i < lines.length) i++;
+        wrap.append(WB.h('pre', { class: 'md-code' }, WB.h('code', { text: buf.join('\n') })));
+        continue;
+      }
+      // 表格（GFM：表头 + |---| 分隔行）
+      if (/^\s*\|/.test(ln) && i + 1 < lines.length && /^\s*\|?[\s|:-]+\|\s*$/.test(lines[i + 1]) && /-/.test(lines[i + 1])) {
+        const headCells = ln.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(function (c) { return c.trim(); });
+        i += 2;
+        const rows = [];
+        while (i < lines.length && /^\s*\|/.test(lines[i])) {
+          rows.push(lines[i].trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(function (c) { return c.trim(); }));
+          i++;
+        }
+        const tbl = WB.h('table', { class: 'md-table' });
+        tbl.append(WB.h('tr', {}, headCells.map(function (h) { return WB.h('th', { innerHTML: _inlineHtml(h) }); })));
+        rows.forEach(function (r) {
+          tbl.append(WB.h('tr', {}, r.map(function (c) { return WB.h('td', { innerHTML: _inlineHtml(c) }); })));
+        });
+        wrap.append(tbl);
+        continue;
+      }
       if (/^#{1,6}\s/.test(ln)) {
         const lvl = Math.min(ln.match(/^#+/)[0].length, 4);
-        wrap.append(WB.h('h' + lvl, { text: ln.replace(/^#+\s*/, '') }));
+        wrap.append(WB.h('h' + lvl, { innerHTML: _inlineHtml(ln.replace(/^#+\s*/, '')) }));
         i++; continue;
+      }
+      // 引用
+      if (/^\s*>/.test(ln)) {
+        const buf = [];
+        while (i < lines.length && /^\s*>/.test(lines[i])) { buf.push(lines[i].replace(/^\s*>\s?/, '')); i++; }
+        wrap.append(WB.h('blockquote', { innerHTML: buf.map(_inlineHtml).join('<br>') }));
+        continue;
       }
       if (/^\s*[-*]\s/.test(ln)) {
         const ul = WB.h('ul', {});
         while (i < lines.length && /^\s*[-*]\s/.test(lines[i])) {
-          ul.append(WB.h('li', { text: lines[i].replace(/^\s*[-*]\s*/, '') }));
+          const item = WB.h('li', { innerHTML: _inlineHtml(lines[i].replace(/^\s*[-*]\s*/, '')) });
+          _liBadge(item);
+          ul.append(item);
           i++;
         }
         wrap.append(ul); continue;
       }
+      if (/^\s*\d+\.\s/.test(ln)) {
+        const ol = WB.h('ol', {});
+        while (i < lines.length && /^\s*\d+\.\s/.test(lines[i])) {
+          const item = WB.h('li', { innerHTML: _inlineHtml(lines[i].replace(/^\s*\d+\.\s*/, '')) });
+          _liBadge(item);
+          ol.append(item);
+          i++;
+        }
+        wrap.append(ol); continue;
+      }
+      // 水平线
+      if (/^\s*(---+|\*\*\*+)\s*$/.test(ln)) {
+        wrap.append(WB.h('hr'));
+        i++; continue;
+      }
       if (/^\s*$/.test(ln)) { i++; continue; }
-      wrap.append(WB.h('p', { text: ln }));
+      wrap.append(WB.h('p', { innerHTML: _inlineHtml(ln) }));
       i++;
     }
     return wrap;
   }
 
-  // 关键数据块（content_json 里若有 checks/summary 等）
+  // 关键数据块（content_json 里若有 checks/summary 等；嵌套结构美化，长值换行）
+  function _fmtJsonVal(v) {
+    if (v === null || v === undefined) return '—';
+    if (typeof v === 'object') {
+      // 数组/对象：紧凑 JSON（对象/数组保持单行，超长换行由 CSS 处理）
+      try { return JSON.stringify(v); } catch (e) { return String(v); }
+    }
+    return String(v);
+  }
   function jsonBlock(contentJson) {
     if (!contentJson || !Object.keys(contentJson).length) return null;
-    const box = WB.h('div', { class: 'report-json', style: 'margin-top:12px' });
+    const box = WB.h('div', { class: 'report-json' });
     box.append(WB.h('div', { class: 'hint-line', style: 'font-weight:600', text: '关键数据' }));
-    const tbl = WB.h('table', {});
-    const head = WB.h('tr', {}, WB.h('th', { text: '项' }), WB.h('th', { text: '值' }));
-    tbl.append(head);
+    const tbl = WB.h('table', { class: 'md-table' });
+    tbl.append(WB.h('tr', {}, WB.h('th', { text: '项' }), WB.h('th', { text: '值' })));
     Object.keys(contentJson).forEach((k) => {
       const v = contentJson[k];
-      const vs = (v === null || v === undefined) ? '—' : (typeof v === 'object' ? JSON.stringify(v) : String(v));
-      tbl.append(WB.h('tr', {}, WB.h('td', { text: k }), WB.h('td', { class: 'num', text: vs })));
+      const isObj = v !== null && typeof v === 'object';
+      const td = WB.h('td', { class: isObj ? 'json-cell' : 'num', text: _fmtJsonVal(v) });
+      tbl.append(WB.h('tr', {}, WB.h('td', { text: k }), td));
     });
     box.append(tbl);
     return box;
