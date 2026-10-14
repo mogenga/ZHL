@@ -33,6 +33,7 @@ WB.errText = function (error) {
     'cannot_disabled': '已停用为终态，不可再停用',
     rule_version_not_found: '规则版本不存在或已被删除',
     cross_batch_sn_conflict: '组件条码已存在于其他批次',
+    sn_already_intaked: '该组件条码已在本批次送检，请勿重复提交',
     capa_verified_requires_pass_reinspection: '需先有通过的复检记录才能勾选已验证',
     close_conditions_unmet: '关闭条件未满足，请补齐缺失项',
     incident_not_closeable: '该异常当前状态不可关闭',

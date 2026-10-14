@@ -83,3 +83,36 @@ def test_intake_partial_inspection_row_returns_400() -> None:
     )
     assert ok.status_code == 200, ok.text
     assert ok.json()["status"] == "confirmed"
+
+
+def test_intake_duplicate_sn_same_batch_returns_400() -> None:
+    """A1: re-submitting an SN already intaked into the SAME batch must be a
+    structured 400 (reason=sn_already_intaked, duplicate_sns named), NOT an
+    IntegrityError -> 500 from the DDL unique constraint (batch_id, sn)."""
+    from tests.api.test_batches import _r_for, _shared_engine
+
+    engine = _shared_engine()
+    Base.metadata.create_all(engine)
+    s = sessionmaker(bind=engine)
+    client = _make_client(0.9, "SN-I-CONF", ["SN-DUP-001"], s, s, _ISO_TABLE)
+    from tests.api.test_batches import _post_batch
+
+    batch = _post_batch(client, planned_quantity=2)
+    row = _r_for("SN-DUP-001")  # dedicated prefix: no cross-case engine collision
+
+    # First submission lands the SN.
+    first = client.post(
+        "/api/intake",
+        json={"batch_id": batch["batch_id"], "inspections": [row]},
+    )
+    assert first.status_code == 200, first.text
+
+    # Re-submitting the same SN on the same batch -> structured 400.
+    r = client.post(
+        "/api/intake",
+        json={"batch_id": batch["batch_id"], "inspections": [row]},
+    )
+    assert r.status_code == 400, r.text
+    detail = r.json()["detail"]
+    assert detail["reason"] == "sn_already_intaked"
+    assert "SN-DUP-001" in detail["duplicate_sns"]

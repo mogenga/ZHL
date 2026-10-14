@@ -51,7 +51,12 @@ WB.stages.intake = (function () {
         inspections: inspections,
         fields: fieldsOverride || null,
       }).then(function (res) {
-        if (!res.ok) { WB.toast(WB.errText(res.error)); return; }
+        if (!res.ok) {
+          WB.toast(WB.errText(res.error));
+          // 失败也刷新，避免界面停在旧状态（如批次已推进/已有行）被重复提交
+          WB._loadDetail(batch.batch_id);
+          return;
+        }
         showIntakeResult(batch, res.data);
       });
     }, { submitLabel: '提交送检' });

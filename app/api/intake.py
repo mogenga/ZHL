@@ -150,6 +150,18 @@ def build_router(get_deps: object) -> APIRouter:
         for row in rows:
             if isinstance(row.get("captured_at"), str):
                 row["captured_at"] = _parse_iso_utc(row["captured_at"])
+        # B3 / D5: 同批重复 SN 前置防护。DDL 唯一约束 (batch_id, sn) 会在
+        # create_inspections 的 flush 阶段抛 IntegrityError -> 500，且无任何
+        # 结构化 detail（前端只能显示“服务端内部错误”）。在此把同批已存在 SN
+        # 提前拦下，返回 400 并指名重复项（A1 整批拒绝，不插入任何行），
+        # 与同路由的 cross_batch_sn_conflict / incomplete_inspection 风格一致。
+        existing_sns = set(d.inspect_repo.get_batch_sns(s, batch.batch_id))
+        duplicates = sorted({row["sn"] for row in rows if row["sn"] in existing_sns})
+        if duplicates:
+            raise HTTPException(
+                status_code=400,
+                detail={"reason": "sn_already_intaked", "duplicate_sns": duplicates},
+            )
         initial = {"batch_id": body.batch_id, "inspections": rows}
         try:
             for _chunk in graph.stream(initial, config=cfg):
