@@ -652,3 +652,10 @@
 2. **测试结果**：全量 269 passed / 0 failed；新增断言：judge-fail 后失败 SN intake_status=isolated；close 后恢复 confirmed 且放行断言④真实 passed=True。
 3. **dev-notes 路径**：本文件（本节）。
 4. **实现说明**：mark_sns_isolated/restore_sns_after_close（auto_incident.py）；intake_status 枚举新增 isolated（migrations/002 需在既有库补跑）；judge A4 守卫放行 isolated 行（Ruling：隔离是下游检疫态，重判可用——验收样例二钉住）。工作树：.worktrees/fix-deferred-p0（分支 fix/deferred-p0）。
+
+## 2026-10-14 · 遗留事项修复 T2（守卫加固：M-7 行锁 / M-8 归档守卫）
+
+1. **功能演示命令**：`D:\jsai\ZHL\.venv\Scripts\python.exe -m pytest tests`（271 passed）。
+2. **测试结果**：全量 271 passed；test_reinspection_fail_then_close_is_rejected 顺序钉住 M-7 语义，test_capa_blocked_after_batch_archived RED→GREEN。
+3. **dev-notes 路径**：本文件（本节）。
+4. **实现说明**：close 与 reinspections fail 两处 incident 读取加 with_for_update（行锁互斥）；capa 待复检分支挂归档守卫。并发场景为推演（sqlite 单连接不可并发复现），PG 下由行锁保证。
