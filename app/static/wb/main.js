@@ -292,13 +292,18 @@ WB.renderLeft = function () {
       pane.append(WB.h('div', { class: 'empty', text: rv.reason === 'network' ? '规则版本加载失败（网络异常）' : '规则版本数据暂不可用（请先初始化规则库）' }));
       return;
     }
-    pane.append(WB.h('div', { class: 'group-title', text: '规则版本' }));
-    (rv.items || []).forEach((r) => pane.append(WB.h('button', { class: 'batch-item', onclick: () => WB._ruleDrawer(r) },
-      WB.h('div', { class: 'no' },
-        WB.h('span', { text: r.name + ' v' + r.version_no }),
-        WB.h('span', { class: 'chip st-' + (r.status === 'published' ? 'released' : 'draft'), text: WB.RULE_ST_CN[r.status] || r.status })),
-      WB.h('div', { class: 'meta', text: r.project_id + ' · ' + r.model + ' · 生效 ' + WB.fmtTime(r.effective_at) }))));
+    pane.append(WB.h('div', { class: 'group-title' },
+      WB.h('span', { text: '规则版本' }),
+      WB.h('button', { class: 'newbtn', style: 'float:right;font-size:12px;padding:2px 8px;margin-left:8px', onclick: WB._onNewRuleVersion, text: '＋ 新建' })));
+    (rv.items || []).forEach((r) => pane.append(WB.h('div', { class: 'rule-card' },
+      WB.h('button', { class: 'batch-item', style: 'width:100%;text-align:left;margin:0', onclick: () => WB._ruleDrawer(r) },
+        WB.h('div', { class: 'no' },
+          WB.h('span', { text: r.name + ' v' + r.version_no }),
+          WB.h('span', { class: 'chip st-' + (r.status === 'published' ? 'released' : 'draft'), text: WB.RULE_ST_CN[r.status] || r.status })),
+        WB.h('div', { class: 'meta', text: r.project_id + ' · ' + r.model + ' · 生效 ' + WB.fmtTime(r.effective_at) })),
+      WB._ruleActions(r))));
     if (!(rv.items || []).length) pane.append(WB.h('div', { class: 'empty', text: '暂无规则版本' }));
+
   } else if (WB.state.view === 'incidents') {
     pane.append(WB.h('div', { class: 'group-title', text: '异常列表' }));
     (WB.state.incidents || []).forEach((i) => pane.append(WB.h('button', { class: 'batch-item', onclick: () => WB._locateBatch(i) },
@@ -329,6 +334,105 @@ WB._ruleDrawer = function (r) {
   WB.openDrawer(r.name + ' v' + r.version_no,
     '项目 ' + r.project_id + ' · 型号 ' + r.model + '\n状态 ' + (WB.RULE_ST_CN[r.status] || r.status) + ' · 版本号 ' + r.version_no + ' · 生效 ' + WB.fmtTime(r.effective_at));
 };
+
+WB._onNewRuleVersion = function () {
+  WB.newRuleForm();
+};
+WB.newRuleForm = function () {
+  // 预填：尽量复用最近一条规则的项目/型号，降低输入成本；版本自动建议（已存在则 +1）
+  const rv = WB.state.ruleVersions || { items: [] };
+  const last = (rv.items || [])[0] || null;
+  const nextVer = (() => {
+    const items = (rv.items || []).filter((r) => (!last || (r.project_id === last.project_id && r.model === last.model)));
+    const maxV = items.reduce((m, r) => Math.max(m, r.version_no || 0), 0);
+    return maxV + 1;
+  })();
+  const today = new Date().toISOString().slice(0, 10);
+  WB.openModal('新建规则版本（草稿）', [
+    { label: '项目', type: 'text', value: last ? last.project_id : '', placeholder: '项目标识', required: true },
+    { label: '型号', type: 'text', value: last ? last.model : '', placeholder: '如 JH-550W', required: true },
+    { label: '名称', type: 'text', value: last ? last.name : '', placeholder: '如 JH-550W 检验规则', required: true },
+    { label: '铭牌功率 (W)', type: 'text', value: '550', placeholder: '≥1', required: true },
+    { label: '功率容差', type: 'text', value: '0.03', placeholder: '如 0.03', required: true },
+    { label: '版本号', type: 'text', value: String(nextVer), placeholder: '≥1', required: true, min: 1 },
+    { label: '生效时间', type: 'datetime-local', value: new Date().toISOString().slice(0, 16) },
+  ], function (vals, inputs) {
+    const project_id = (vals[0] || '').trim();
+    const model = (vals[1] || '').trim();
+    const name = (vals[2] || '').trim();
+    const nameplate_power = parseFloat((vals[3] || '').trim());
+    const power_tolerance = parseFloat((vals[4] || '').trim());
+    const version_no = parseInt((vals[5] || '').trim(), 10);
+    const effRaw = (vals[6] || '').trim();
+    if (!project_id || !model || !name || !version_no || Number.isNaN(nameplate_power) || Number.isNaN(power_tolerance)) {
+      WB.toast('请填写全部必填项（功率/容差须为数字，版本号 ≥1）');
+      return;
+    }
+    const effective_at = effRaw ? new Date(effRaw).toISOString() : new Date().toISOString();
+    WB.api.createRuleVersion({
+      project_id: project_id, model: model, name: name,
+      nameplate_power: nameplate_power, power_tolerance: power_tolerance,
+      parameter_standards: {}, current_bands: {}, sample_plan: {},
+      effective_at: effective_at, version_no: version_no,
+      source: 'manual', recommendation_ref: null,
+    }).then(function (res) {
+      if (!res.ok) { WB.toast(WB.errText(res.error)); return; }
+      const dup = res.data && res.data.duplicate;
+      WB.toast(dup ? '规则版本已存在（同 项目+型号+版本号），返回既存记录' : '草稿已创建，请发布后生效');
+      WB.loadRuleVersions().then(function () { if (WB.state.view === 'rules') WB.renderLeft(); });
+    });
+  }, { submitLabel: '创建草稿' });
+};
+
+/* 单条规则卡片下的操作按钮：发布（draft→published）/ 停用（published→disabled）/ 审计 */
+WB._ruleActions = function (r) {
+  const row = WB.h('div', { class: 'rule-actions' });
+  if (r.status === 'draft') {
+    row.append(WB.h('button', { class: 'mini-btn', onclick: function () { WB._changeRuleStatus(r, 'publish'); }, text: '发布' }));
+  } else if (r.status === 'published') {
+    row.append(WB.h('button', { class: 'mini-btn warn', onclick: function () { WB._changeRuleStatus(r, 'disable'); }, text: '停用' }));
+  }
+  // 停用为终态，无操作
+  row.append(WB.h('button', { class: 'mini-btn ghost', onclick: function () { WB._ruleEventsDrawer(r); }, text: '审计' }));
+  return row;
+};
+
+WB._changeRuleStatus = function (r, action) {
+  const op = prompt('操作人（operator）：', 'manual');
+  if (op == null) return; // 用户取消
+  const reason = action === 'disable' ? prompt('停用原因（可选）：', '') : null;
+  if (action === 'disable' && reason === null) return; // 取消
+  const body = { operator: op.trim() || 'manual', source: 'manual', reason: (reason != null && reason !== '') ? reason : null };
+  const call = action === 'publish' ? WB.api.publishRuleVersion(r.rule_version_id, body) : WB.api.disableRuleVersion(r.rule_version_id, body);
+  call.then(function (res) {
+    if (!res.ok) { WB.toast(WB.errText(res.error)); return; }
+    WB.toast(action === 'publish' ? '规则版本已发布' : '规则版本已停用');
+    WB.loadRuleVersions().then(function () { if (WB.state.view === 'rules') WB.renderLeft(); });
+    // 批次新建下拉依赖 published 列表，刷新一次
+    WB.loadRuleVersions();
+  });
+};
+
+WB._ruleEventsDrawer = function (r) {
+  WB.openDrawer(r.name + ' v' + r.version_no + ' · 审计事件', WB.h('div', { class: 'empty', text: '加载中…' }));
+  WB.api.listRuleVersionEvents(r.rule_version_id).then(function (res) {
+    const bd = WB.el('drawerBody');
+    bd.replaceChildren();
+    if (!res.ok) { bd.append(WB.h('div', { class: 'empty', text: WB.errText(res.error) })); return; }
+    const evs = res.data || [];
+    if (!evs.length) { bd.append(WB.h('div', { class: 'empty', text: '暂无审计事件' })); return; }
+    const ACTION_CN = { created: '创建', published: '发布', disabled: '停用' };
+    evs.forEach(function (e) {
+      bd.append(WB.h('div', { class: 'ev-item' },
+        WB.h('div', { class: 'ev-head' },
+          WB.h('span', { class: 'chip st-' + (e.action === 'published' ? 'released' : 'draft'), text: ACTION_CN[e.action] || e.action }),
+          WB.h('span', { class: 'ev-op', text: '操作人 ' + (e.operator || '—') + ' · ' + WB.fmtTime(e.created_at) })),
+        (e.detail && e.detail.reason) ? WB.h('div', { class: 'ev-reason', text: '原因：' + e.detail.reason }) : null,
+        WB.h('div', { class: 'ev-detail', text: 'v' + (e.detail && e.detail.version_no != null ? e.detail.version_no : '—') + ' · 来源 ' + ((e.detail && e.detail.source) || 'manual') })));
+    });
+  });
+};
+
 WB._locateBatch = function (i) {
   WB.switchView('batch');
   if (i.batch_id) WB.selectBatch(i.batch_id);

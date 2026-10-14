@@ -27,6 +27,11 @@ WB.errText = function (error) {
     inspection_not_found: '请重新选择组件',
     unconfirmed_sns: '请先完成入场确认',
     'rule not effective yet': '规则版本尚未生效，无法判定',
+    'rule version not published': '所选规则版本未发布（草稿/已停用），无法创建批次',
+    'cannot_draft': '当前状态不可发布',
+    'cannot_published': '已停用为终态，不可再发布',
+    'cannot_disabled': '已停用为终态，不可再停用',
+    rule_version_not_found: '规则版本不存在或已被删除',
     cross_batch_sn_conflict: '组件条码已存在于其他批次',
     capa_verified_requires_pass_reinspection: '需先有通过的复检记录才能勾选已验证',
     close_conditions_unmet: '关闭条件未满足，请补齐缺失项',
@@ -134,6 +139,32 @@ WB.api = {
     return WB.api.request('GET', '/api/quality-rule-versions').then(function (r) {
       if (!r.ok) return { ok: false, error: r.error, data: null };
       return { ok: true, data: r.data || { items: [], available: false, reason: null } };
+    });
+  },
+
+  /* 规则版本管理面（spec 2026-10-14-rule-version-management）：创建/发布/停用/审计事件 */
+  createRuleVersion(body) {
+    return WB.api.request('POST', '/api/quality-rule-versions', body).then(function (r) {
+      if (!r.ok) return { ok: false, error: r.error, data: null };
+      return { ok: true, data: r.data };
+    });
+  },
+  publishRuleVersion(id, body) {
+    return WB.api.request('POST', '/api/quality-rule-versions/' + id + '/publish', body || { operator: 'manual' }).then(function (r) {
+      if (!r.ok) return { ok: false, error: r.error, data: null };
+      return { ok: true, data: r.data };
+    });
+  },
+  disableRuleVersion(id, body) {
+    return WB.api.request('POST', '/api/quality-rule-versions/' + id + '/disable', body || { operator: 'manual' }).then(function (r) {
+      if (!r.ok) return { ok: false, error: r.error, data: null };
+      return { ok: true, data: r.data };
+    });
+  },
+  listRuleVersionEvents(id) {
+    return WB.api.request('GET', '/api/quality-rule-versions/' + id + '/events').then(function (r) {
+      if (!r.ok) return { ok: false, error: r.error, data: null };
+      return { ok: true, data: r.data || [] };
     });
   },
 
