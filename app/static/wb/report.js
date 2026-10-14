@@ -62,8 +62,9 @@ WB.report = (function () {
 
     WB.openDrawer(title, body);
 
-    // 已有完整内容（来自 list 的 content_md）直接渲染；否则按需拉取
-    if (r.content_md) {
+    // 已有完整内容（来自 list 的 content_md / 拉取的 GET 结果）直接渲染；
+    // 其他情况（单元仅 batch_id+report_id）按需拉取完整报告后再渲染
+    if (r.content_md || r.content_json) {
       _fill(content, r);
     } else {
       WB.api.getReport(r.batch_id, r.report_id).then(function (res) {

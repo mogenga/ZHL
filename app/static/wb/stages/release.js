@@ -140,10 +140,19 @@ WB.stages.release = (function () {
       body.append(box);
     });
   }
+  // 复用左栏报告视图的统一抽屉渲染（WB.report），避免各自维护一份
   function _viewReport(batch, r) {
+    if (WB.report && WB.report.open) {
+      // listReports 已带 content_md/content_json，影响只是把它适配成 WB.report.open 期望的
+      // 报告输出形（金 key 对齐 ReportOut）
+      WB.report.open(r);
+      return;
+    }
     WB.api.getReport(batch.batch_id, r.report_id).then(function (res) {
       if (!res.ok) { WB.toast(WB.errText(res.error)); return; }
-      WB.openDrawer((WB.RPT_CN[r.report_type] || r.report_type) + ' v' + r.version, WB.h('pre', { text: res.data.content_md || JSON.stringify(res.data.content_json || {}, null, 2), style: 'white-space:pre-wrap;font-size:13px' }));
+      WB.openDrawer((WB.RPT_CN[res.data.report_type] || res.data.report_type) + ' v' + res.data.version,
+        WB.h('pre', { text: res.data.content_md || JSON.stringify(res.data.content_json || {}, null, 2),
+          style: 'white-space:pre-wrap;font-size:13px' }));
     });
   }
 
