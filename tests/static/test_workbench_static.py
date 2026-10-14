@@ -59,11 +59,22 @@ def test_no_native_dialogs():
             "window.alert(",
             "window.prompt(",
             "window.confirm(",
-            "alert(",
-            "prompt(",
-            "confirm(",
         ):
             assert banned not in src, f"{f} 使用了原生对话框 {banned}"
+
+
+def test_no_bare_dialog_primitives():
+    # 裸调用 alert( / prompt( / confirm(（非 window.alert、非属性访问）：
+    # 一律 toast/drawer，不允许任何原生对话框入口。
+    import re
+
+    for f in WB_FILES:
+        src = (ROOT / f).read_text(encoding="utf-8")
+        for name in ("alert", "prompt", "confirm"):
+            for m in re.finditer(r"(?<![\w.])" + name + r"\s*\(", src):
+                raise AssertionError(
+                    f"{f} 包含裸调用 {name}(（位置 {m.start()}），必须用 toast/drawer"
+                )
 
 
 def test_charset_declared():
