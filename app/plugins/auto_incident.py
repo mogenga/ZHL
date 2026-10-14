@@ -30,6 +30,64 @@ from app.infra.models import DeliveryBatch, IncidentSnLink, ModuleInspection, Qu
 from app.plugins.trace_store import TraceStore
 
 
+def mark_sns_isolated(session: Session, batch_id: str | uuid.UUID, sns: list[str]) -> int:
+    """§8.2 组件级隔离：将批内 confirmed 的 SN 标记为 isolated（§9.8 #3）。
+
+    仅当批次处于 ``isolated`` 态时标记（跨批次冲突路径的占用批次不是
+    隔离态，不标记）；返回标记的组件数。使放行断言④「无隔离组件」
+    真实生效——此前该断言恒真（审查 I-1 关联缺口）。
+    """
+    batch_uuid = uuid.UUID(str(batch_id))
+    batch = session.get(DeliveryBatch, batch_uuid)
+    if batch is None or batch.status != "isolated" or not sns:
+        return 0
+    rows = (
+        session.query(ModuleInspection)
+        .filter(
+            ModuleInspection.batch_id == batch_uuid,
+            ModuleInspection.sn.in_(list(sns)),
+            ModuleInspection.intake_status == "confirmed",
+        )
+        .all()
+    )
+    for row in rows:
+        row.intake_status = "isolated"
+    return len(rows)
+
+
+def restore_sns_after_close(session: Session, incident: QualityIncident) -> int:
+    """异常关闭后恢复被隔离的 SN（§8.2 闭环：复检通过解除隔离）。
+
+    逐 link 检查：仅当该 SN 不再被任何**未关闭**异常关联、且当前值为
+    ``isolated`` 时恢复为 ``confirmed``（多异常重叠 SN 只在全部关闭后
+    解除）。返回恢复的组件数。
+    """
+    restored = 0
+    links = (
+        session.query(IncidentSnLink)
+        .filter(IncidentSnLink.incident_id == incident.incident_id)
+        .all()
+    )
+    for link in links:
+        insp = session.get(ModuleInspection, link.inspection_id)
+        if insp is None or insp.intake_status != "isolated":
+            continue
+        open_others = (
+            session.query(IncidentSnLink)
+            .join(QualityIncident, QualityIncident.incident_id == IncidentSnLink.incident_id)
+            .filter(
+                IncidentSnLink.inspection_id == link.inspection_id,
+                IncidentSnLink.incident_id != incident.incident_id,
+                QualityIncident.status.in_(OPEN_INCIDENT_STATUSES),
+            )
+            .count()
+        )
+        if open_others == 0:
+            insp.intake_status = "confirmed"
+            restored += 1
+    return restored
+
+
 def ensure_incident(
     session: Session,
     *,
@@ -108,6 +166,9 @@ def ensure_incident(
         session.add(
             IncidentSnLink(incident_id=incident.incident_id, inspection_id=row.inspection_id)
         )
+    # §8.2 组件级隔离：隔离态批次的受影响 SN 标记 isolated（占用批次非
+    # 隔离态，mark_sns_isolated 内部会跳过——不误标已放行批次的组件）。
+    mark_sns_isolated(session, batch_uuid, [r.sn for r in sn_rows])
     TraceStore().record(
         session,
         batch_id=batch_uuid,

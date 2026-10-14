@@ -82,7 +82,7 @@ BATCH_STATUS = (
 RELEASE_DECISION = ("released", "rejected", "undecided")
 SOURCE_TYPE = ("OCR_FORM", "IV_CSV", "MANUAL", "SIMULATED_DEVICE")
 APPEARANCE_RESULT = ("pass", "fail")
-INTAKE_STATUS = ("pending", "confirmed", "rejected")
+INTAKE_STATUS = ("pending", "confirmed", "isolated", "rejected")
 DECISION_STATUS = ("pending", "pass", "fail", "rule_missing")
 TRIGGER_TYPE = (
     "rule_fail",

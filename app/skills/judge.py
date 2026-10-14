@@ -158,8 +158,14 @@ def judge_batch(
     all_rows = session.scalars(
         select(ModuleInspection).where(ModuleInspection.batch_id == batch_id)
     ).all()
-    confirmed = [r for r in all_rows if r.intake_status == "confirmed"]
-    unconfirmed = [r.sn for r in all_rows if r.intake_status != "confirmed"]
+    confirmed = [r for r in all_rows if r.intake_status in ("confirmed", "isolated")]
+    # §8.2 组件级隔离：isolated 行的数据本身已人工确认（隔离是下游检疫态，
+    # 不是数据问题），独立重判端点对已隔离批次仍然可用（验收样例二钉住）。
+    unconfirmed = [
+        r.sn
+        for r in all_rows
+        if r.intake_status not in ("confirmed", "isolated")
+    ]
     if unconfirmed:
         raise UnconfirmedSnsError(unconfirmed)
 

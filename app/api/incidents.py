@@ -273,6 +273,10 @@ def create_incident(payload: IncidentCreate, session: SessionDep) -> IncidentOut
         session.add(
             IncidentSnLink(incident_id=incident.incident_id, inspection_id=row.inspection_id)
         )
+    # §8.2 组件级隔离：批次已隔离（守卫保证），受影响 SN 标记 isolated
+    from app.plugins.auto_incident import mark_sns_isolated
+
+    mark_sns_isolated(session, incident.batch_id, list(payload.affected_sns))
     session.commit()
     session.refresh(incident)
     return _to_out(incident)
@@ -547,6 +551,11 @@ def close_incident_endpoint(incident_id: uuid.UUID, session: SessionDep) -> Inci
             detail={"error": "incident_transition_denied", "reason": inc_res.reason},
         )
     incident.status = "closed"
+
+    # §8.2 闭环：恢复被隔离的 SN（多异常重叠 SN 只在全部关闭后解除）
+    from app.plugins.auto_incident import restore_sns_after_close
+
+    restore_sns_after_close(session, incident)
 
     # 批次联动：全部异常终态（closed/rejected/scrapped）才推进到待放行。
     # 行锁串行化并发 close（I-2）：后到的事务在本行上等待，拿到锁后重读

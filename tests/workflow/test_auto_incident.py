@@ -78,6 +78,22 @@ def test_judge_fail_auto_creates_rule_fail_incident() -> None:
     )
     assert [r.sn for r in linked] == [failing_sn]
 
+    # §8.2 组件级隔离：失败 SN 标记 isolated，合格 SN 不受影响（§9.8 #3）
+    from app.infra.models import ModuleInspection as _MI
+
+    failing_row = (
+        session.query(_MI)
+        .filter(_MI.batch_id == batch_id, _MI.sn == failing_sn)
+        .one()
+    )
+    assert failing_row.intake_status == "isolated"
+    ok_row = (
+        session.query(_MI)
+        .filter(_MI.batch_id == batch_id, _MI.sn != failing_sn)
+        .first()
+    )
+    assert ok_row is not None and ok_row.intake_status == "confirmed"
+
     # 轨迹留痕
     from app.plugins.trace_store import TraceStore
 

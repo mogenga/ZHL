@@ -148,6 +148,34 @@ def test_close_after_recheck_pass_releases_batch() -> None:
         # 轨迹留痕
         skill_names = {t.skill_name for t in TraceStore().list_for_batch(session, B1)}
         assert "incident_close" in skill_names
+
+        # §9.8 #3：close 恢复被隔离 SN → 放行断言④首次真实生效
+        from app.infra.models import ModuleInspection, SampleConclusion
+
+        sn_row = (
+            session.query(ModuleInspection)
+            .filter(ModuleInspection.batch_id == B1, ModuleInspection.sn == "SN-I-OODB")
+            .first()
+        )
+        assert sn_row is not None and sn_row.intake_status == "confirmed"
+        session.add(
+            SampleConclusion(
+                conclusion_id=UUID("ab000000-1111-2222-3333-444444444404"),
+                batch_id=B1,
+                inspection_type="iv",
+                rule_version_id=session.get(DeliveryBatch, B1).rule_version_id,
+                sample_round=1,
+                n=2,
+                ac=0,
+                re=1,
+                result="pass",
+                evidence_id=UUID(_EV),
+            )
+        )
+        session.commit()
+        r = client.post(f"/api/batches/{B1}/release", json={"approved_by": "ZHL-ENG"})
+        assert r.status_code == 200, r.text
+        assert r.json()["passed"] is True, r.json()
     finally:
         session.close()
         engine.dispose()
