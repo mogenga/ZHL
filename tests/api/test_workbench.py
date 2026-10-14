@@ -214,10 +214,10 @@ def test_rule_versions_table_missing() -> None:
     engine.dispose()
 
 
-def test_static_mount_serves_index(sqlite_env) -> None:
-    """mount_static=True 时 /static/index.html 200；False 时不挂静态（404）。"""
+def test_static_mount_serves_workbench(sqlite_env) -> None:
+    """mount_static=True 时 /static/workbench.html 200；False 时不挂静态（404）。"""
     factory, _ = sqlite_env
     on = _rule_versions_client(factory, mount_static=True)
-    assert on.get("/static/index.html").status_code == 200
+    assert on.get("/static/workbench.html").status_code == 200
     off = _rule_versions_client(factory, mount_static=False)
-    assert off.get("/static/index.html").status_code == 404
+    assert off.get("/static/workbench.html").status_code == 404

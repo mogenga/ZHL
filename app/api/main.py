@@ -119,8 +119,8 @@ def create_app(
 
         @app.get("/", include_in_schema=False)
         def _root_redirect() -> RedirectResponse:
-            """``/`` → 前端首页（index.html）。"""
-            return RedirectResponse(url="/static/index.html", status_code=302)
+            """``/`` → 前端工作台（workbench.html）。"""
+            return RedirectResponse(url="/static/workbench.html", status_code=302)
 
     return app
 

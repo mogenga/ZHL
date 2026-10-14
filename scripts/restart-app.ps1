@@ -219,7 +219,7 @@ foreach ($c in $checks) {
 
 Write-Host ""
 if ($allOk) {
-    Write-Host "==> 完成。前端首页：http://$Host_`:$Port/static/index.html" -ForegroundColor Green
+    Write-Host "==> 完成。前端工作台：http://$Host_`:$Port/" -ForegroundColor Green
     Write-Host "    接口文档：http://$Host_`:$Port/docs" -ForegroundColor Green
 } else {
     Write-Host "!! 部分端点不可达。若刚改过后端代码，确认启动的是最新代码（--reload 已开）。" -ForegroundColor Red

@@ -139,7 +139,7 @@ def test_unified_app_serves_both_phases(sqlite_factory) -> None:
     """Phase A (batches) and Phase B (rule-versions) coexist on one app.
 
     Guards the wiring the frontend depends on: the workbench calls both from
-    index.html, and a regression that drops either router would break the
+    workbench.html, and a regression that drops either router would break the
     page while unit tests kept passing.
     """
     _seed_rule(sqlite_factory)

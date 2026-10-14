@@ -286,17 +286,19 @@ def test_trace_endpoint_returns_batch_trace_rows(api_client: Any) -> None:
 
 
 def test_static_mount_present(api_client: Any) -> None:
-    """The rebuilt UI (frontend rebuild, 2026-10-12) serves ``app/static``.
+    """The rebuilt UI serves ``app/static`` (single-page workbench).
 
     ``create_app(mount_static=True)`` mounts ``StaticFiles`` at ``/static`` and
-    adds a ``GET /`` redirect to ``/static/index.html``. ``/`` no longer 404s;
-    it 302-redirects to the index page, and shared assets (style.css / common.js)
-    are served. Any regression that drops the mount is caught here."""
+    adds a ``GET /`` redirect to ``/static/workbench.html``. ``/`` no longer
+    404s; it 302-redirects to the workbench page, and the workbench sub-assets
+    (wb.css / wb/ui.js) are served. Any regression that drops the mount is
+    caught here."""
     r = api_client.get("/", follow_redirects=False)
     assert r.status_code in (200, 302), f"/ should serve or redirect: {r.status_code}"
-    r_idx = api_client.get("/static/index.html")
-    assert r_idx.status_code == 200, f"index.html should be served: {r_idx.status_code}"
-    r_css = api_client.get("/static/style.css")
-    assert r_css.status_code == 200, f"style.css should be served: {r_css.status_code}"
-    r_js = api_client.get("/static/common.js")
-    assert r_js.status_code == 200, f"common.js should be served: {r_js.status_code}"
+    assert "/static/workbench.html" in r.headers.get("location", ""), "/ should redirect to workbench.html"
+    r_wb = api_client.get("/static/workbench.html")
+    assert r_wb.status_code == 200, f"workbench.html should be served: {r_wb.status_code}"
+    r_css = api_client.get("/static/wb.css")
+    assert r_css.status_code == 200, f"wb.css should be served: {r_css.status_code}"
+    r_js = api_client.get("/static/wb/ui.js")
+    assert r_js.status_code == 200, f"wb/ui.js should be served: {r_js.status_code}"
