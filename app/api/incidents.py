@@ -31,7 +31,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.api.guards import require_not_archived
-from app.domain.state_machine import close_incident, transition
+from app.domain.state_machine import OPEN_INCIDENT_STATUSES, close_incident, transition
 from app.domain.types import IncidentView, ReinspectionView
 from app.infra.models import (
     DeliveryBatch,
@@ -501,10 +501,41 @@ def close_incident_endpoint(incident_id: uuid.UUID, session: SessionDep) -> Inci
         else None
     )
     gate = close_incident(view, re_view, incident.capa_verified)
-    if not gate.can_close:
+    missing = list(gate.missing)
+
+    # 需求五条件的领域函数未覆盖项（§5.2 ①②③）在此补齐：
+    # ① 异常必须关联 SN；② 原始判定证据存在；③ 临时措施已填报。
+    links = (
+        session.query(IncidentSnLink)
+        .filter(IncidentSnLink.incident_id == incident.incident_id)
+        .count()
+    )
+    if links == 0:
+        missing.append("sn_not_linked")
+    declared = list(incident.evidence_ids or [])
+    if not declared:
+        missing.append("original_decision_evidence")
+    else:
+        ev_ids = []
+        for e in declared:
+            try:
+                ev_ids.append(uuid.UUID(str(e)))
+            except (ValueError, TypeError):
+                pass
+        ev_count = (
+            session.query(Evidence).filter(Evidence.evidence_id.in_(ev_ids)).count()
+            if ev_ids
+            else 0
+        )
+        if ev_count == 0:
+            missing.append("original_decision_evidence")
+    if not (incident.containment_action or "").strip():
+        missing.append("containment_action")
+
+    if missing:
         raise HTTPException(
             status_code=409,
-            detail={"error": "close_conditions_unmet", "missing": list(gate.missing)},
+            detail={"error": "close_conditions_unmet", "missing": missing},
         )
 
     inc_res = transition(
@@ -518,13 +549,20 @@ def close_incident_endpoint(incident_id: uuid.UUID, session: SessionDep) -> Inci
     incident.status = "closed"
 
     # 批次联动：全部异常终态（closed/rejected/scrapped）才推进到待放行。
-    batch = session.get(DeliveryBatch, incident.batch_id)
+    # 行锁串行化并发 close（I-2）：后到的事务在本行上等待，拿到锁后重读
+    # open_count 才能看到前者已提交的 closed，避免批次永久卡死在待复检。
+    batch = (
+        session.query(DeliveryBatch)
+        .filter(DeliveryBatch.batch_id == incident.batch_id)
+        .with_for_update()
+        .first()
+    )
     batch_status = batch.status
     open_count = (
         session.query(QualityIncident)
         .filter(
             QualityIncident.batch_id == batch.batch_id,
-            QualityIncident.status.in_(["new", "isolated", "assigned", "pending_recheck"]),
+            QualityIncident.status.in_(OPEN_INCIDENT_STATUSES),
         )
         .count()
     )

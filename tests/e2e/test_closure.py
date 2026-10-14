@@ -58,13 +58,13 @@ def _isolate(client: TestClient, inc_id: UUID) -> None:
     assert r.status_code == 200, r.text
 
 
-def _assign(client: TestClient, inc_id: UUID) -> None:
+def _assign(client: TestClient, inc_id: UUID, containment_action: str | None = "isolate affected SNs") -> None:
     r = client.post(
         f"/api/incidents/{inc_id}/assign",
         json={
             "owner": "ZHL-QA",
             "due_at": "2026-06-05T00:00:00+00:00",
-            "containment_action": "isolate affected SNs",
+            "containment_action": containment_action,
         },
     )
     assert r.status_code == 200, r.text
@@ -153,6 +153,77 @@ def test_close_after_recheck_pass_releases_batch() -> None:
         engine.dispose()
 
 
+def test_close_names_each_unmet_condition() -> None:
+    """五条件缺失项逐条指名（Review Focus #1）：capa_fields / 复检记录缺失。"""
+    sample = load_acceptance("incident")
+    client, session, engine = _client()
+    try:
+        _seed_batch(session, sample, batch_no=sample["batch"]["batch_id"])
+        inc_id = _create_incident(client, sample["incidents"][0]["affected_sns"][0])
+        _isolate(client, inc_id)
+        _assign(client, inc_id)
+
+        # 未录复检就转待复检：missing 同时含「无复检记录」「未验证」
+        r = _capa(client, inc_id, verified=False)
+        assert r.status_code == 200, r.text
+        r = _close(client, inc_id)
+        assert r.status_code == 409, r.text
+        missing = r.json()["detail"]["missing"]
+        assert "reinspection_record" in missing
+        assert "capa_verified" in missing
+
+        # CAPA 字段清空（空串）→ missing 含 capa_fields
+        r = _capa(client, inc_id, verified=False)  # 已在 pending_recheck：更新分支
+        # 用空串覆盖字段：直接构造请求（capa 端点允许空串通过 pydantic）
+        r2 = client.post(
+            f"/api/incidents/{inc_id}/capa",
+            json={"confirmed_root_cause": "", "corrective_action": "", "verified": False},
+        )
+        assert r2.status_code == 200, r2.text
+        r = _close(client, inc_id)
+        assert r.status_code == 409, r.text
+        assert "capa_fields" in r.json()["detail"]["missing"]
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_close_requires_evidence_and_containment() -> None:
+    """需求五条件②③：无原始判定证据 / 无临时措施 → close 409 指名缺失。"""
+    sample = load_acceptance("incident")
+    client, session, engine = _client()
+    try:
+        _seed_batch(session, sample, batch_no=sample["batch"]["batch_id"])
+        # evidence_ids 为空（人工创建端点允许）→ 关闭时必须被指名
+        r = client.post(
+            "/api/incidents",
+            json={
+                "batch_id": str(B1),
+                "trigger_type": "rule_fail",
+                "severity": "major",
+                "affected_sns": [sample["incidents"][0]["affected_sns"][0]],
+                "evidence_ids": [],
+            },
+        )
+        assert r.status_code == 201, r.text
+        inc_id = UUID(r.json()["incident_id"])
+        _isolate(client, inc_id)
+        _assign(client, inc_id, containment_action=None)  # 临时措施缺省 None
+        _reinspect_pass(client, inc_id, _INS_OODB)
+        r = _capa(client, inc_id, verified=True)
+        assert r.status_code == 200, r.text
+
+        r = _close(client, inc_id)
+        assert r.status_code == 409, r.text
+        missing = r.json()["detail"]["missing"]
+        assert "original_decision_evidence" in missing
+        assert "containment_action" in missing
+        assert session.get(DeliveryBatch, B1).status == "pending_recheck"
+    finally:
+        session.close()
+        engine.dispose()
+
+
 def test_close_gates_on_all_incidents_terminal() -> None:
     """批次存在第二只未关闭异常时，close 单只不推进批次（Review Focus #2）。"""
     sample = load_acceptance("incident")
@@ -176,6 +247,7 @@ def test_close_gates_on_all_incidents_terminal() -> None:
         inc2_row = session.get(QualityIncident, inc2)
         inc2_row.status = "assigned"
         inc2_row.owner = "ZHL-QA"
+        inc2_row.containment_action = "quarantine SN-I-OK"
         session.commit()
         _reinspect_pass(client, inc2, _INS_OK)
         inc2_row = session.get(QualityIncident, inc2)

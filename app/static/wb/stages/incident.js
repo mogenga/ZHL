@@ -181,6 +181,9 @@ WB.stages.incident = (function () {
   // 确认关闭异常（P0 缺口 #1）：close 端点五条件校验；缺失项逐条行内展示
   var MISSING_CN = {
     owner: '未指派责任人',
+    sn_not_linked: '异常未关联受影响组件',
+    original_decision_evidence: '缺少原始判定证据',
+    containment_action: '未填报临时措施',
     capa_fields: '整改措施未填报完整（确认根因 / 纠正措施）',
     reinspection_record: '无独立复检记录',
     reinspection_passed: '复检未通过',

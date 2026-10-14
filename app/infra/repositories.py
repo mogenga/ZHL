@@ -36,10 +36,17 @@ from app.infra.models import (
 class CrossBatchSnConflict(Exception):
     """App-layer guard for the DDL EXCLUDE constraint (P0 spec D5/D17).
 
+    Carries the conflicting ``sn`` as a structured attribute（§8.1 自动创建
+    data_consistency 异常依赖它，避免调用方解析消息文本——审查 M-1）。
+
     The Postgres schema rejects the same SN across two batches at the DDL
     layer; on SQLite (and any engine without the EXCLUDE constraint) the
     repository performs the equivalent query before inserting.
     """
+
+    def __init__(self, message: str, sn: str | None = None) -> None:
+        super().__init__(message)
+        self.sn = sn
 
 
 class BatchRepository:
@@ -173,7 +180,9 @@ class InspectionRepository:
         )
         conflict = session.scalars(stmt).first()
         if conflict is not None:
-            raise CrossBatchSnConflict(f"SN {conflict!r} already recorded in a different batch")
+            raise CrossBatchSnConflict(
+                f"SN {conflict!r} already recorded in a different batch", sn=conflict
+            )
 
 
 # Measured-column whitelist (D7 audit surface). The Postgres DDL revokes UPDATE

@@ -25,10 +25,9 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.infra.models import IncidentSnLink, ModuleInspection, QualityIncident
+from app.domain.state_machine import OPEN_INCIDENT_STATUSES
+from app.infra.models import DeliveryBatch, IncidentSnLink, ModuleInspection, QualityIncident
 from app.plugins.trace_store import TraceStore
-
-_OPEN_STATUSES = ("new", "isolated", "assigned", "pending_recheck")
 
 
 def ensure_incident(
@@ -46,12 +45,16 @@ def ensure_incident(
     （自动路径不产生孤儿异常，轨迹行会记录 validation_result=fail）。
     """
     batch_uuid = uuid.UUID(str(batch_id))
+    # 并发幂等（审查 I-3）：对批次行加锁串行化同批次的并发自动创建——
+    # 后到事务在本行上等待，拿到锁后重查幂等，能看见前者已提交的异常。
+    # 人工创建端点不做此约束（业务允许多只同触发异常），故不加 DDL 唯一索引。
+    session.query(DeliveryBatch).filter(DeliveryBatch.batch_id == batch_uuid).with_for_update().first()
     existing = (
         session.query(QualityIncident)
         .filter(
             QualityIncident.batch_id == batch_uuid,
             QualityIncident.trigger_type == trigger_type,
-            QualityIncident.status.in_(_OPEN_STATUSES),
+            QualityIncident.status.in_(OPEN_INCIDENT_STATUSES),
         )
         .first()
     )
@@ -77,7 +80,12 @@ def ensure_incident(
             input_ref={"batch_id": str(batch_uuid)},
             skill_name="incident_auto",
             plugins_invoked=[],
-            params_summary={"trigger_type": trigger_type, "affected_sns": affected},
+            params_summary={
+                "trigger_type": trigger_type,
+                "affected_sns": affected,
+                "mapped_sns": [],
+                "dropped_sns": affected,
+            },
             structured_output={"created": False, "reason": "sn_not_found"},
             validation_result="fail",
             failure_reason="affected_sns 无法映射到批内组件，未创建异常",
@@ -106,7 +114,12 @@ def ensure_incident(
         input_ref={"batch_id": str(batch_uuid)},
         skill_name="incident_auto",
         plugins_invoked=[],
-        params_summary={"trigger_type": trigger_type, "affected_sns": [r.sn for r in sn_rows]},
+        params_summary={
+            "trigger_type": trigger_type,
+            "affected_sns": affected,
+            "mapped_sns": [r.sn for r in sn_rows],
+            "dropped_sns": [s for s in affected if s not in {r.sn for r in sn_rows}],
+        },
         structured_output={"created": True, "incident_id": str(incident.incident_id)},
         validation_result="pass",
         human_action={"action": "auto"},

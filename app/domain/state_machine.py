@@ -57,6 +57,9 @@ INCIDENT_TRANSITIONS: dict[tuple[str, str], frozenset] = {
 
 _KINDS = {"batch": BATCH_TRANSITIONS, "incident": INCIDENT_TRANSITIONS}
 
+#: 未关闭异常状态（close 端点的批次联动 / §8.1 自动创建幂等查重的单一事实来源）
+OPEN_INCIDENT_STATUSES = ("new", "isolated", "assigned", "pending_recheck")
+
 
 def transition(
     current: str,

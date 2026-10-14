@@ -13,9 +13,8 @@ Each step asserts the three-layer audit trail (trace / evidence / report
 rows exist) and that the state-machine edges the chain uses are legal
 (domain ``transition`` dry-runs, P0 contract).
 
-Also pins the mid-chain blocker: release while CAPA is NOT verified keeps
-the batch in ``pending_release`` and names the gap in item 6 (Review Focus
-#2/#3, the E2E face).
+P0 缺口 #1 修复后（2026-10-14）：复检通过后经 close 端点人工签署关闭异常
+（五条件门禁前移到 close），批次转 pending_release——不再直接写库绕过 API。
 
 Fixtures: tests/fixtures/acceptance_incident.json (domain data) +
 mock_llm_attribution.json (PB L1a, the attribution mock — its routing key is
