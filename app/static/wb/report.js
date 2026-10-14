@@ -24,7 +24,16 @@ WB.report = (function () {
   function mdToDom(md) {
     const wrap = WB.h('div', { class: 'report-md' });
     if (!md) { wrap.append(WB.h('div', { class: 'empty', text: '暂无报告正文' })); return wrap; }
-    const lines = String(md).split(/\r?\n/);
+    // 头部准化：压缩当前报告文本里的多余空行与纯装饰行（仅由 — – - * : . · | 空格/全角空格
+    // 组成的“无字母数字”行），避免前导大片空白在渲染后撑出“一大片空圆点/空段落”的视觉。
+    const raw = String(md).split(/\r?\n/);
+    // 把全角空格等当作普通空格处理，避免看似空行实则有非标准可见字符产出灰点
+    const norm = raw.map(function (l) {
+      return l.replace(/[\u00a0\u2007\u2009\u200b\u202f\ufeff]/g, ' ').trim();
+    });
+    // 强制规则：仅由装饰字符（em-dash / en-dash / hyphen / asterisk / 冒号 / 点 / 中点 / 管符 / 空格）
+    // 组成的“无字母数字”行视为装饰分隔线，当空行处理；内含任何可见内容的行一律保留。
+    const lines = norm.filter(function (l) { return l !== '' && !/^[\u2014\u2013\-\*\.:\u00b7|\s\u3000]+$/.test(l); });
     let i = 0;
     while (i < lines.length) {
       const ln = lines[i];
