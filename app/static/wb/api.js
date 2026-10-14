@@ -196,7 +196,10 @@ WB.api = {
 
   /* T4：数据入场（POST /api/intake；POST /api/intake/{task_id}/confirm） */
   submitIntake(body) {
-    return WB.api.request('POST', '/api/intake', body).then(function (r) {
+    // 送检要等真模型逐行抽取：实测 14 行 162.4 秒（≈11.6 秒/行，2026-10-15）。
+    // 默认 15 秒超时会让浏览器在中途 abort —— 服务端仍在跑，界面只剩一句一闪
+    // 而过的"请求超时"，表现为「点了没反应」。与归因同样按请求覆盖超时。
+    return WB.api.request('POST', '/api/intake', body, { timeoutMs: 600000 }).then(function (r) {
       if (!r.ok) return { ok: false, error: r.error, data: null };
       return { ok: true, data: r.data };
     });

@@ -18,6 +18,7 @@ const judge = read('stages/judge.js');
 const incident = read('stages/incident.js');
 const reinspection = read('stages/reinspection.js');
 const release = read('stages/release.js');
+const reportNode = read('stages/report.js');
 const report = read('report.js');
 
 // ---- browser-like DOM shim（比 test_wb_global 更进一步：记录子树 + 事件可触发）----
@@ -161,10 +162,13 @@ const flush = () => new Promise((r) => setTimeout(r, 0));
 
 for (const [name, src] of [['ui.js', ui], ['api.js', api], ['main.js', main], ['intake.js', intake],
   ['judge.js', judge], ['incident.js', incident], ['reinspection.js', reinspection],
-  ['release.js', release], ['report.js', report]]) {
+  ['release.js', release], ['report.js', reportNode], ['report.js(wb)', report]]) {
   vm.runInContext(src, ctx, { filename: name });
 }
 const WB = ctx.WB;
+// api.js 的原始实现留一份：各段用例普遍会替换 WB.api.submitIntake，验"请求契约"
+// （如超时）时必须用原件，否则测的是别人的桩。
+const REAL_SUBMIT_INTAKE = WB.api.submitIntake;
 
 // ---- 通用夹具 ----
 const BATCH_ID = '11111111-1111-1111-1111-111111111111';
@@ -870,6 +874,120 @@ function openCreateForm(list) {
     WB.state.intakeResult = null;
     WB._renderCenterAndRight();
     assert(!hasText(byId.mainPane, '入场结果'), 'S4: 确认/拒绝清除后即消失');
+  }
+
+  // ---- T. 送检提交要等真模型：长超时 + 面板级进行中反馈（2026-10-15 反馈）----
+  // 实测：14 行送检走真模型抽取 **162.4 秒**（≈11.6 秒/行），而 WB.api.request 的
+  // 默认超时是 15 秒 —— 浏览器在 15 秒就 abort，之后服务端还在慢慢跑，界面只剩
+  // 一句一闪而过的"请求超时"，用户看到的就是「确认导入点了没反应」。而弹窗在
+  // onOk 返回后立刻关闭，_markModalBusy 的"正在提交…"随之消失，全程无反馈。
+  {
+    let sentOpts = null;
+    const realRequest = WB.api.request;
+    WB.api.request = function (method, path, body, opts) {
+      sentOpts = { method: method, path: path, opts: opts };
+      return Promise.resolve({ ok: true, status: 200, data: { status: 'pending', confidence: 0.9 }, error: null });
+    };
+    await REAL_SUBMIT_INTAKE({ batch_id: BATCH_ID });
+    WB.api.request = realRequest;
+    assert(sentOpts.path === '/api/intake', 'T1: 走 /api/intake');
+    assert(sentOpts.opts && Number(sentOpts.opts.timeoutMs) >= 300000,
+      'T2: 送检请求必须有长超时（默认 15s 会被真模型抽取打断）');
+  }
+
+  // ---- U. 提交期间面板上有可见反馈，且防重复提交 ----
+  {
+    const b = { batch_id: BATCH_ID, batch_no: 'B-5', status: 'pending_intake', planned_quantity: 2 };
+    WB.state.selected = b; WB.state.batchId = BATCH_ID;
+    let resolveSubmit = null;
+    WB.api.submitIntake = function () {
+      return new Promise(function (res) { resolveSubmit = res; });
+    };
+    const csv = 'SN,pmax,temp,isc,voc,vm,im,ff,外观\nSN-U-001,550.0,25.0,10.5,48.0,40.0,13.0,0.80,pass\n';
+    const bytes = new TextEncoder().encode(csv);
+    let panel = WB.stages.intake.render(b, {});
+    findText(panel, '从 CSV 导入').fire('click');
+    const fi = WB._modal.inputs[0];
+    fi.files = [{ name: 'u.csv', _bytes: bytes.buffer }];
+    fi.fire('change');
+    await flush(); await flush();
+    findText(WB._modal.box, '确认导入').fire('click');
+    await flush();
+
+    // 不手工重渲染：断言"点完提交，界面自己就显示了"（_sendIntake 内部触发渲染）
+    assert(hasText(byId.mainPane, '提交中'), 'U1: 提交期间面板自动显示"提交中"进度');
+    panel = byId.mainPane;
+    assert(hasText(panel, '请勿关闭'), 'U2: 提示等待期间不要关页面（真模型逐行抽取）');
+    const btns = panel.querySelectorAll('button').filter(function (x) {
+      return x.textContent === '提交送检数据' || x.textContent === '从 CSV 导入';
+    });
+    assert(btns.length === 2 && btns.every(function (x) { return x.disabled; }),
+      'U3: 提交期间两个入口都禁用（防重复提交）');
+
+    resolveSubmit({ ok: true, data: { status: 'pending', confidence: 0.9 } });
+    await flush(); await flush();
+    panel = WB.stages.intake.render(b, {});
+    assert(!hasText(panel, '提交中'), 'U4: 提交完成后进度提示消失');
+  }
+
+  // ---- V. 批次已离开入场阶段：结果卡片可回看，但动作按钮必须消失（2026-10-15）----
+  // 回归：卡片显示条件放宽后（W 段那次），它自带的「确认入场/拒绝入场/重新提交」
+  // 跟着留到了已放行/已归档的批次上 —— 点下去必然 409「状态冲突，请刷新后重试」。
+  {
+    const DATA = { status: 'confirmed', confidence: 0.95, low_conf_sns: [], extracted_fields: {} };
+    WB.state.view = 'batch'; WB.state.viewStage = null;
+    WB.state.batchId = BATCH_ID;
+    WB.state.intakeResult = { batch_id: BATCH_ID, data: DATA };
+
+    WB.state.selected = { batch_id: BATCH_ID, batch_no: 'B-66', status: 'released' };
+    WB._renderCenterAndRight();
+    assert(hasText(byId.mainPane, '入场结果'), 'V1: 已放行批次仍能回看入场结果卡片');
+    assert(!findText(byId.mainPane, '确认入场'), 'V2: 但不再显示「确认入场」');
+    assert(!findText(byId.mainPane, '拒绝入场'), 'V3: 不再显示「拒绝入场」');
+    assert(!findText(byId.mainPane, '重新提交'), 'V4: 不再显示「重新提交」');
+
+    WB.state.selected = { batch_id: BATCH_ID, batch_no: 'B-66', status: 'pending_intake' };
+    WB._renderCenterAndRight();
+    assert(!!findText(byId.mainPane, '确认入场'), 'V5: 仍待入场时三个按钮照旧（含确认入场）');
+    assert(!!findText(byId.mainPane, '拒绝入场'), 'V6: 与「拒绝入场」');
+    assert(!!findText(byId.mainPane, '重新提交'), 'V7: 与「重新提交」');
+    WB.state.intakeResult = null;
+  }
+
+  // ---- W. 报告节点：显示该批次的报告与正文（2026-10-15 反馈）----
+  // 此前 _byIndex[5] 根本没注册 → 点流水线「报告」节点只有一句"该节点无可操作项"，
+  // 而批次其实已有放行报告。另：_expandReportInMain 开头写死 view !== 'reports'
+  // 直接 return，导致非报告 tab 下正文永远展不开。
+  {
+    assert(!!(WB.stages._byIndex[5] && typeof WB.stages._byIndex[5].render === 'function'),
+      'W1: 报告节点（stage 5）已注册面板');
+    const REPORT = {
+      report_id: 'r-1', batch_id: BATCH_ID, report_type: 'release', version: 1,
+      generated_at: '2026-10-15T04:44:40+00:00',
+      content_md: '# 批次放行报告 — 66\n\n- 批次状态: released\n- 判 定: 5 合格 / 1 不合格',
+    };
+    WB.api.allReports = function () { return Promise.resolve({ ok: true, data: [REPORT] }); };
+    WB.state.view = 'batch';           // 注意：不是 reports tab —— 正文也要能展开
+    WB.state.viewStage = 5;
+    WB.state.selected = { batch_id: BATCH_ID, batch_no: 'B-66', status: 'archived' };
+    WB.state.batchId = BATCH_ID;
+    WB._renderCenterAndRight();
+    await flush(); await flush();
+    assert(hasText(byId.mainPane, '批次报告'), 'W2: 报告节点显示本批报告卡');
+    assert(hasText(byId.mainPane, '报告记录（1）'), 'W3: 列出该批次的报告');
+    assert(hasText(byId.mainPane, '报告正文'), 'W4: 直接展开正文（不必再点「查看正文」）');
+    // md 渲染器把每块写成 innerHTML（report.js::mdToDom），而 shim 的 innerHTML
+    // 是普通字符串、既不解析也不聚合到子节点——浏览器里正文正常显示，这里只能
+    // 递归收集各节点的 innerHTML/textContent 来断言内容确实进来了。
+    const collect = function (n) {
+      let out = String(n.innerHTML || '') + String(n.textContent || '');
+      (n.children || []).forEach(function (c) { out += collect(c); });
+      return out;
+    };
+    const mdNodes = byId.mainPane.querySelectorAll('.report-md');
+    assert(mdNodes.length === 1 && collect(mdNodes[0]).indexOf('批次放行报告') >= 0,
+      'W5: 正文内容确实来自该报告（渲染进 .report-md）');
+    WB.state.viewStage = null;
   }
 
   console.log(failed === 0 ? '\nALL PASS' : '\n' + failed + ' FAILED');

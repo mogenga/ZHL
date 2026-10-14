@@ -36,13 +36,13 @@ WB.stages.intake = (function () {
       // 前端不再自行拆列——那才是「系统读懂原始单据」的演示路径。
       if (mode === 'raw') {
         _markModalBusy();
-        WB.api.submitIntake({
+        _sendIntake(batch, {
           batch_id: batch.batch_id,
           source_type: source_type,
           raw_source: raw,
           raw_source_kind: source_type === 'OCR_FORM' ? 'paper_form' : 'iv_csv',
           fields: fieldsOverride || null,
-        }).then(_onIntakeSubmitted(batch));
+        });
         return;
       }
 
@@ -66,12 +66,12 @@ WB.stages.intake = (function () {
       if (err) { WB.toast(err); return; }
       if (!inspections.length) { WB.toast('没有可解析的检测数据行'); return; }
       _markModalBusy();
-      WB.api.submitIntake({
+      _sendIntake(batch, {
         batch_id: batch.batch_id,
         source_type: source_type,
         inspections: inspections,
         fields: fieldsOverride || null,
-      }).then(_onIntakeSubmitted(batch));
+      });
     }, { submitLabel: '提交送检' });
   }
 
@@ -106,12 +106,12 @@ WB.stages.intake = (function () {
       const now = new Date().toISOString();
       const inspections = state.parsed.rows.map((r) => Object.assign(
         { source_type: IMPORT_SOURCE_TYPE, captured_at: now }, r));
-      WB.api.submitIntake({
+      _sendIntake(batch, {
         batch_id: batch.batch_id,
         source_type: IMPORT_SOURCE_TYPE,
         inspections: inspections,
         fields: null,
-      }).then(_onIntakeSubmitted(batch));
+      });
     }, { submitLabel: '确认导入', inline: inline });
     const input = WB._modal.inputs[0];
     if (input && input.addEventListener) {
@@ -178,6 +178,23 @@ WB.stages.intake = (function () {
 
   function _setImportEnabled(on) {
     if (WB._modal && WB._modal.submitBtn) WB._modal.submitBtn.disabled = !on;
+  }
+
+  /* 统一的送检出口：置"提交中"状态 → 发请求 → 无论成败都清除。
+     两条入口（手工粘贴 / CSV 导入）都走这里，否则"提交中"的置位与清除会各写
+     一份、早晚漂移。清除放在 _onIntakeSubmitted 之前，成功路径的重渲染才不会
+     又画一次进度。 */
+  function _sendIntake(batch, payload) {
+    WB.state.intakeSubmitting = batch.batch_id;
+    // 记录通道：raw = AI 逐行抽取（慢），structured = 前端拆列直提（秒级），
+    // 提示文案据此区分，避免结构化提交也显示「约 10 秒/行」误导用户
+    WB.state.intakeSubmittingMode = payload.raw_source != null ? 'raw' : 'structured';
+    WB._renderCenterAndRight();
+    return WB.api.submitIntake(payload).then(function (res) {
+      WB.state.intakeSubmitting = null;
+      WB.state.intakeSubmittingMode = null;
+      return _onIntakeSubmitted(batch)(res);
+    });
   }
 
   /* 提交回调：成功/失败都刷新详情，避免界面停在旧状态 */
@@ -297,13 +314,13 @@ WB.stages.intake = (function () {
     WB._renderCenterAndRight();
   }
   /* 供 renderCenter 调用：把「入场结果」卡片 append 到已画好的主区末尾。 */
-  function appendResultCard(mainPane, data) {
+  function appendResultCard(mainPane, data, detail) {
     const card = WB.h('div', { class: 'card stage-panel' });
     card.append(WB.h('h3', { text: '入场结果' }));
     const body = WB.h('div', {});
     card.append(body);
     mainPane.append(card);
-    _renderIntakeBody(body, { batch_id: WB.state.batchId }, data);
+    _renderIntakeBody(body, { batch_id: WB.state.batchId, status: detail && detail.status }, data);
   }
   function _renderIntakeBody(body, batch, data) {
     body.replaceChildren();
@@ -351,11 +368,17 @@ WB.stages.intake = (function () {
         });
       });
     }
-    // 操作按钮
-    const actions = WB.h('div', { class: 'actions' },
-      WB.h('button', { class: 'primary', onclick: () => _intakeAct(batch, 'confirm'), text: '确认入场' }),
-      WB.h('button', { class: 'danger', onclick: () => _intakeAct(batch, 'reject'), text: '拒绝入场' }),
-      WB.h('button', { onclick: () => WB._loadDetail(batch.batch_id), text: '重新提交' }));
+    // 操作按钮：只在批次**仍停在入场阶段**时给。批次已推进（自动确认→判定→
+    // 隔离→复检→放行→归档）后，结果卡片保留供回看，但这三个按钮点下去必然
+    // 409「状态冲突」（2026-10-15 反馈：流程都走完了，底部还挂着它们）。
+    // 状态未知（旧调用）时保持原样，不误删。
+    const canAct = !batch.status || batch.status === 'pending_intake';
+    const actions = canAct
+      ? WB.h('div', { class: 'actions' },
+        WB.h('button', { class: 'primary', onclick: () => _intakeAct(batch, 'confirm'), text: '确认入场' }),
+        WB.h('button', { class: 'danger', onclick: () => _intakeAct(batch, 'reject'), text: '拒绝入场' }),
+        WB.h('button', { onclick: () => WB._loadDetail(batch.batch_id), text: '重新提交' }))
+      : WB.h('div', { class: 'hint-line muted', text: '批次已推进到后续节点，此处仅供回看' });
     body.append(actions);
   }
 
@@ -387,10 +410,19 @@ WB.stages.intake = (function () {
     card.append(body);
     if (batch.status === 'pending_intake') {
       // 两条入口共用同一次提交：手工粘贴（原样）与文件导入（仪器导出的 CSV）
+      // 提交期间置灰并显示进度：真模型逐行抽取实测 ≈11.6 秒/行，弹窗在 onOk
+      // 返回后就关了，反馈必须落在面板上，否则用户看到的就是「点了没反应」。
+      const submitting = WB.state.intakeSubmitting === batch.batch_id;
       body.append(WB.h('div', { class: 'actions' },
-        WB.h('button', { class: 'primary', onclick: () => submitForm(batch), text: '提交送检数据' }),
-        WB.h('button', { onclick: () => importForm(batch), text: '从 CSV 导入' })));
-      body.append(WB.h('div', { class: 'hint-line', text: '提交后展示置信度与低置信清单；确认/拒绝入口随之出现' }));
+        WB.h('button', { class: 'primary', onclick: () => submitForm(batch), text: '提交送检数据',
+          ...(submitting ? { disabled: true } : {}) }),
+        WB.h('button', { onclick: () => importForm(batch), text: '从 CSV 导入',
+          ...(submitting ? { disabled: true } : {}) })));
+      body.append(WB.h('div', { class: 'hint-line', text: submitting
+        ? (WB.state.intakeSubmittingMode === 'structured'
+          ? '提交中：结构化数据入库，通常几秒内完成，请勿关闭页面'
+          : '提交中：AI 逐行抽取（真模型约 10 秒/行），请勿关闭页面')
+        : '提交后展示置信度与低置信清单；确认/拒绝入口随之出现' }));
     } else {
       // 降级：组件条码 + 入场状态（§1.3 边界；置信度不重建）
       const inspections = batch.inspections || [];
