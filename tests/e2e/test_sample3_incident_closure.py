@@ -344,8 +344,8 @@ def test_sample3_incident_closure_full_chain() -> None:
         assert r.status_code == 200, r.text
         assert session.get(DeliveryBatch, B1).status == "pending_recheck"
 
-        # 6) batch -> pending_release (recheck-passed edge, dry-run already
-        #    asserted; the CAPA step moved it to pending_recheck).
+        # 6) batch -> pending_release via the close endpoint (P0 缺口 #1 已修：
+        #    不再直接写库绕过 API；recheck-passed edge 的 dry-run 已断言)。
         batch = session.get(DeliveryBatch, B1)
         assert _edge_legal(
             kind="batch",
@@ -353,8 +353,11 @@ def test_sample3_incident_closure_full_chain() -> None:
             to="pending_release",
             preconditions={"recheck_passed": True, "measures_effective": True},
         )
-        batch.status = "pending_release"
-        session.commit()
+        r = client.post(f"/api/incidents/{inc_id}/close")
+        assert r.status_code == 200, r.text
+        assert r.json()["incident_status"] == "closed"
+        assert r.json()["batch_status"] == "pending_release"
+        assert session.get(QualityIncident, inc_id).status == "closed"
 
         # 7) the batch needs a passing sample conclusion for release item 2.
         session.add(
@@ -373,24 +376,9 @@ def test_sample3_incident_closure_full_chain() -> None:
         )
         session.commit()
 
-        # 8) release blocker first: un-verify the CAPA -> the batch STAYS
-        #    pending_release and item 6 names the gap (Review Focus #2/#3).
-        inc = session.get(QualityIncident, inc_id)
-        inc.capa_verified = False
-        session.commit()
-        r = client.post(f"/api/batches/{B1}/release", json={"approved_by": "ZHL-ENG"})
-        assert r.status_code == 200, r.text
-        assert r.json()["passed"] is False
-        failing = [c for c in r.json()["checks"] if not c["passed"]]
-        assert any(c["name"] == "all_capa_verified" for c in failing)
-        assert session.get(DeliveryBatch, B1).status == "pending_release"
-        assert session.get(DeliveryBatch, B1).release_decision == "undecided"
-
-        # 9) engineer verifies the CAPA; the retry passes all 7 items
-        #    (item 7: reinspection coverage = required set from incident
-        #    sn links; iso_lookup resolves via the seeded preset row).
-        inc.capa_verified = True
-        session.commit()
+        # 8) release passes all 7 items（闭环修复后 CAPA 门禁前移到 close 的
+        #    五条件校验；closed 异常不再参与断言 ⑥。item 7：复检覆盖 = 异常
+        #    sn links 全集；iso_lookup 经预置行解析）。
         r = client.post(f"/api/batches/{B1}/release", json={"approved_by": "ZHL-ENG"})
         assert r.status_code == 200, r.text
         assert r.json()["passed"] is True, r.json()

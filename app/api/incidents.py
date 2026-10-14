@@ -31,7 +31,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.api.guards import require_not_archived
-from app.domain.state_machine import transition
+from app.domain.state_machine import close_incident, transition
+from app.domain.types import IncidentView, ReinspectionView
 from app.infra.models import (
     DeliveryBatch,
     Evidence,
@@ -89,6 +90,13 @@ class AttributeRequest(BaseModel):
 
     decision: str  # "adopt" | "reject" | "defer"
     cause: str | None = None
+
+
+class IncidentCloseOut(BaseModel):
+    incident_id: uuid.UUID
+    incident_status: str
+    batch_id: uuid.UUID
+    batch_status: str
 
 
 # --- dependency (session) — injected by the app factory in Task 9 ----------
@@ -378,13 +386,8 @@ def incident_capa(
     incident = session.get(QualityIncident, incident_id)
     if incident is None:
         raise HTTPException(status_code=404, detail="incident_not_found")
-    if incident.status != "assigned":
-        raise HTTPException(
-            status_code=409,
-            detail={"error": "incident_not_assigned", "status": incident.status},
-        )
 
-    # L3: verified=True requires a pass reinspection record
+    # L3: verified=True requires a pass reinspection record（两个分支共用）
     if payload.verified:
         re_ = (
             session.get(Reinspection, incident.verification_id)
@@ -396,6 +399,29 @@ def incident_capa(
                 status_code=400,
                 detail={"error": "capa_verified_requires_pass_reinspection"},
             )
+
+    # 复检通过后的 CAPA 补勾：pending_recheck 态允许更新字段与 verified 标记
+    # （复检记录此时才存在，L3 门禁上方已校验），无状态转移。
+    if incident.status == "pending_recheck":
+        incident.confirmed_root_cause = payload.confirmed_root_cause
+        incident.corrective_action = payload.corrective_action
+        incident.capa_verified = payload.verified
+        _record_trace(
+            session,
+            incident,
+            "incident_capa",
+            {"verified": payload.verified, "update": True},
+            {"incident_status": "pending_recheck"},
+        )
+        session.commit()
+        session.refresh(incident)
+        return _to_out(incident)
+
+    if incident.status != "assigned":
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "incident_not_assigned", "status": incident.status},
+        )
 
     batch = session.get(DeliveryBatch, incident.batch_id)
     batch_res = transition(
@@ -428,6 +454,111 @@ def incident_capa(
     session.commit()
     session.refresh(incident)
     return _to_out(incident)
+
+
+@router.post("/{incident_id}/close", response_model=IncidentCloseOut)
+def close_incident_endpoint(incident_id: uuid.UUID, session: SessionDep) -> IncidentCloseOut:
+    """复检通过后的闭环签署（P0 缺口 #1，设计文档 §9.8）。
+
+    五条件硬校验（domain ``close_incident``：owner / CAPA 字段 / 独立复检
+    记录 / 复检通过 / CAPA 已验证）→ 异常 ``pending_recheck -> closed``；
+    仅当该批次**全部**异常处于终态时，批次 ``pending_recheck ->
+    pending_release``（同事务 + 轨迹）。关闭是质量工程师的最终签署动作，
+    复检通过不自动关闭（§4.4 闭环点）。
+    """
+    incident = session.get(QualityIncident, incident_id)
+    if incident is None:
+        raise HTTPException(status_code=404, detail="incident_not_found")
+    require_not_archived(incident.batch_id, session)
+    if incident.status != "pending_recheck":
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "incident_not_closeable", "status": incident.status},
+        )
+
+    # 五条件（domain 纯函数）：缺失项逐条指名，不静默放行。
+    re_row = (
+        session.get(Reinspection, incident.verification_id) if incident.verification_id else None
+    )
+    view = IncidentView(
+        incident_id=str(incident.incident_id),
+        batch_id=str(incident.batch_id),
+        trigger_type=incident.trigger_type,
+        severity=incident.severity,
+        status=incident.status,
+        owner=incident.owner or "",
+        confirmed_root_cause=incident.confirmed_root_cause or "",
+        corrective_action=incident.corrective_action or "",
+    )
+    re_view = (
+        ReinspectionView(
+            reinspection_id=str(re_row.reinspection_id),
+            incident_id=str(re_row.incident_id),
+            sn="",
+            result=re_row.result,
+        )
+        if re_row
+        else None
+    )
+    gate = close_incident(view, re_view, incident.capa_verified)
+    if not gate.can_close:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "close_conditions_unmet", "missing": list(gate.missing)},
+        )
+
+    inc_res = transition(
+        incident.status, "closed", {"close_conditions_met": True}, kind="incident"
+    )
+    if not inc_res.accepted:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "incident_transition_denied", "reason": inc_res.reason},
+        )
+    incident.status = "closed"
+
+    # 批次联动：全部异常终态（closed/rejected/scrapped）才推进到待放行。
+    batch = session.get(DeliveryBatch, incident.batch_id)
+    batch_status = batch.status
+    open_count = (
+        session.query(QualityIncident)
+        .filter(
+            QualityIncident.batch_id == batch.batch_id,
+            QualityIncident.status.in_(["new", "isolated", "assigned", "pending_recheck"]),
+        )
+        .count()
+    )
+    if open_count == 0 and batch.status == "pending_recheck":
+        batch_res = transition(
+            batch.status,
+            "pending_release",
+            {"recheck_passed": True, "measures_effective": True},
+            kind="batch",
+        )
+        if not batch_res.accepted:
+            session.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail={"error": "batch_transition_denied", "reason": batch_res.reason},
+            )
+        batch.status = "pending_release"
+        batch_status = "pending_release"
+
+    _record_trace(
+        session,
+        incident,
+        "incident_close",
+        {},
+        {"incident_status": "closed", "batch_status": batch_status},
+    )
+    session.commit()
+    session.refresh(incident)
+    return IncidentCloseOut(
+        incident_id=incident.incident_id,
+        incident_status=incident.status,
+        batch_id=batch.batch_id,
+        batch_status=batch_status,
+    )
 
 
 @router.get("", response_model=list[IncidentOut])

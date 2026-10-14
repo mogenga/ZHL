@@ -20,12 +20,20 @@ ROOT = Path(__file__).resolve().parents[2] / "app" / "static"
 
 def test_api_js_served_by_html():
     html = (ROOT / "workbench.html").read_text(encoding="utf-8")
-    assert 'src="/static/wb/api.js"' in html, "api.js 未在 workbench.html 中加载"
+    # 缓存击穿：脚本引用允许带 ?v= 版本参数（workbench.html 维护）
+    import re
+
+    def _src_pos(f: str) -> int:
+        m = re.search(r'src="/static/' + re.escape(f) + r'(\?[^"]*)?"', html)
+        assert m, f"{f} 未在 workbench.html 中加载"
+        return m.start()
+
+    assert _src_pos("wb/api.js") >= 0
     # 顺序：ui.js → api.js → main.js → 各 stage → report.js
     order = ["wb/ui.js", "wb/api.js", "wb/main.js",
              "wb/stages/intake.js", "wb/stages/judge.js", "wb/stages/incident.js",
              "wb/stages/reinspection.js", "wb/stages/release.js", "wb/report.js"]
-    idx = [html.index('src="/static/' + f + '"') for f in order]
+    idx = [_src_pos(f) for f in order]
     assert idx == sorted(idx), f"脚本加载顺序错误：{list(zip(order, idx))}"
 
 
