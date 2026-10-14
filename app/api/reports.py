@@ -31,6 +31,8 @@ from app.plugins.trace_store import TraceStore
 from app.skills.report_skill import ReportSkill
 
 router = APIRouter(prefix="/api/batches", tags=["reports"])
+# 全局报告目录（工作台“报告”页需要跨批次查看所有报告）
+reports_router = APIRouter(prefix="/api/reports", tags=["reports"])
 
 
 class ReportCreate(BaseModel):
@@ -196,3 +198,18 @@ def get_report(batch_id: uuid.UUID, report_id: uuid.UUID, session: SessionDep) -
     if report is None or report.batch_id != batch_id:
         raise HTTPException(status_code=404, detail="report_not_found")
     return _to_out(report)
+
+
+@reports_router.get("", response_model=list[ReportOut])
+def list_all_reports(session: SessionDep) -> list[ReportOut]:
+    """全局报告列表：跨批次返回所有报告，按 generated_at 降序。
+
+    工作台“报告”页本质上是报告目录，不限定在单个批次，
+    避免用户在不同批次间反复切换才能看到最近报告。
+    """
+    rows = (
+        session.query(Report)
+        .order_by(Report.generated_at.desc(), Report.report_type, Report.version)
+        .all()
+    )
+    return [_to_out(r) for r in rows]

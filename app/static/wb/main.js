@@ -40,18 +40,17 @@ WB.goHome = function () {
 /* ---- 视图切换（左列四标签）---- */
 WB.switchView = function (name) {
   WB.state.view = name;
-  // 报告视图：拉取当前批次报告列表（左侧导航列表 + 主区报告页共用 WB.state.reports）
+  // 报告视图：拉取全局报告列表（跨批次所有报告，默认展示全部）
+  // 左侧导航 + 主区报告页共用 WB.state.reports
   if (name === 'reports') {
     WB.state.reports = [];
-    if (WB.state.batchId) {
-      WB.api.listReports(WB.state.batchId).then(function (res) {
-        WB.state.reports = (res.ok ? res.data : []) || [];
-        if (WB.state.view === 'reports') {
-          WB.renderLeft();
-          WB._renderCenterAndRight();
-        }
-      });
-    }
+    WB.api.allReports().then(function (res) {
+      WB.state.reports = (res.ok ? res.data : []) || [];
+      if (WB.state.view === 'reports') {
+        WB.renderLeft();
+        WB._renderCenterAndRight();
+      }
+    });
   }
   WB.renderLeft();
   if (name !== 'batch') WB.state._search = '';
@@ -108,37 +107,56 @@ WB.renderCenter = function (detail, listitem, panelDom) {
   main.append(panelDom || WB.h('div', { class: 'card empty', text: '该节点无可操作项' }));
 };
 
-/* ---- 报告页（工作台主区）：当前批次全部报告 + 生成入口 + 查看详情 ---- */
+/* ---- 报告页（工作台主区）：展示全部批次的报告（全局目录）+ 生成入口 + 查看正文 ---- */
 WB._reportPage = function (detail) {
   const card = WB.h('div', { class: 'card stage-panel report-view-page' });
-  card.append(WB.h('h3', { text: '批次报告 · ' + detail.batch_no }));
-  card.append(WB.h('div', { class: 'desc', text: '本批次已生成的报告；点击「查看正文」在工作台展开报告内容' }));
+  card.append(WB.h('h3', { text: '报告' }));
+  card.append(WB.h('div', { class: 'desc', text: '展示所有批次生成的报告；点击「查看正文」在工作台展开对应报告内容' }));
   const body = WB.h('div', {});
   card.append(body);
   body.append(WB.h('div', { class: 'hint-line', text: '正在加载报告…' }));
-  WB.api.listReports(detail.batch_id).then(function (res) {
+  WB.api.allReports().then(function (res) {
     body.replaceChildren();
     if (!res.ok) {
       body.append(WB.h('div', { class: 'form-err', text: WB.errText(res.error) || '报告加载失败' }));
       return;
     }
     const list = res.data || [];
+    WB.state.reports = list;
     if (!list.length) {
-      body.append(WB.h('div', { class: 'hint-line muted', text: '暂无报告' +
-        (['released', 'rejected'].indexOf(detail.status) >= 0 ? '（可点击下方生成）' : '（放行/拒绝后可生成）') }));
+      body.append(WB.h('div', { class: 'hint-line muted', text: '暂无报告（已放行/已拒绝批次可点击下方生成）' }));
     } else {
-      const rows = list.map(function (r) {
-        return WB.h('div', { class: 'hint-line' },
-          WB.h('span', { class: 'tag', text: (WB.REP_CN || WB.RPT_CN || {})[r.report_type] || r.report_type || '报告' }),
-          WB.h('span', { class: 'muted', text: ' · 版本 v' + (r.version || 1) + ' · ' + (WB.fmtTime(r.generated_at) || '') }),
-          WB.h('button', { class: 'newbtn', style: 'font-size:12px;padding:1px 8px;margin-left:8px',
-            onclick: function () { WB._expandReportInMain(r, detail); }, text: '查看正文' }));
+      // 按批次分组：每个批次一个子卡，子卡内列出该批次报告
+      const byBatch = {};
+      list.forEach(function (r) {
+        const bid = r.batch_id || '';
+        if (!byBatch[bid]) byBatch[bid] = [];
+        byBatch[bid].push(r);
       });
-      body.append(WB.h('div', { class: 'hint-line', style: 'font-weight:600', text: '报告记录（' + list.length + '）' }));
-      rows.forEach(function (row) { body.append(row); });
+      const batchNos = {};
+      (WB.state.batches || []).forEach(function (b) { batchNos[b.batch_id] = b.batch_no; });
+      const groups = Object.keys(byBatch).sort();
+      body.append(WB.h('div', { class: 'hint-line', style: 'font-weight:600', text: '报告记录（共 ' + list.length + '，' + groups.length + ' 个批次）' }));
+      groups.forEach(function (bid) {
+        const sub = byBatch[bid];
+        const batchLabel = batchNos[bid] || (bid ? bid.slice(0, 8) : '');
+        const groupCard = WB.h('div', { class: 'report-group', style: 'margin:8px 0;padding:10px;border:1px solid var(--line);border-radius:10px' });
+        groupCard.append(WB.h('div', { class: 'hint-line', style: 'font-weight:600;font-size:13px', text: '批次 ' + batchLabel + ' · ' + sub.length + ' 份报告' }));
+        sub.forEach(function (r) {
+          groupCard.append(WB.h('div', { class: 'hint-line' },
+            WB.h('span', { class: 'tag', text: (WB.REP_CN || WB.RPT_CN || {})[r.report_type] || r.report_type || '报告' }),
+            WB.h('span', { class: 'muted', text: ' · 版本 v' + (r.version || 1) + ' · ' + (WB.fmtTime(r.generated_at) || '') }),
+            WB.h('button', { class: 'newbtn', style: 'font-size:12px;padding:1px 8px;margin-left:8px',
+              onclick: function () {
+                if (WB.state.batchId !== r.batch_id) WB.selectBatch(r.batch_id);
+                WB._expandReportInMain(r, WB.state.selected);
+              }, text: '查看正文' })));
+        });
+        body.append(groupCard);
+      });
     }
   });
-  // 生成入口：终态批次（已放行/已拒绝/已归档）可生成或重新生成
+  // 生成入口：基于当前选中批次
   const canGen = ['released', 'rejected', 'archived'].indexOf(detail.status) >= 0;
   card.append(WB.h('div', { class: 'actions', style: 'margin-top:12px' },
     canGen
@@ -382,17 +400,17 @@ WB.renderLeft = function () {
       WB.h('div', { class: 'meta', text: (i.batch_id ? i.batch_id.slice(0, 8) : '') + ' · ' + (WB.TRIG_CN[i.trigger_type] || i.trigger_type) + ' · ' + (WB.SEV_CN[i.severity] || i.severity) }))));
     if (!(WB.state.incidents || []).length) pane.append(WB.h('div', { class: 'empty', text: '暂无异常' }));
   } else {
-    // 左侧栏报告 tab：列出当前批次报告（导航），点击切到工作台主区展开报告正文（不用右侧抽屉）。
-    // 列表数据由 switchView('reports') 拉取到 WB.state.reports。
-    pane.append(WB.h('div', { class: 'group-title', text: '报告列表' }));
+    // 左侧栏报告 tab：列出全局报告（跨批次），点击切到工作台主区展开报告正文。
+    // 列表数据由 switchView('reports') 拉取全局 allReports 到 WB.state.reports。
+    pane.append(WB.h('div', { class: 'group-title', text: '报告列表（全部）' }));
     (WB.state.reports || []).forEach((r) => pane.append(WB.h('button', { class: 'batch-item',
       onclick: () => { WB._gotoReportInMain(r); } },
       WB.h('div', { class: 'no' },
         WB.h('span', { text: (r.report_id || '').slice(0, 8) }),
         WB.h('span', { class: 'chip st-' + (r.report_type === 'incident' ? 'rejected' : 'released'), text: (WB.REP_CN || WB.RPT_CN || {})[r.report_type] || r.report_type })),
-      WB.h('div', { class: 'meta', text: (r.batch_no || (r.batch_id || '').slice(0, 8)) + ' \u00b7 v' + r.version + ' \u00b7 ' + WB.fmtTime(r.generated_at) }))));
+      WB.h('div', { class: 'meta', text: (WB.state.batches ? (WB.state.batches.find(function (b) { return b.batch_id === r.batch_id; }) || {}).batch_no || (r.batch_id || '').slice(0, 8) : (r.batch_id || '').slice(0, 8)) + ' \u00b7 v' + r.version + ' \u00b7 ' + WB.fmtTime(r.generated_at) }))));
     if (!(WB.state.reports || []).length) {
-      pane.append(WB.h('div', { class: 'empty', text: WB.state.batchId ? '\u6682\u65e0\u62a5\u544a\uff08\u5de5\u4f5c\u53f0\u4e3b\u533a\u53ef\u751f\u6210\uff09' : '\u5148\u9009\u62e9\u6279\u6b21\u518d\u67e5\u770b\u62a5\u544a' }));
+      pane.append(WB.h('div', { class: 'empty', text: '\u6682\u65e0\u62a5\u544a\uff08\u653e\u884c/\u62d2\u7edd\u6279\u6b21\u53ef\u5728\u5de5\u4f5c\u53f0\u4e3b\u533a\u751f\u6210\uff09' }));
     }
   }
 };

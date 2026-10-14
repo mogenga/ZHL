@@ -86,7 +86,7 @@ WB.api = {
   /* 三态封装：返回 Promise<{ok,status,data,error}>
      error = 归一化对象 {key,msg,status,detail}；成功时 error=null。
      网络层异常 → {key:'network',msg:'网络异常'}；超时 → {key:'timeout'}。 */
-  async request(method, path, body) {
+  async request(method, path, body, opts) {
     const init = { method: method, headers: {} };
     if (body !== undefined && body !== null) {
       init.headers['Content-Type'] = 'application/json';
@@ -94,9 +94,12 @@ WB.api = {
     }
     const hasAC = (typeof AbortController !== 'undefined');
     const ctrl = hasAC ? new AbortController() : null;
+    // 超时可按请求覆盖：AI 归因要现场调真实模型，实测单次 40~90s，
+    // 旧的写死 15s 会让请求每次都被 abort，用户看到的就是「点了没反应」。
+    const timeoutMs = (opts && opts.timeoutMs) || 15000;
     if (ctrl) {
       init.signal = ctrl.signal;
-      ctrl._t = setTimeout(function () { ctrl.abort(); }, 15000);
+      ctrl._t = setTimeout(function () { ctrl.abort(); }, timeoutMs);
     }
     let res;
     try {
@@ -232,16 +235,18 @@ WB.api = {
       return { ok: true, data: r.data };
     });
   },
+  /* AI 归因：真实模型单次调用实测 40~90s，超时给到 120s（默认 15s 会在
+     模型答完之前 abort，表现为「点击无反应」）。 */
   attributeIncident(id, decision, cause) {
     var body = decision == null ? {} : { decision: decision, cause: cause };
-    return WB.api.request('POST', '/api/incidents/' + id + '/attribute', body).then(function (r) {
+    return WB.api.request('POST', '/api/incidents/' + id + '/attribute', body, { timeoutMs: 120000 }).then(function (r) {
       if (!r.ok) return { ok: false, error: r.error, data: null };
       return { ok: true, data: r.data };
     });
   },
   /* 归因人工采纳（跨请求 HITL）：生成假设后由人另一次请求提交三选一 */
   adoptAttribution(id, decision, cause) {
-    return WB.api.request('POST', '/api/incidents/' + id + '/adopt', { decision: decision, cause: cause }).then(function (r) {
+    return WB.api.request('POST', '/api/incidents/' + id + '/adopt', { decision: decision, cause: cause }, { timeoutMs: 30000 }).then(function (r) {
       if (!r.ok) return { ok: false, error: r.error, data: null };
       return { ok: true, data: r.data };
     });
@@ -305,6 +310,13 @@ WB.api = {
   },
   listReports(batchId) {
     return WB.api.request('GET', '/api/batches/' + batchId + '/reports').then(function (r) {
+      if (!r.ok) return { ok: false, error: r.error, data: [] };
+      return { ok: true, data: r.data || [] };
+    });
+  },
+  // 全局报告目录（跨批次所有报告，工作台“报告”页默认来源）
+  allReports() {
+    return WB.api.request('GET', '/api/reports').then(function (r) {
       if (!r.ok) return { ok: false, error: r.error, data: [] };
       return { ok: true, data: r.data || [] };
     });

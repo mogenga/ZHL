@@ -119,6 +119,7 @@ def create_app(
     app.include_router(reinspections.router)
     app.include_router(release.router)
     app.include_router(reports.router)
+    app.include_router(reports.reports_router)
     # 规则版本发现（只读，供前端工作台下拉选择，避免人肉粘贴 UUID）。
     app.include_router(rule_versions.router)
 

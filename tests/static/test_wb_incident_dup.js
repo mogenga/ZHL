@@ -41,6 +41,14 @@ function makeEl(tag) {
       }
     },
     replaceChildren(...kids) { e.children = []; e.append(...kids); },
+    // 真实 DOM 方法：ui.js 的 extraButtons（归因三选一）用到；
+    // shim 缺它会让该路径在测试里抛 TypeError，掩盖真实行为。
+    insertBefore(n, ref) {
+      const i = e.children.indexOf(ref);
+      if (i < 0) e.children.push(n); else e.children.splice(i, 0, n);
+      try { Object.defineProperty(n, 'parentNode', { value: e, configurable: true }); } catch (_) {}
+      return n;
+    },
     remove() {
       const p = e.parentNode;
       if (p) { const i = p.children.indexOf(e); if (i >= 0) p.children.splice(i, 1); }
@@ -224,5 +232,35 @@ function openCreateForm(list) {
   }
 
   console.log(failed === 0 ? '\nALL PASS' : '\n' + failed + ' FAILED');
+  // ---- F. AI 归因按钮：点击须有反馈且必须真的发出请求 ----
+  // （2026-10-15 反馈「AI 归因点击无反应」：真模型要 40~90s，旧实现
+  //   超时写死 15s 必被 abort 且全程无 loading；这里钉住"点得动、有反馈、
+  //   发得出请求、失败有提示"四点。）
+  {
+    const isoInc = { incident_id: INC_ID, batch_id: BATCH_ID, status: 'isolated', trigger_type: 'rule_fail', severity: 'major' };
+    WB.state.selected = batch; WB.state.batchId = BATCH_ID;
+    WB.state.incidents = [isoInc]; WB.state.traces = [];
+    WB.api.listIncidents = () => Promise.resolve({ ok: true, data: [isoInc] });
+    let called = null;
+    let resolveAttr = null;
+    WB.api.attributeIncident = function (id, dec, cause) {
+      called = { id: id, dec: dec, cause: cause };
+      return new Promise(function (res) { resolveAttr = res; });
+    };
+    const panel = WB.stages.incident.render(batch, {});
+    const btn = findText(panel, 'AI 归因');
+    assert(!!btn, 'F1: isolated 态渲染出「AI 归因」按钮');
+    btn.fire('click');
+    await flush();
+    assert(!!called, 'F2: 点击真的发出归因请求');
+    assert(called.dec === null && called.cause === null, 'F3: 第一步不带 decision（生成+停驻）');
+    assert(hasText(panel, 'AI 归因中'), 'F4: 等待期间有进行中反馈（不再是「点了没反应」）');
+
+    resolveAttr({ ok: false, error: { key: 'timeout', msg: '请求超时', status: 0, detail: null } });
+    await flush(); await flush();
+    assert(hasText(panel, '请求超时'), 'F5: 超时/失败有可见提示');
+    assert(!hasText(panel, 'AI 归因中'), 'F6: 失败后恢复，不卡在「归因中」');
+  }
+
   process.exit(failed === 0 ? 0 : 1);
 })().catch(function (e) { console.error('FATAL:', e); process.exit(1); });

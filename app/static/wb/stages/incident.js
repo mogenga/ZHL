@@ -120,9 +120,19 @@ WB.stages.incident = (function () {
 
   /* ---- AI 归因（spec §2.2 / §4.9）：生成假设（本次请求）→ 人工三选一（另一次请求）---- */
   function attributeModal(i, batch, slot, done, fail) {
+    // 现场调真实模型要几十秒：先把按钮换成「归因中…」并禁用，否则全程无反馈，
+    // 用户看到的就是「点了没反应」（旧实现连超时都是 15s，必然 abort）。
+    const was = slot.textContent;
+    slot.replaceChildren(WB.h('div', { class: 'hint-line', text: 'AI 归因中，正在调用模型，请稍候（约 1 分钟）…' }));
+    const restore = function () {
+      if (slot.textContent && slot.textContent.indexOf('AI 归因中') === 0) {
+        slot.replaceChildren(WB.h('div', { class: 'hint-line', text: was || '' }));
+      }
+    };
+    const failWithRestore = function (msg) { restore(); fail(msg); };
     // 第一步：不带 decision → 后端生成假设并把运行停在 human_adopt 中断点。
     WB.api.attributeIncident(i.incident_id, null, null).then(function (res) {
-      if (!res.ok) { fail(WB.errText(res.error)); return; }
+      if (!res.ok) { failWithRestore(WB.errText(res.error)); return; }
       const hyp = res.data.hypotheses || [];
       const hypBox = WB.h('div', {});
       if (hyp.length) {

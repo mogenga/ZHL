@@ -735,3 +735,19 @@
    失败"会被状态机拒绝。这是 P0 冻结的边缘定义问题（要么加边、要么收窄可复检态），
    不是本次 500 的成因，未擅自改动冻结表。
 9. **dev-notes 路径**：本文件（本节）。
+
+## 2026-10-15 · 「AI 归因点击无反应」修复（前端超时 + 真模型回复形状）
+
+1. **报障**：工作台异常节点点「AI 归因」没有任何反应。
+2. **排查路径**：先用 node DOM harness（`tests/static` 现成的 shim）复现点击——按钮渲染正常、点击能进回调、请求能发出，逻辑本身没坏，说明是环境问题。转而用真 Postgres + `.env` 里配好的真 agnes-3.0-flash 实测该接口，**耗时 56.8s**，而 `app/static/wb/api.js` 的请求超时**写死 15 秒**，加上点击后全程无 loading 反馈——表现就是「点了没反应」。
+3. **修复 A（超时与反馈）**：
+   - `api.js::request` 支持按请求覆盖超时（`opts.timeoutMs`）；`attributeIncident` 给到 **120s**、`adoptAttribution` 给到 30s（默认仍是 15s）。
+   - `stages/incident.js::attributeModal` 点击后把按钮区换成「AI 归因中，正在调用模型，请稍候（约 1 分钟）…」，失败/超时恢复并显示原因。
+4. **修复 B（真模型回复形状）**：实测发现真模型返回的假设列表字段名是 **`hypotheses_ranked`**（还带 `key_observations` / `next_step_summary` 等额外顶层键），而 `AttributionSkill.run()` 严格取 `llm_result.get("hypotheses", [])` → 拿到 **0 条**，UI 显示「暂无可用假设」。模型答得其实很好（3 条假设、正确引用真实 evidence id、置信度合理），全被字段名不匹配吃掉。
+   - 新增 `app/plugins/attribution.py::_normalize_hypotheses`：归一化顶层键（`hypotheses` / `hypotheses_ranked` / `root_causes` / `causes`）与项目内键别名（`cause`/`description`、`evidence_ids`/`evidence`、`recommended_action`/`action`…），单数字符串形式的 evidence 包成列表，置信度容错转型并 clamp；读不出假设时返回空列表，**不凭空编造**。
+5. **修复 C（trace 谎报模型来源）**：归因 trace 的 `model_version` 与 `params_summary.model` 硬编码 `"mock"`，配了真模型也照写 `mock`——评审看轨迹时会误判这是夹具数据。改为 `_model_version(llm)`，真模型记真实模型名（实测 `agnes-3.0-flash`），降级时记 `mock-degraded`。
+6. **验证**：真 Postgres + 真模型实测——归因 `HTTP 200 / 56s / 3 条假设全带证据`（修复前 0 条），`/adopt` 200、根因落库、trace 如实记 `agnes-3.0-flash`；`348 passed`；`ruff` / `black` 全绿。
+7. **回归测试**：
+   - `tests/skills/test_attribution_skill.py`：新增 4 条——真模型重命名键可采纳、别名键与坏类型容错、读不出时不编造、Skill 走归一化且 trace 报真实模型名。
+   - `tests/static/test_wb_incident_dup.js`：新增 F 组 6 条（按钮存在 / 点击真发请求 / 第一步不带 decision / **等待期有进行中反馈** / 失败有提示 / 失败后恢复），并给该 harness 的 DOM shim 补上 `insertBefore`（ui.js 的 extraButtons 用到，缺它会让归因路径在测试里抛 TypeError）。删掉 loading 反馈这组测试即红（已实测）。
+8. **dev-notes 路径**：本文件（本节）。

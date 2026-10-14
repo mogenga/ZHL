@@ -49,10 +49,98 @@ _LLM_SCHEMA = {
     ]
 }
 
+#: Keys a live model may use instead of ``hypotheses`` when it decides to
+#: rearrange the requested shape. A real endpoint answered with
+#: ``hypotheses_ranked`` plus extra keys (``key_observations``,
+#: ``next_step_summary``) and the Skill's strict ``.get("hypotheses", [])``
+#: silently produced zero hypotheses — the whole attribution showed up empty
+#: in the UI while the model had in fact answered well. The prompt names the
+#: contract; this list is the tolerance for models that rename it anyway.
+_HYPOTHESIS_KEYS = ("hypotheses", "hypotheses_ranked", "root_causes", "causes")
+
+#: Per-item key aliases inside a hypothesis.
+_CAUSE_KEYS = ("cause", "hypothesis", "description", "root_cause")
+_EVIDENCE_KEYS = ("evidence_ids", "evidence", "evidence_refs")
+_ACTION_KEYS = ("recommended_action", "action", "recommendation", "suggestion")
+_CONFIDENCE_KEYS = ("confidence", "score", "probability")
+
+
+def _normalize_hypotheses(payload: dict) -> list[dict]:
+    """Coerce a model reply into the canonical hypothesis shape.
+
+    Tolerant by design: the model is being helpful, not adversarial — a
+    renamed key or a string-instead-of-list evidence field should degrade to
+    a usable hypothesis (which the D2 gate then judges on evidence), not to
+    an empty result. Anything that cannot be read as a hypothesis at all is
+    dropped rather than invented.
+    """
+    if not isinstance(payload, dict):
+        return []
+    raw = None
+    for key in _HYPOTHESIS_KEYS:
+        value = payload.get(key)
+        if isinstance(value, list) and value:
+            raw = value
+            break
+    if raw is None:
+        return []
+    out: list[dict] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            if isinstance(item, str) and item.strip():
+                out.append({"cause": item.strip(), "confidence": 0.0, "evidence_ids": []})
+            continue
+        cause = next((str(item[k]) for k in _CAUSE_KEYS if item.get(k)), "")
+        if not cause:
+            continue
+        evidence = next((item[k] for k in _EVIDENCE_KEYS if item.get(k) is not None), [])
+        if isinstance(evidence, str):
+            evidence = [evidence] if evidence.strip() else []
+        elif not isinstance(evidence, list):
+            evidence = []
+        action = next((str(item[k]) for k in _ACTION_KEYS if item.get(k)), None)
+        confidence = next((item[k] for k in _CONFIDENCE_KEYS if item.get(k) is not None), 0.0)
+        try:
+            confidence = min(max(float(confidence), 0.0), 1.0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        out.append(
+            {
+                "cause": cause,
+                "confidence": confidence,
+                "evidence_ids": [str(e) for e in evidence if str(e).strip()],
+                "recommended_action": action or "",
+            }
+        )
+    return out
+
+
 #: Prompt digest head length recorded in the trace params_summary — a
 #: 64-char prefix is enough to correlate a trace row with a prompt without
 #: persisting the full (potentially secret-bearing) prompt text.
 _PROMPT_HEAD_CHARS = 64
+
+
+def _model_version(llm: Any) -> str:
+    """Trace-facing model identity (never claims a model that did not answer).
+
+    ``ResilientLLMClient`` reports ``mock-degraded`` once it has fallen back;
+    a bare mock reports ``mock``; a live client reports its configured model
+    name.
+    """
+    reporter = getattr(llm, "model_version", None)
+    if callable(reporter):
+        try:
+            return str(reporter())
+        except Exception:  # noqa: BLE001 — identity must never break attribution
+            return "unknown"
+    if llm.__class__.__name__.startswith("Mock"):
+        return "mock"
+    # A bare OpenAI-compatible client carries its configured model name.
+    configured = getattr(llm, "model", None)
+    if configured:
+        return str(configured)
+    return "openai-compat"
 
 
 class TraceabilityPlugin:
@@ -139,7 +227,7 @@ class AttributionSkill:
 
         # --- LLM call: OUTSIDE the transaction (AGENT.md §4.3) ------------
         llm_result: dict = self._llm.chat(prompt, _LLM_SCHEMA)
-        hypotheses = llm_result.get("hypotheses", [])
+        hypotheses = _normalize_hypotheses(llm_result)
         plugin = TraceabilityPlugin()
         validated = plugin.validate_evidence(
             hypotheses,
@@ -162,9 +250,12 @@ class AttributionSkill:
                 # Digest only — never the full prompt / any secret.
                 "prompt_len": len(prompt),
                 "prompt_head": prompt[:_PROMPT_HEAD_CHARS],
-                "model": "mock",
+                "model": _model_version(self._llm),
             },
-            model_version="mock-attribution-v1",
+            # Never hardcode "mock": with a real endpoint configured the old
+            # constant mislabelled a live model's output as fixture data in
+            # the very trace row a reviewer reads to judge provenance.
+            model_version=_model_version(self._llm),
             structured_output={"hypotheses": validated},
             validation_result="pass" if validated else "partial",
             failure_reason=None if validated else "no hypothesis survived the evidence gate",
