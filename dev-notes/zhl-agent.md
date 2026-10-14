@@ -645,3 +645,10 @@
 2. **测试结果**：全量 267 passed / 0 failed；样例三 e2e 改走 close API（移除直接写库绕过）。
 3. **dev-notes 路径**：本文件（本节）+ .superpowers/sdd/2026-10-14-p0-closure-fixes/progress.md 执行账本。
 4. **实现说明**：close 端点（五条件 + 批次联动，人工签署）；capa 待复检态补勾扩展；ensure_incident 幂等自动创建（rule_fail/sample_fail/rule_missing/data_consistency 四触发，优先级与孤儿防护见模块 docstring）；工作台待复检卡片新增补勾与关闭操作（缺失条件逐条中文展示）。设计文档 §9.8 已收口（第 3 项 SN 组件级隔离待修复）。
+
+## 2026-10-14 · 遗留事项修复 T1（SN 组件级隔离标记与恢复，§9.8 #3）
+
+1. **功能演示命令**：`D:\jsai\ZHL\.venv\Scripts\python.exe -m pytest tests`（worktree .worktrees/fix-deferred-p0，269 passed）。
+2. **测试结果**：全量 269 passed / 0 failed；新增断言：judge-fail 后失败 SN intake_status=isolated；close 后恢复 confirmed 且放行断言④真实 passed=True。
+3. **dev-notes 路径**：本文件（本节）。
+4. **实现说明**：mark_sns_isolated/restore_sns_after_close（auto_incident.py）；intake_status 枚举新增 isolated（migrations/002 需在既有库补跑）；judge A4 守卫放行 isolated 行（Ruling：隔离是下游检疫态，重判可用——验收样例二钉住）。工作树：.worktrees/fix-deferred-p0（分支 fix/deferred-p0）。
