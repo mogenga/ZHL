@@ -39,14 +39,21 @@ WB.stages.reinspection = (function () {
       WB.h('span', { class: 'mono', text: String(i.incident_id).slice(0, 8) }),
       WB.chip(i.status, 'inc-' + i.status),
       WB.h('span', { class: 'muted', text: '待复检' })));
-    const form = WB.h('div', {});
-    wrap.append(form);
-    _buildForm(i, batch, form);
+    // 灵性修改：渲染仅显示卡片与「录入复检」按钮，点击才弹模态（对齐 incident.js）。
+    // 旧逻辑在任何 _renderCenterAndRight 时重入 render 都会无条件 openModal，
+    // 导致「频繁弹出录入复检」。
+    const err = WB.h('div', {});
+    const actions = WB.h('div', { class: 'actions' },
+      WB.h('button', { class: 'primary', onclick: function () {
+        _buildForm(i, batch, err);
+      }, text: '录入复检' }),
+      err);
+    wrap.append(actions);
     return wrap;
   }
 
   function _buildForm(i, batch, form) {
-    form.replaceChildren();
+    // form = 卡片内 err 槽；保留内容（不清空入口按钮），仅再次打开模态
     const inspections = batch.inspections || [];
     const snOptions = inspections.map(function (x) { return x.sn; });
     const fields = [
@@ -68,7 +75,6 @@ WB.stages.reinspection = (function () {
         { value: 'full_lot', label: '全批' } ] },
       { label: '范围组件条码（扩展/全批时必填，多行）', type: 'textarea', rows: 2 },
     ];
-    const err = WB.h('div', {});
     WB.openModal('录入复检 · ' + String(i.incident_id).slice(0, 8), fields, function (vals) {
       const num = (v) => parseFloat(v);
       const body2 = {
@@ -97,7 +103,7 @@ WB.stages.reinspection = (function () {
         WB.toast(res.data.passed ? '复检通过，请在异常卡片补勾整改措施已验证后确认关闭' : '复检不通过，异常与批次转拒绝');
         WB.loadIncidents().then(function () { WB._loadDetail(batch.batch_id); WB.loadBatches(); });
       });
-    }, { submitLabel: '提交复检', inline: err });
+    }, { submitLabel: '提交复检' });
   }
 
   function _findInspectionId(batch, sn) {
