@@ -40,7 +40,19 @@ WB.goHome = function () {
 /* ---- 视图切换（左列四标签）---- */
 WB.switchView = function (name) {
   WB.state.view = name;
-  // 报告视图：主区由 WB._reportPage 自行拉取当前批次报告列表；左侧栏仅导航
+  // 报告视图：拉取当前批次报告列表（左侧导航列表 + 主区报告页共用 WB.state.reports）
+  if (name === 'reports') {
+    WB.state.reports = [];
+    if (WB.state.batchId) {
+      WB.api.listReports(WB.state.batchId).then(function (res) {
+        WB.state.reports = (res.ok ? res.data : []) || [];
+        if (WB.state.view === 'reports') {
+          WB.renderLeft();
+          WB._renderCenterAndRight();
+        }
+      });
+    }
+  }
   WB.renderLeft();
   if (name !== 'batch') WB.state._search = '';
   WB._renderCenterAndRight();
@@ -98,9 +110,9 @@ WB.renderCenter = function (detail, listitem, panelDom) {
 
 /* ---- 报告页（工作台主区）：当前批次全部报告 + 生成入口 + 查看详情 ---- */
 WB._reportPage = function (detail) {
-  const card = WB.h('div', { class: 'card stage-panel' });
+  const card = WB.h('div', { class: 'card stage-panel report-view-page' });
   card.append(WB.h('h3', { text: '批次报告 · ' + detail.batch_no }));
-  card.append(WB.h('div', { class: 'desc', text: '本批次已生成的报告；点击「查看」打开报告正文' }));
+  card.append(WB.h('div', { class: 'desc', text: '本批次已生成的报告；点击「查看正文」在工作台展开报告内容' }));
   const body = WB.h('div', {});
   card.append(body);
   body.append(WB.h('div', { class: 'hint-line', text: '正在加载报告…' }));
@@ -117,10 +129,10 @@ WB._reportPage = function (detail) {
     } else {
       const rows = list.map(function (r) {
         return WB.h('div', { class: 'hint-line' },
-          WB.h('span', { class: 'tag', text: (WB.REP_CN || {})[r.report_type] || r.report_type || '报告' }),
+          WB.h('span', { class: 'tag', text: (WB.REP_CN || WB.RPT_CN || {})[r.report_type] || r.report_type || '报告' }),
           WB.h('span', { class: 'muted', text: ' · 版本 v' + (r.version || 1) + ' · ' + (WB.fmtTime(r.generated_at) || '') }),
           WB.h('button', { class: 'newbtn', style: 'font-size:12px;padding:1px 8px;margin-left:8px',
-            onclick: function () { WB._reportDrawer(r); }, text: '查看' }));
+            onclick: function () { WB._expandReportInMain(r, detail); }, text: '查看正文' }));
       });
       body.append(WB.h('div', { class: 'hint-line', style: 'font-weight:600', text: '报告记录（' + list.length + '）' }));
       rows.forEach(function (row) { body.append(row); });
@@ -370,17 +382,28 @@ WB.renderLeft = function () {
       WB.h('div', { class: 'meta', text: (i.batch_id ? i.batch_id.slice(0, 8) : '') + ' · ' + (WB.TRIG_CN[i.trigger_type] || i.trigger_type) + ' · ' + (WB.SEV_CN[i.severity] || i.severity) }))));
     if (!(WB.state.incidents || []).length) pane.append(WB.h('div', { class: 'empty', text: '暂无异常' }));
   } else {
-    // 报告页已移至工作台主区（WB._reportPage）；左侧栏仅保留批次导航，
-    // 此处给出定位提示，避免用户以为报告列表在这里
-    if (WB.state.batchId) {
-      pane.append(WB.h('div', { class: 'hint-line muted', text: '报告页在工作台主区展示（' +
-        (WB.state.selected ? WB.state.selected.batch_no : '当前批次') +
-        '）；点击右侧批次或总览进入查看。' }));
-      pane.append(WB.h('div', { class: 'empty', text: '暂无报告入口——请选中批次后在工作台查看/生成报告' }));
-    } else {
-      pane.append(WB.h('div', { class: 'empty', text: '先选择批次，报告页将展示在工作台' }));
+    // 左侧栏报告 tab：列出当前批次报告（导航），点击切到工作台主区展开报告正文（不用右侧抽屉）。
+    // 列表数据由 switchView('reports') 拉取到 WB.state.reports。
+    pane.append(WB.h('div', { class: 'group-title', text: '报告列表' }));
+    (WB.state.reports || []).forEach((r) => pane.append(WB.h('button', { class: 'batch-item',
+      onclick: () => { WB._gotoReportInMain(r); } },
+      WB.h('div', { class: 'no' },
+        WB.h('span', { text: (r.report_id || '').slice(0, 8) }),
+        WB.h('span', { class: 'chip st-' + (r.report_type === 'incident' ? 'rejected' : 'released'), text: (WB.REP_CN || WB.RPT_CN || {})[r.report_type] || r.report_type })),
+      WB.h('div', { class: 'meta', text: (r.batch_no || (r.batch_id || '').slice(0, 8)) + ' \u00b7 v' + r.version + ' \u00b7 ' + WB.fmtTime(r.generated_at) }))));
+    if (!(WB.state.reports || []).length) {
+      pane.append(WB.h('div', { class: 'empty', text: WB.state.batchId ? '\u6682\u65e0\u62a5\u544a\uff08\u5de5\u4f5c\u53f0\u4e3b\u533a\u53ef\u751f\u6210\uff09' : '\u5148\u9009\u62e9\u6279\u6b21\u518d\u67e5\u770b\u62a5\u544a' }));
     }
   }
+};
+
+/* 左侧报告项 -> 工作台主区报告页展开正文（不用右侧抽屉） */
+WB._gotoReportInMain = function (r) {
+  if (r.batch_id && WB.state.batchId && WB.state.batchId !== r.batch_id) {
+    WB.selectBatch(r.batch_id);
+  }
+  if (WB.state.view !== 'reports') WB.switchView('reports');
+  WB._expandReportInMain(r, WB.state.selected);
 };
 /* spec §5 术语对照表 */
 WB.TRIG_CN = { rule_fail: '规则失败', sample_fail: '抽样失败', appearance_manual: '外观人工触发', data_consistency: '数据一致性', rule_missing: '规则缺失' };

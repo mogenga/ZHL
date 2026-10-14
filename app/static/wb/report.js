@@ -86,7 +86,29 @@ WB.report = (function () {
     if (jb) content.append(jb);
   }
 
-  return { open: open, mdToDom: mdToDom };
+  // 报告正文在主区展示（工作台）：非侧边抽屉，直接渲染到指定容器，正文不被压缩到少量空间
+  function render(body, r) {
+    body.replaceChildren();
+    body.append(WB.h('div', { class: 'hint-line' },
+      WB.h('span', { class: 'tag', text: ((WB.REP_CN || WB.RPT_CN || {})[r.report_type] || '报告') }),
+      WB.h('span', { class: 'muted', text: ' · 版本 v' + (r.version || 1) + ' · ' + (WB.fmtTime(r.generated_at) || '') })));
+    const content = WB.h('div', { class: 'report-body', style: 'margin-top:8px' });
+    if (r.content_md != null || r.content_json != null) {
+      _fill(content, r);
+    } else {
+      content.append(WB.h('div', { class: 'empty', text: '正文加载中…' }));
+      WB.api.getReport(r.batch_id, r.report_id).then(function (res) {
+        if (!res.ok) {
+          content.replaceChildren(WB.h('div', { class: 'form-err', text: WB.errText(res.error) || '报告加载失败' }));
+          return;
+        }
+        _fill(content, res.data);
+      });
+    }
+    body.append(content);
+  }
+
+  return { open: open, render: render, mdToDom: mdToDom };
 })();
 
 // 覆盖 main.js 的占位 _reportDrawer
@@ -96,6 +118,38 @@ WB._reportDrawer = function (r) {
 };
 
 // 报告视图下的“生成报告”动作（由批次详情/放行节点触发）
+// 工作台主区展示报告正文：在主区「报告」视图卡片下方追加正文区（不用右侧抽屉，避开正文被压缩）
+WB._expandReportInMain = function (report, batch) {
+  if (WB.state.view !== 'reports') return;
+  const main = WB.el('mainPane');
+  const page = main.querySelector('.report-view-page');
+  if (!page) return;
+  const host = page.querySelector('.report-detail-host');
+  if (host) host.remove();
+  const batchNo = (batch && batch.batch_no) || (report.batch_no) || '';
+  const detail = WB.h('div', { class: 'report-detail-host card stage-panel', style: 'margin-top:10px' });
+  detail.append(WB.h('h3', { text: '报告正文 · ' +
+    ((WB.REP_CN || WB.RPT_CN || {})[report.report_type] || '报告') +
+    (batchNo ? ' · ' + batchNo : '') }));
+  const body = WB.h('div', {});
+  detail.append(body);
+  if (WB.report && WB.report.render) WB.report.render(body, report);
+  else if (report.content_md != null) {
+    body.append(WB.h('pre', { text: report.content_md,
+      style: 'white-space:pre-wrap;font-size:13px' }));
+  } else {
+    WB.api.getReport(report.batch_id, report.report_id).then(function (res) {
+      if (!res.ok) {
+        body.replaceChildren(WB.h('div', { class: 'form-err', text: WB.errText(res.error) || '报告加载失败' }));
+        return;
+      }
+      body.replaceChildren(WB.h('pre', { text: res.data.content_md,
+        style: 'white-space:pre-wrap;font-size:13px' }));
+    });
+  }
+  page.append(detail);
+};
+
 WB.generateReportForBatch = function (batch) {
   const types = [
     { value: 'release', label: '放行报告' },
@@ -107,13 +161,16 @@ WB.generateReportForBatch = function (batch) {
     WB.api.generateReport(batch.batch_id, vals[0]).then(function (res) {
       if (!res.ok) { WB.toast(WB.errText(res.error)); return; }
       WB.toast('报告已生成');
-      // 刷新批次（可能触发自动归档）与报告列表，并直接打开报告抽屉以呈现内容
+      // 刷新批次（可能触发自动归档）；报告正文在工作台主区展示，不压缩到侧边抽屉
       WB._loadDetail(batch.batch_id);
       WB.loadBatches();
       if (WB.state.view === 'reports') {
-        WB.switchView('reports'); // 重新拉取当前批次报告列表，左栏立即展示
+        // 工作台报告页重渲染：新报告立即出现在主区列表，并扩展新报告正文
+        WB._renderCenterAndRight();
+        WB._expandReportInMain(res.data, batch);
+      } else if (WB._reportDrawer) {
+        WB._reportDrawer(res.data);
       }
-      if (WB._reportDrawer) WB._reportDrawer(res.data);
     });
   }, { submitLabel: '生成' });
 };
