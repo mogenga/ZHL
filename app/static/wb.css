@@ -148,6 +148,12 @@ td.num,th.num{font-family:var(--mono)}
 .toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(20px);background:#1c2534;color:#fff;border-radius:10px;padding:10px 20px;font-size:13px;opacity:0;transition:.25s;pointer-events:none;z-index:12;max-width:80vw}
 .toast.on{opacity:1;transform:translateX(-50%)}
 
+/* 提交送检等待窗（intake._openWaitModal）：转圈 + 阶段文案 + 计时 */
+.wb-spin{width:28px;height:28px;border-radius:50%;margin:14px auto 10px;border:3px solid var(--accent-soft);border-top-color:var(--accent);animation:wb-spin .8s linear infinite}
+@keyframes wb-spin{to{transform:rotate(360deg)}}
+.wait-body{text-align:center;padding:6px 4px 2px}
+.wait-body .hint-line{margin:4px 0}
+
 /* markdown 内容区（报告抽屉） */
 .md h1,.md h2,.md h3{margin:10px 0 6px}
 .md h1{font-size:18px}.md h2{font-size:15px}.md h3{font-size:14px}

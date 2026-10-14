@@ -770,3 +770,18 @@
    - Python 新增 6 条：修改写修订版且 trace 留原假设、修改缺文本 400、**采纳按存储假设而非前端传参**（已实测：退化成旧行为该用例即红）、人工填写记 manual、驳回/搁置不写字段、bad_decision 列出完整 allowed 集合。
    - JS 新增 G 组 12 条（三个选项都在位、不再有「搁置」、假设可单选、采纳带 index、**切换选项 index 跟着变**）+ H 组 5 条（修改表单以原假设为底稿、提交 modify + modified_cause + 下标）。
 8. **dev-notes 路径**：本文件（本节）。
+
+## 2026-10-15 · 送检提交超时：等待动画 + 超时改轮询
+
+1. **用户反馈**：「提交送检数据之后老是超时。考虑：加入等待动画（转圈什么的），等待期间持续查询情况，完成后输出」。
+2. **根因**：POST /api/intake 单请求同步跑完整条主链——原始单据解析 + 逐组件抽取都要现场调真模型（单次 40~90s，逐组件累加），前端 `WB.api.request` 默认 15s 超时必然 abort；后端不随浏览器中断而停，跑完照常落库，用户看到「超时」但刷新后批次已推进。旧代码 `_markModalBusy` 只把按钮改成「正在提交…」，等待体感为零，且校验失败 `return`（undefined）会被 ui.js 当放行关窗丢输入。
+3. **修补（纯前端，后端零改动 `app/static/wb/stages/intake.js` + `wb.css`）**：
+   - `_intakeSubmit`：三条提交通道（粘贴/CSV/原始单据）统一走它——先关表单（防重复编辑）再开「处理中」等待窗（`.wb-spin` 转圈 + 阶段文案 + 每秒计时）；等待窗**无关闭按钮**（关窗等于放弃跟随，再点提交就是重复入场 409）。
+   - **超时 ≠ 失败**：error.key 为 timeout/network 时等待窗文案切「后台仍在处理，正在自动查询进度」，改走 `_pollUntilLeftIntake`（2s 一次、上限 120 次=4 分钟）。
+   - 轮询三种出口：批次离开 pending_intake → 合成结果（degraded 标记）收窗；状态未动但**检验行已入库** = 低置信挂起等人工确认（不会再自己推进）→ 按 pending 路径收窗；4 分钟到点 → 收窗提示稍后刷新。
+   - `_finishWait` 输出：toast + 入场结果卡（置信度/低置信清单/抽取字段），pending 路径先拉详情再挂卡（确认/拒绝按钮要对着最新详情）；degraded 时补 toast 说明是超时后合成结果。
+   - 校验失败一律 `return false`（空数据/9 列不对/外观非法），表单不关输入不丢。
+   - 删除 `_markModalBusy`/`_unmarkModalBusy`/`_onIntakeSubmitted`（死代码）。
+4. **验证**：新增 `tests/static/test_wb_intake_wait.js` 24 条断言（等待窗生命周期/超时切轮询/低置信 pending 出口/4xx 收窗报错/空数据不丢输入/计时器无泄漏）ALL PASS；4 套既有 JS 回归 ALL PASS；pytest 全量 **397 passed**；ruff/black 不涉及（未改 Python）。
+5. **文档**：README JS 测试索引 +1；docs/test/01 §6 已知限制表补 #14。
+6. **dev-notes 路径**：本文件（本节）。

@@ -1,5 +1,6 @@
 /* WB.stages.intake — 数据入场节点（stageIndex 0）
-   提交送检数据（spec §4.2）→ 展示置信度/低置信清单/抽取字段；
+   提交送检数据（spec §4.2）→ 等待窗（转圈 + 计时；超时自动切轮询，2026-10-15
+   「提交送检之后老是超时」）→ 展示置信度/低置信清单/抽取字段；
    确认/拒绝入场（spec §4.3）；自动确认（≥0.8）时界面跟随新状态不死等。
    数据来源仅 spec §3 事实表端点；刷新后回看降级为组件条码+入场状态（§1.3 边界）。 */
 'use strict';
@@ -29,21 +30,21 @@ WB.stages.intake = (function () {
       const mode = vals[1];
       const raw = (vals[2] || '').trim();
       const overrideStr = (vals[3] || '').trim();
-      if (!raw) { WB.toast('请填写检测数据'); return; }
+      // 校验失败必须 return false：onOk 返回 undefined 会被 ui.js 当作放行而关窗，
+      // 用户粘的数据全部丢失（「填了 10 行、少 1 列、整窗消失」）
+      if (!raw) { WB.toast('请填写检测数据'); return false; }
       const fieldsOverride = parseOverrides(overrideStr);
 
       // 原始单据通道（FR-1.1/1.2）：整段原文交给后端 AI 抽取 + 校验（FR-1.4），
       // 前端不再自行拆列——那才是「系统读懂原始单据」的演示路径。
       if (mode === 'raw') {
-        _markModalBusy();
-        WB.api.submitIntake({
+        return _intakeSubmit({
           batch_id: batch.batch_id,
           source_type: source_type,
           raw_source: raw,
           raw_source_kind: source_type === 'OCR_FORM' ? 'paper_form' : 'iv_csv',
           fields: fieldsOverride || null,
-        }).then(_onIntakeSubmitted(batch));
-        return;
+        }, batch);
       }
 
       // 已结构化通道：前端拆列后按原有 9 列契约提交。
@@ -63,15 +64,14 @@ WB.stages.intake = (function () {
         row.appearance_result = parts[8];
         inspections.push(row);
       });
-      if (err) { WB.toast(err); return; }
-      if (!inspections.length) { WB.toast('没有可解析的检测数据行'); return; }
-      _markModalBusy();
-      WB.api.submitIntake({
+      if (err) { WB.toast(err); return false; }
+      if (!inspections.length) { WB.toast('没有可解析的检测数据行'); return false; }
+      return _intakeSubmit({
         batch_id: batch.batch_id,
         source_type: source_type,
         inspections: inspections,
         fields: fieldsOverride || null,
-      }).then(_onIntakeSubmitted(batch));
+      }, batch);
     }, { submitLabel: '提交送检' });
   }
 
@@ -102,16 +102,15 @@ WB.stages.intake = (function () {
         WB.toast('文件中有 ' + state.parsed.errors.length + ' 行问题，请修正后重新导入');
         return false;
       }
-      _markModalBusy();
       const now = new Date().toISOString();
       const inspections = state.parsed.rows.map((r) => Object.assign(
         { source_type: IMPORT_SOURCE_TYPE, captured_at: now }, r));
-      WB.api.submitIntake({
+      return _intakeSubmit({
         batch_id: batch.batch_id,
         source_type: IMPORT_SOURCE_TYPE,
         inspections: inspections,
         fields: null,
-      }).then(_onIntakeSubmitted(batch));
+      }, batch);
     }, { submitLabel: '确认导入', inline: inline });
     const input = WB._modal.inputs[0];
     if (input && input.addEventListener) {
@@ -180,25 +179,99 @@ WB.stages.intake = (function () {
     if (WB._modal && WB._modal.submitBtn) WB._modal.submitBtn.disabled = !on;
   }
 
-  /* 提交回调：成功/失败都刷新详情，避免界面停在旧状态 */
-  function _onIntakeSubmitted(batch) {
-    return function (res) {
-        if (!res.ok) {
-          _unmarkModalBusy();
-          WB.toast(WB.errText(res.error));
-          // 失败也刷新，避免界面停在旧状态（如批次已推进/已有行）被重复提交
-          WB._loadDetail(batch.batch_id);
-          WB.loadBatches();
-          return;
-        }
-        // 成功：后台可能仍在跑图（判定/抽样），不再一次性等待到底，
-        // 展示初始结果并轮询批次状态直到离开 pending_intake（前端可视化处理进度）
-        WB.toast('提交成功，批次已推进：' + _progressText(res.data));
-        WB._loadDetail(batch.batch_id);
-        WB.loadBatches();
-        showIntakeResult(batch, res.data);
+  /* ---- 提交（带等待动画 + 后台轮询）----
+     POST /api/intake 在一个请求里同步跑完整条主链：原始单据解析 + 逐组件
+     抽取都要现场调真模型，实测单次 40~90s 且逐组件累加；浏览器 fetch 没有无限等待，
+     长时间无反馈就是「点了没反应」。策略：
+     ① 提交后立即关表单、开「处理中」等待窗（转圈动画 + 阶段文案，提交中不可再点）；
+     ② 等待窗独立计时，提交请求超时**不**视为失败——后端不随浏览器中断而停，
+        跑完照常落库，此时改为轮询批次状态直到离开 pending_intake；
+     ③ 提交成功或轮询追上结果，都关等待窗并输出入场结果（置信度/抽取值）。 */
+  function _intakeSubmit(body, batch) {
+    WB.closeModal();                       // 表单数据已进请求体，先关掉防重复编辑
+    _openWaitModal(batch);
+    return WB.api.submitIntake(body).then(function (res) {
+      if (res.ok) { _finishWait(batch, res.data); return; }
+      const e = res.error || {};
+      // 超时 ≠ 失败：后端仍在跑，切轮询模式继续等（等待窗文案随阶段变化）
+      if (e.key === 'timeout' || e.key === 'network') {
+        _waitPhase('polling');
         _pollUntilLeftIntake(batch);
+        return;
+      }
+      // 其余才是真失败（409 已入场 / 400 数据问题……），关窗如实报错
+      _closeWaitModal();
+      WB.toast(WB.errText(e));
+      // 失败也刷新：批次可能已被先前一次超时的提交推进，界面不能停在旧状态
+      WB._loadDetail(batch.batch_id);
+      WB.loadBatches();
+    });
+  }
+
+  /* ---- 等待窗：转圈动画 + 阶段文案 + 计时 ---- */
+  function _openWaitModal(batch) {
+    const tip = WB.h('div', { class: 'hint-line', text: '正在提交送检数据…' });
+    const elapsed = WB.h('div', { class: 'hint-line muted', text: '' });
+    // 复用 .modal 的居中/置顶样式（box 需 z-index 高过 mask，否则被遮罩盖住）
+    const box = WB.h('div', { class: 'modal on' },
+      WB.h('h3', { text: '处理中 · ' + batch.batch_no }),
+      WB.h('div', { class: 'wait-body' },
+        WB.h('div', { class: 'wb-spin' }), tip, elapsed));
+    const ov = WB.h('div', { class: 'mask on' });
+    document.body.append(ov, box);
+    WB._waitModal = {
+      ov: ov, box: box, tip: tip,
+      start: Date.now(),
+      timer: setInterval(function () {
+        if (!WB._waitModal) return;
+        const s = Math.round((Date.now() - WB._waitModal.start) / 1000);
+        elapsed.textContent = '已等待 ' + s + ' 秒';
+      }, 1000),
     };
+    // 等待窗不提供关闭按钮：关闭就等于放弃跟随，用户会再点一次「提交」
+    // 造成重复入场 409。轮询上限到点会自动收窗并提示。
+  }
+
+  /* 等待窗阶段文案：提交请求超时 → 改为轮询观察 */
+  function _waitPhase(phase) {
+    if (!WB._waitModal) return;
+    if (phase === 'polling') {
+      WB._waitModal.tip.textContent =
+        '提交请求已超时，后台仍在处理（结果会落库），正在自动查询进度…';
+    }
+  }
+
+  function _closeWaitModal() {
+    if (!WB._waitModal) return;
+    clearInterval(WB._waitModal.timer);
+    WB._waitModal.ov.remove();
+    WB._waitModal.box.remove();
+    WB._waitModal = null;
+  }
+
+  /* 完成输出：关等待窗 + 展示入场结果卡（置信度/低置信清单/抽取字段）。
+     pending 路径（低置信等人工确认）要先刷新再放卡片：确认/拒绝按钮要对着
+     最新详情操作。degraded 标记超时后由轮询合成的结果（抽取明细只在提交
+     响应里，补一句去向）。 */
+  function _finishWait(batch, data) {
+    const wasPending = data && data.status === 'pending';
+    _closeWaitModal();
+    WB.toast('提交成功，批次已推进：' + _progressText(data));
+    if (wasPending) {
+      // 先拉详情再挂结果卡：_loadDetail 的异步回调会整幅重画主区
+      WB._loadDetail(batch.batch_id);
+      WB.loadBatches();
+      WB.api.getBatch(batch.batch_id).then(function () {
+        showIntakeResult(batch, data);
+      });
+    } else {
+      WB._loadDetail(batch.batch_id);
+      WB.loadBatches();
+      showIntakeResult(batch, data);
+    }
+    if (data && data.degraded) {
+      WB.toast('已自动追上进度；本次为超时后合成结果，抽取明细可在判定节点「重新判定」查看');
+    }
   }
 
   /* 发饌进度提示：处理状态 + 下一步动作（依 WB.ST_CN / WB.NEXT_LABEL） */
@@ -407,40 +480,45 @@ WB.stages.intake = (function () {
     return card;
   }
 
-  /* 提交按钮忙状态：提交中禁用并显示处理进度，防止连点重复提交 */
-  function _markModalBusy() {
-    if (!WB._modal) return;
-    WB._modal._busy = true;
-    const btns = WB._modal.box.querySelectorAll('.foot button');
-    if (btns.length > 1) {
-      btns[1].textContent = '正在提交…';
-      btns[1].disabled = true;
-    }
-  }
-  function _unmarkModalBusy() {
-    if (WB._modal && WB._modal._busy) WB._modal._busy = false;
-  }
-
   /* 轮询批次状态直到离开 pending_intake（后台图仍在跑判定/抽样）；
-     每次间隔 2s，上限 60 次；离开后最终刷新一次批次详情 + 侧栏。 */
+     每次间隔 2s，上限 120 次（4 分钟，对齐后端真模型逐组件抽取的量级）。
+     批次**留在** pending_intake 且检验行已入库 = 低置信等人工确认（不是还在
+     跑图）：检验行已落库、详情能看到行数，此时收窗展示结果（pending 路径）。
+     离开后：关窗 + 刷新详情/侧栏/异常列表（自动确认 → 判定 → 可能隔离+建异常）。
+     情况 A：提交请求还在飞（等待窗在）——轮询只是后台旁路观察，提交返回时
+       _finishWait 关窗，这里的观察发现已离开就静默停表；
+     情况 B：提交请求已超时——本函数就是唯一的完成路径，负责关窗 + 输出。 */
   function _pollUntilLeftIntake(batch) {
     let tries = 0;
-    const maxTries = 60;
+    const maxTries = 120;
     const timer = setInterval(function () {
       tries++;
       WB.api.getBatch(batch.batch_id).then(function (res) {
-        const st = res.ok && res.data ? res.data.status : null;
+        const d = res.ok && res.data ? res.data : null;
+        const st = d ? d.status : null;
         if (st && st !== 'pending_intake') {
           clearInterval(timer);
-          // 离开入场（自动确认→判定→可能隔离+自动建异常）：异常列表一并刷新
+          if (WB._waitModal) {
+            // 合成结果卡：confidence 取不到就显示 —（抽取明细只在提交响应里有）
+            _finishWait(batch, { status: 'confirmed', confidence: null, low_conf_sns: [],
+              degraded: true });
+          }
           WB.loadIncidents();
           WB._loadDetail(batch.batch_id);
           WB.loadBatches();
           return;
         }
+        // 行数 > 0 而状态没动：低置信挂起等人工确认，不会再自己推进 → 收窗交还给人
+        if (d && (d.inspections || []).length > 0 && WB._waitModal) {
+          clearInterval(timer);
+          _finishWait(batch, { status: 'pending', confidence: null,
+            low_conf_sns: [], degraded: true });
+          return;
+        }
         if (tries >= maxTries) {
           clearInterval(timer);
-          WB.toast('批次处理仍在进行中，当前状态：' + (st || '未知'));
+          _closeWaitModal();
+          WB.toast('批次处理仍在进行中，当前状态：' + (st || '未知') + '，可稍后刷新查看');
         }
       });
     }, 2000);
@@ -448,13 +526,14 @@ WB.stages.intake = (function () {
 
   // parseInspectionCsv / decodeCsvBytes 导出以便单测（纯函数，不碰 DOM）；
   // appendResultCard 供 renderCenter 统一绘制「入场结果」卡片（异步重渲染
-  // 不会再把它抹掉）。
+  // 不会再把它抹掉）；_intakeSubmit 供导入/粘贴两条通道共用。
   return {
     stageIndex: stageIndex,
     render: render,
     parseInspectionCsv: parseInspectionCsv,
     decodeCsvBytes: decodeCsvBytes,
     appendResultCard: appendResultCard,
+    _intakeSubmit: _intakeSubmit,
   };
 })();
 

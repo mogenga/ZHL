@@ -50,6 +50,7 @@ uv run pytest tests/e2e/ -v
 
 ```bash
 node tests/static/test_wb_release_recheck.js   # 放行预检/结论重算（含 P0 哨兵）
+node tests/static/test_wb_intake_wait.js       # 送检提交等待动画/超时改轮询/超时后合成结果
 node tests/static/test_wb_incident_dup.js      # 异常处置面板
 node tests/static/test_wb_api_norm.js          # API 错误归一化
 node tests/static/test_wb_global.js            # 全局命名空间
