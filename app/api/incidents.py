@@ -406,7 +406,9 @@ def incident_capa(
 
     # 复检通过后的 CAPA 补勾：pending_recheck 态允许更新字段与 verified 标记
     # （复检记录此时才存在，L3 门禁上方已校验），无状态转移。
+    # D8：批次归档后只读（审查 M-8）——与 close 端点守卫一致。
     if incident.status == "pending_recheck":
+        require_not_archived(incident.batch_id, session)
         incident.confirmed_root_cause = payload.confirmed_root_cause
         incident.corrective_action = payload.corrective_action
         incident.capa_verified = payload.verified
@@ -470,7 +472,13 @@ def close_incident_endpoint(incident_id: uuid.UUID, session: SessionDep) -> Inci
     pending_release``（同事务 + 轨迹）。关闭是质量工程师的最终签署动作，
     复检通过不自动关闭（§4.4 闭环点）。
     """
-    incident = session.get(QualityIncident, incident_id)
+    # M-7：行锁读取——与复检 fail 转拒绝路径互斥，杜绝 last-write-wins 竞态
+    incident = (
+        session.query(QualityIncident)
+        .filter(QualityIncident.incident_id == incident_id)
+        .with_for_update()
+        .first()
+    )
     if incident is None:
         raise HTTPException(status_code=404, detail="incident_not_found")
     require_not_archived(incident.batch_id, session)

@@ -252,6 +252,75 @@ def test_close_requires_evidence_and_containment() -> None:
         engine.dispose()
 
 
+def test_reinspection_fail_then_close_is_rejected() -> None:
+    """复检不通过 → 异常/批次双转拒绝；此后 close 返回 409（M-7 行锁钉住语义）。"""
+    sample = load_acceptance("incident")
+    client, session, engine = _client()
+    try:
+        _seed_batch(session, sample, batch_no=sample["batch"]["batch_id"])
+        inc_id = _create_incident(client, sample["incidents"][0]["affected_sns"][0])
+        _isolate(client, inc_id)
+        _assign(client, inc_id)
+        _capa(client, inc_id, verified=False)  # 无复检记录 → 不勾验证
+
+        r = client.post(
+            f"/api/incidents/{inc_id}/reinspections",
+            json={
+                "inspection_id": str(_INS_OODB),
+                "pmax": 540.0,
+                "temp": 25.0,
+                "isc": 10.5,
+                "voc": 48.0,
+                "vm": 40.0,
+                "im": 13.0,
+                "ff": 0.80,
+                "result": "fail",
+                "executor": "ZHL-QA",
+                "executed_at": "2026-06-02T00:00:00+00:00",
+                "scope_type": "minimal",
+            },
+        )
+        assert r.status_code == 201, r.text
+        assert session.get(QualityIncident, inc_id).status == "rejected"
+        assert session.get(DeliveryBatch, B1).status == "rejected"
+
+        # M-7：close 对 rejected 异常必须 409（行锁保证读到最新态，非竞态旧值）
+        r = _close(client, inc_id)
+        assert r.status_code == 409, r.text
+        assert r.json()["detail"]["error"] == "incident_not_closeable"
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_capa_blocked_after_batch_archived() -> None:
+    """M-8：批次归档后（D8 只读），capa 待复检补勾分支必须 409。"""
+    sample = load_acceptance("incident")
+    client, session, engine = _client()
+    try:
+        _seed_batch(session, sample, batch_no=sample["batch"]["batch_id"])
+        inc_id = _create_incident(client, sample["incidents"][0]["affected_sns"][0])
+        _isolate(client, inc_id)
+        _assign(client, inc_id)
+        _capa(client, inc_id, verified=False)  # 批次 pending_recheck
+
+        # 批次主动拒绝（任意非归档→rejected 边）→ 处置报告 → 自动归档
+        r = client.post(
+            f"/api/batches/{B1}/reject",
+            json={"reason": "测试归档", "rejected_by": "ZHL-QA"},
+        )
+        assert r.status_code == 200, r.text
+        assert session.get(DeliveryBatch, B1).status == "archived"
+
+        # 归档后对仍处 pending_recheck 的异常补勾 → 409 归档终态（RED：当前 200）
+        r = _capa(client, inc_id, verified=False)
+        assert r.status_code == 409, r.text
+        assert r.json()["detail"]["error"] == "batch archived, terminal state"
+    finally:
+        session.close()
+        engine.dispose()
+
+
 def test_close_gates_on_all_incidents_terminal() -> None:
     """批次存在第二只未关闭异常时，close 单只不推进批次（Review Focus #2）。"""
     sample = load_acceptance("incident")

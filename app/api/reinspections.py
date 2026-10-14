@@ -187,7 +187,13 @@ def _record_trace(
 def create_reinspection(
     incident_id: uuid.UUID, payload: ReinspectionCreate, session: SessionDep
 ) -> ReinspectionOut:
-    incident = session.get(QualityIncident, incident_id)
+    # M-7：行锁读取——复检 fail 转拒绝与 close 端点互斥，杜绝 last-write-wins
+    incident = (
+        session.query(QualityIncident)
+        .filter(QualityIncident.incident_id == incident_id)
+        .with_for_update()
+        .first()
+    )
     if incident is None:
         raise HTTPException(status_code=404, detail="incident_not_found")
 
