@@ -20,12 +20,9 @@ uv sync
 
 # 1. 启动 PostgreSQL 15（Docker）
 #    方式一（有 compose，CI/Linux/Mac）：
-#      docker compose -f compose.yaml up -d && 首启自动建表
+docker compose -f compose.yaml up -d
 #    方式二（本机无 compose 插件，PowerShell 脚本）：
 .\scripts\start-pg.ps1          # 拉镜像 + 启容器 + 跑 001_init.sql + verify_001.sql
-#    或手工等效：
-#      docker run -d --name zhl-pg -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=zhl -p 15432:5432 postgres:15
-#      docker exec -e PGCLIENTENCODING=UTF8 zhl-pg psql -U postgres -d zhl -v ON_ERROR_STOP=1 -f migrations/001_init.sql
 
 # 2. 灌入一条已发布的演示规则（幂等，可重复执行；末尾打印 rule_version_id）
 .\scripts\seed-demo.ps1
