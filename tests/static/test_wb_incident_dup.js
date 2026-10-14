@@ -262,5 +262,101 @@ function openCreateForm(list) {
     assert(!hasText(panel, 'AI 归因中'), 'F6: 失败后恢复，不卡在「归因中」');
   }
 
+  // ---- G. FR-3.6 三选一：采纳 / 驳回 / 修改 三个选项都在，且结果可区分 ----
+  // （2026-10-15 反馈：FR-3.6 规定「采纳、驳回、修改」，实现却是「搁置」，
+  //   且旧版根因是自由文本框、三种情况全记 adopt，库里分不清照抄/改过/手填。）
+  {
+    const isoInc = { incident_id: INC_ID, batch_id: BATCH_ID, status: 'isolated', trigger_type: 'rule_fail', severity: 'major' };
+    WB.state.selected = batch; WB.state.batchId = BATCH_ID;
+    WB.state.incidents = [isoInc]; WB.state.traces = [];
+    WB.api.listIncidents = () => Promise.resolve({ ok: true, data: [isoInc] });
+    const sent = [];
+    WB.api.attributeIncident = () => Promise.resolve({
+      ok: true,
+      data: { status: 'awaiting_human', hypotheses: [
+        { cause: '电池片隐裂', confidence: 0.82, evidence_ids: ['e1', 'e2'] },
+        { cause: '焊接虚焊', confidence: 0.5, evidence_ids: ['e3'] },
+      ] },
+    });
+    WB.api.adoptAttribution = (id, dec, cause, opts) => {
+      sent.push({ dec: dec, cause: cause, opts: opts || {} });
+      return Promise.resolve({ ok: true, data: { decision: dec } });
+    };
+    const panel = WB.stages.incident.render(batch, {});
+    findText(panel, 'AI 归因').fire('click');
+    await flush(); await flush();
+    const box = WB._modal && WB._modal.box;
+    assert(!!box, 'G1: 归因结果弹窗打开');
+    assert(hasText(box, '电池片隐裂') && hasText(box, '焊接虚焊'), 'G2: 两条假设都渲染');
+    assert(hasText(box, '置信度 82%'), 'G3: 展示置信度');
+    assert(hasText(box, '证据 2 条'), 'G4: 展示证据条数');
+    // 三选一的三个动作
+    assert(!!findText(box, '采纳选中假设'), 'G5: 选项一「采纳」在位');
+    assert(!!findText(box, '驳回'), 'G6: 选项二「驳回」在位');
+    assert(!!findText(box, '修改后采纳'), 'G7: 选项三「修改」在位（FR-3.6 的第三个，非「搁置」）');
+    assert(!hasText(box, '搁置'), 'G8: 不再把「搁置」当作三选之一');
+    // 默认选中第一条 → 采纳必须带 hypothesis_index，让后端按原文取值
+    // （前端传的文本改不了它——这就是"采纳"与"手工填写"在数据上的分界）。
+    WB._modal.submitBtn.fire('click');
+    await flush(); await flush();
+    const adopt = sent[sent.length - 1];
+    assert(adopt.dec === 'adopt', 'G9: 主按钮提交 adopt');
+    assert(adopt.opts.hypothesisIndex === 0, 'G10: 采纳带 hypothesis_index（命中率统计 FR §11.4）');
+    // 切换单选项 → 下标跟着走（radio 的 change 回调）
+    const radios = box.querySelectorAll('input');
+    assert(radios.length >= 2, 'G11: 假设渲染为可选项（单选）');
+    radios[1].checked = true;
+    radios[1].fire('change');
+    WB.api.attributeIncident = () => Promise.resolve({
+      ok: true,
+      data: { status: 'awaiting_human', hypotheses: [
+        { cause: '电池片隐裂', confidence: 0.82, evidence_ids: ['e1'] },
+        { cause: '焊接虚焊', confidence: 0.5, evidence_ids: ['e3'] },
+      ] },
+    });
+    const panel2 = WB.stages.incident.render(batch, {});
+    findText(panel2, 'AI 归因').fire('click');
+    await flush(); await flush();
+    const r2 = WB._modal.box.querySelectorAll('input');
+    r2[1].checked = true;
+    r2[1].fire('change');
+    WB._modal.submitBtn.fire('click');
+    await flush(); await flush();
+    const adopt2 = sent[sent.length - 1];
+    assert(adopt2.opts.hypothesisIndex === 1, 'G12: 选中第 2 条时 index=1（不是写死 0）');
+  }
+
+  // ---- H. 「修改后采纳」提交 modified_cause + 原假设下标 ----
+  {
+    const isoInc = { incident_id: INC_ID, batch_id: BATCH_ID, status: 'isolated', trigger_type: 'rule_fail', severity: 'major' };
+    WB.state.selected = batch; WB.state.batchId = BATCH_ID;
+    WB.state.incidents = [isoInc]; WB.state.traces = [];
+    WB.api.listIncidents = () => Promise.resolve({ ok: true, data: [isoInc] });
+    WB.api.attributeIncident = () => Promise.resolve({
+      ok: true,
+      data: { status: 'awaiting_human', hypotheses: [{ cause: '电池片隐裂', confidence: 0.8, evidence_ids: ['e1'] }] },
+    });
+    const sent = [];
+    WB.api.adoptAttribution = (id, dec, cause, opts) => {
+      sent.push({ dec: dec, cause: cause, opts: opts || {} });
+      return Promise.resolve({ ok: true, data: { decision: dec } });
+    };
+    const panel = WB.stages.incident.render(batch, {});
+    findText(panel, 'AI 归因').fire('click');
+    await flush(); await flush();
+    findText(WB._modal.box, '修改后采纳').fire('click');
+    await flush();
+    assert(hasText(WB._modal.box, '修订后的根因'), 'H1: 修改表单打开');
+    // 表单默认带出原假设作为底稿
+    assert(WB._modal.inputs[0].value === '电池片隐裂', 'H2: 以原假设为底稿（可改）');
+    WB._modal.inputs[0].value = '焊接虚焊（现场确认）';
+    WB._modal.submitBtn.fire('click');
+    await flush(); await flush();
+    const mod = sent[sent.length - 1];
+    assert(mod.dec === 'modify', 'H3: 提交 decision=modify');
+    assert(mod.opts.modifiedCause === '焊接虚焊（现场确认）', 'H4: 提交修订后文本');
+    assert(mod.opts.hypothesisIndex === 0, 'H5: 记录被修改的原假设下标');
+  }
+
   process.exit(failed === 0 ? 0 : 1);
 })().catch(function (e) { console.error('FATAL:', e); process.exit(1); });

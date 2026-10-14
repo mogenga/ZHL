@@ -751,3 +751,22 @@
    - `tests/skills/test_attribution_skill.py`：新增 4 条——真模型重命名键可采纳、别名键与坏类型容错、读不出时不编造、Skill 走归一化且 trace 报真实模型名。
    - `tests/static/test_wb_incident_dup.js`：新增 F 组 6 条（按钮存在 / 点击真发请求 / 第一步不带 decision / **等待期有进行中反馈** / 失败有提示 / 失败后恢复），并给该 harness 的 DOM shim 补上 `insertBefore`（ui.js 的 extraButtons 用到，缺它会让归因路径在测试里抛 TypeError）。删掉 loading 反馈这组测试即红（已实测）。
 8. **dev-notes 路径**：本文件（本节）。
+
+## 2026-10-15 · 归因三选一对齐 FR：采纳 / 驳回 / 修改
+
+1. **核查发现的不一致**：FR-3.6 与 FR §11.3 都规定人工三选一是「**采纳、驳回、修改**」，Phase B spec D9 也写 `decision: adopt | reject | modify`（`modified_hypothesis` 仅 modify 时携带）。但实现跑的是「采纳/驳回/**搁置**」——第三个选项被换掉且无设计记录，而 spec 只定义了采纳与驳回的结果，「修改」和「搁置」的结果从未定义。
+2. **更严重的审计缺口**：前端把根因做成**自由文本框**，三种情况一律提交 `decision="adopt"` + 用户输入的字符串。后果：FR §8.3「确认根因必须来自**人工采纳的 AI 假设**或人工填写」在库里无法证明；FR §11.4 的 Top-1/Top-3 命中率与模型改正率都统计不出来（修改过的会被当成原样采纳）。
+3. **修补（后端 `app/api/incidents.py`）**：
+   - `ATTRIBUTION_DECISIONS = (adopt, reject, modify, defer)`；新增 `ROOT_CAUSE_DECISIONS = (adopt, modify)`。
+   - `adopt`：**按 `hypothesis_index` 取后端存下来的假设原文**写入 `confirmed_root_cause`（前端传参改不动它）；无假设可用时回落人工填写并记 `manual`。
+   - `modify`（新）：写 `modified_cause` 的修订文本，trace 同时留 `hypothesis_cause` 原假设 + `hypothesis_index` + `root_cause_source="modified_hypothesis"`——FR §9.2「AI 给建议，人工担责任」，事后可复盘是模型说错还是人改对。
+   - `reject` / `defer`：不写任何业务字段（未被采纳的不得成为确认根因）。
+   - trace 的 `params_summary` 统一新增 `root_cause_source`（hypothesis / modified_hypothesis / manual）与 `hypothesis_index`。
+   - `defer` 保留为第四个轻量动作（"先搁一搁"是真实需求），但不再冒充 FR 三选一。
+4. **修补（前端）**：`stages/incident.js` 归因弹窗改为「先选假设（单选 radio）→ 采纳选中假设 / 修改后采纳 / 驳回」；`修改后采纳` 打开以原假设为底稿的表单（可填修改理由）；无可用假设时走「人工填写」。`api.js::adoptAttribution` 支持 `{modifiedCause, hypothesisIndex}`。
+5. **顺带修掉的真 bug**：`ui.js` 的 extraButtons 回调返回 `undefined` 时会 `closeModal()`，而「修改后采纳」回调内部已经打开了下一个表单 —— **刚打开的表单被立刻关掉**，表现又是「点了没反应」。已在回调显式 `return false` 并注明原因。
+6. **验证**：真 Postgres 实测——`modify` 落库修订文本、trace 记 `modified_hypothesis` + 原假设 + 下标 0；`reject` 不写 `confirmed_root_cause`。`355 passed`；`ruff` / `black` 全绿；三套 JS 测试 ALL PASS。
+7. **回归测试**：
+   - Python 新增 6 条：修改写修订版且 trace 留原假设、修改缺文本 400、**采纳按存储假设而非前端传参**（已实测：退化成旧行为该用例即红）、人工填写记 manual、驳回/搁置不写字段、bad_decision 列出完整 allowed 集合。
+   - JS 新增 G 组 12 条（三个选项都在位、不再有「搁置」、假设可单选、采纳带 index、**切换选项 index 跟着变**）+ H 组 5 条（修改表单以原假设为底稿、提交 modify + modified_cause + 下标）。
+8. **dev-notes 路径**：本文件（本节）。

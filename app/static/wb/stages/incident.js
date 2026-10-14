@@ -134,48 +134,114 @@ WB.stages.incident = (function () {
     WB.api.attributeIncident(i.incident_id, null, null).then(function (res) {
       if (!res.ok) { failWithRestore(WB.errText(res.error)); return; }
       const hyp = res.data.hypotheses || [];
+      const selected = { idx: hyp.length ? 0 : null };
       const hypBox = WB.h('div', {});
+      const reload = function () {
+        WB.loadIncidents().then(function () { WB._loadDetail(batch.batch_id); });
+      };
+
+      // FR-3.6/§11.3 三选一：采纳 / 驳回 / 修改。旧版把根因做成自由文本框、
+      // 三种情况一律记成 adopt，库里分不清「照抄假设」「改过假设」「纯人工
+      // 填写」——FR §8.3「确认根因必须来自人工采纳的假设或人工填写」因此
+      // 无法证明。现在先选假设（单选），再决定采纳还是修改。
       if (hyp.length) {
         hyp.forEach(function (h, idx) {
           const label = (typeof h === 'string') ? h : (h.cause || h.hypothesis || JSON.stringify(h));
           const meta = (h && typeof h === 'object')
             ? '（置信度 ' + Math.round((h.confidence || 0) * 100) + '% · 证据 ' + ((h.evidence_ids || []).length) + ' 条）'
             : '';
-          hypBox.append(WB.h('div', { class: 'hint-line' }, WB.h('b', { text: '#' + (idx + 1) + ' ' }), WB.h('span', { text: label + ' ' + meta })));
+          const row = WB.h('div', { class: 'hint-line' });
+          const pick = WB.h('input', { type: 'radio' });
+          pick.name = 'attr-pick'; pick.value = String(idx);
+          if (idx === selected.idx) pick.checked = true;
+          pick.addEventListener('change', function () { selected.idx = idx; });
+          row.append(pick, WB.h('b', { text: ' #' + (idx + 1) + ' ' }), WB.h('span', { text: label + ' ' + meta }));
+          hypBox.append(row);
         });
       } else {
-        hypBox.append(WB.h('div', { class: 'hint-line', text: res.data.hint || '暂无可用假设，请人工填写根因' }));
+        hypBox.append(WB.h('div', { class: 'hint-line', text: res.data.hint || '暂无可用假设，可人工填写根因' }));
       }
-      const err = WB.h('div', {});
-      const fields = [
-        { label: '根因（采纳时必填；可直接抄上方假设）', type: 'textarea', rows: 3, value: res.data.confirmed_root_cause || '' },
-      ];
-      WB.openModal('AI 归因 · ' + String(i.incident_id).slice(0, 8), fields, function (vals) {
-        const cause = (vals[0] || '').trim();
-        // 第二步：另一次请求把人工决定 resume 回停住的运行。
-        _resumeAttr(i, batch, 'adopt', cause || null, function () {
-          slot.replaceChildren(WB.h('div', { class: 'hint-line', text: '已采纳根因：' + cause }));
-          WB.loadIncidents().then(function () { WB._loadDetail(batch.batch_id); });
-        }, fail);
-      }, { submitLabel: '采纳', inline: hypBox, extraButtons: [
-        { label: '驳回', cls: 'danger', onclick: function () {
-          _resumeAttr(i, batch, 'reject', null, function () {
-            slot.replaceChildren(WB.h('div', { class: 'hint-line', text: '已驳回全部假设，请人工填写根因' }));
-            WB.loadIncidents().then(function () { WB._loadDetail(batch.batch_id); });
-          }, fail);
-        } },
-        { label: '搁置', cls: '', onclick: function () {
-          _resumeAttr(i, batch, 'defer', null, function () {
-            slot.replaceChildren(WB.h('div', { class: 'hint-line', text: '已搁置，稍后可再次发起归因' }));
-          }, fail);
-        } },
-      ] });
+
+      const hypothesis = function () { return hyp[selected.idx] || {}; };
+      const hypothesisText = function () {
+        const h = hypothesis();
+        return (typeof h === 'string') ? h : (h.cause || h.hypothesis || '');
+      };
+
+      // 底部主按钮 = 采纳选中假设（照抄，后端按下标取原文，前端传参改不了它）
+      const onOk = function () {
+        if (hyp.length) {
+          _resumeAttr(i, batch, 'adopt', null, function () {
+            slot.replaceChildren(WB.h('div', { class: 'hint-line',
+              text: '已采纳假设 #' + (selected.idx + 1) + '：' + hypothesisText() }));
+            reload();
+            return true;
+          }, failWithRestore, { hypothesisIndex: selected.idx });
+          return true;
+        }
+        // 无假设可采纳：走人工填写（FR §8.3「或人工填写」）
+        WB.api.adoptAttribution(i.incident_id, 'adopt', '', {}).then(function (r) {
+          if (!r.ok) { failWithRestore(WB.errText(r.error)); return; }
+          WB.toast('已记录人工根因');
+          slot.replaceChildren(WB.h('div', { class: 'hint-line', text: '（未采纳 AI 假设，需人工填写根因）' }));
+          reload();
+        });
+        return true;
+      };
+
+      const extra = [];
+      if (hyp.length) {
+        extra.push({ label: '修改后采纳', cls: '', onclick: function () {
+          modifyForm(hyp, selected, i, batch, slot, failWithRestore, reload);
+          // 返回 false：本回调已经打开了"修改"表单，别再让 ui.js 关窗
+          // （否则刚打开的表单会被立刻关掉，表现为点「修改后采纳」没反应）。
+          return false;
+        } });
+      }
+      extra.push({ label: '驳回', cls: 'danger', onclick: function () {
+        _resumeAttr(i, batch, 'reject', null, function () {
+          slot.replaceChildren(WB.h('div', { class: 'hint-line',
+            text: '已驳回全部假设，需人工填写根因后才能关闭异常' }));
+          reload();
+        }, failWithRestore);
+      } });
+
+      WB.openModal(
+        'AI 归因 · ' + String(i.incident_id).slice(0, 8),
+        [{ label: '根因（采纳时自动填入选中假设；也可人工改写）', type: 'textarea', rows: 3,
+           value: hypothesisText() }],
+        onOk,
+        { submitLabel: hyp.length ? '采纳选中假设' : '人工填写根因', inline: hypBox, extraButtons: extra },
+      );
     });
   }
-  function _resumeAttr(i, batch, decision, cause, ok, fail) {
-    WB.api.adoptAttribution(i.incident_id, decision, cause).then(function (r) {
-      if (r.ok) { WB.toast('已记录归因决定：' + decision); ok(r.data); }
-      else fail(WB.errText(r.error));
+
+  /* 「修改后采纳」：以选中假设为底稿，人工修订文本（FR-3.6 的第三个选项） */
+  function modifyForm(hyp, selected, i, batch, slot, fail, reload) {
+    const h = hyp[selected.idx];
+    const base = (typeof h === 'string') ? h : ((h || {}).cause || (h || {}).hypothesis || '');
+    WB.openModal('修改假设 · ' + String(i.incident_id).slice(0, 8), [
+      { label: '修订后的根因（必填，将作为确认根因）', type: 'textarea', rows: 4, value: base },
+      { label: '修改理由（可选，记入轨迹）', type: 'text', placeholder: '如：现场确认非隐裂，是焊接虚焊' },
+    ], function (vals) {
+      const text = (vals[0] || '').trim();
+      if (!text) { WB.toast('请填写修订后的根因'); return false; }
+      _resumeAttr(i, batch, 'modify', null, function () {
+        slot.replaceChildren(WB.h('div', { class: 'hint-line', text: '已修改并采纳根因：' + text }));
+        reload();
+      }, fail, { modifiedCause: text, hypothesisIndex: selected.idx });
+      return true;
+    }, { submitLabel: '修改后采纳' });
+  }
+
+  function _resumeAttr(i, batch, decision, cause, ok, fail, opts) {
+    WB.api.adoptAttribution(i.incident_id, decision, cause, opts).then(function (r) {
+      if (r.ok) {
+        WB.toast('已记录归因决定：' + ((WB.DECISION_CN || {})[decision] || decision));
+        ok(r.data);
+      } else {
+        fail(WB.errText(r.error));
+      }
     });
   }
 
