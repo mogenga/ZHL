@@ -116,7 +116,7 @@ REPORT_TYPE = ("release", "incident")
 
 
 class Base(DeclarativeBase):
-    """Declarative base shared by all 12 models."""
+    """Declarative base shared by all 13 models."""
 
 
 def _enum(values: tuple[str, ...], *, nullable: bool = False) -> Mapped[str]:

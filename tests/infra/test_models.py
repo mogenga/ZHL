@@ -1,7 +1,7 @@
 """SQLAlchemy model self-check (Task 7, P0 spec §5.3 / §6 完成标准第 3 条).
 
 ``Base.metadata.create_all`` on a SQLite in-memory engine must render the
-full 12-table schema without error — this is the schema-consistency gate that
+render the full 13-table schema without error — this is the schema-consistency gate that
 proves the models mirror ``migrations/001_init.sql``'s columns/keys. The
 Postgres-specific bits (CREATE TYPE enums, EXCLUDE, triggers, permissions,
 JSONB) are deliberately downgraded to cross-DB types in ``app/infra/models.py``
