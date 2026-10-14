@@ -312,7 +312,9 @@ WB._reportDrawer = function (r) {
 // 报告视图下的“生成报告”动作（由批次详情/放行节点触发）
 // 工作台主区展示报告正文：在主区「报告」视图卡片下方追加正文区（不用右侧抽屉，避开正文被压缩）
 WB._expandReportInMain = function (report, batch) {
-  if (WB.state.view !== 'reports') return;
+  // 不再要求左栏停在「报告」tab：报告节点（流水线 stage 5）渲染的是同一张
+  // 批次报告卡，正文同样要在那里展得开（2026-10-15）。定位仍靠 .report-view-page，
+  // 主区没有这张卡时自然什么都不做。
   const main = WB.el('mainPane');
   const page = main.querySelector('.report-view-page');
   if (!page) return;

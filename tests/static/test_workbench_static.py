@@ -21,6 +21,7 @@ WB_FILES = [
     "wb/stages/incident.js",
     "wb/stages/reinspection.js",
     "wb/stages/release.js",
+    "wb/stages/report.js",
 ]
 ROOT = Path(__file__).resolve().parents[2] / "app" / "static"
 
@@ -46,6 +47,7 @@ def test_api_js_served_by_html():
         "wb/stages/incident.js",
         "wb/stages/reinspection.js",
         "wb/stages/release.js",
+        "wb/stages/report.js",
         "wb/report.js",
     ]
     idx = [_src_pos(f) for f in order]

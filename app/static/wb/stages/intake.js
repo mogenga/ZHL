@@ -1,7 +1,8 @@
 /* WB.stages.intake — 数据入场节点（stageIndex 0）
-   提交送检数据（spec §4.2）→ 等待窗（转圈 + 计时；超时自动切轮询，2026-10-15
-   「提交送检之后老是超时」）→ 展示置信度/低置信清单/抽取字段；
-   确认/拒绝入场（spec §4.3）；自动确认（≥0.8）时界面跟随新状态不死等。
+   提交送检数据（spec §4.2）→ 面板级「提交中」+ 等待窗（转圈 + 计时；真模型
+   逐行抽取实测 ≈11.6 秒/行，2026-10-15「提交送检之后老是超时」）→ 展示置信度/
+   低置信清单/抽取字段；确认/拒绝入场（spec §4.3）；自动确认（≥0.8）时界面
+   跟随新状态不死等；批次已推进后结果卡只回看不带动作按钮（2026-10-15）。
    数据来源仅 spec §3 事实表端点；刷新后回看降级为组件条码+入场状态（§1.3 边界）。 */
 'use strict';
 
@@ -38,13 +39,13 @@ WB.stages.intake = (function () {
       // 原始单据通道（FR-1.1/1.2）：整段原文交给后端 AI 抽取 + 校验（FR-1.4），
       // 前端不再自行拆列——那才是「系统读懂原始单据」的演示路径。
       if (mode === 'raw') {
-        return _intakeSubmit({
+        return _sendIntake(batch, {
           batch_id: batch.batch_id,
           source_type: source_type,
           raw_source: raw,
           raw_source_kind: source_type === 'OCR_FORM' ? 'paper_form' : 'iv_csv',
           fields: fieldsOverride || null,
-        }, batch);
+        });
       }
 
       // 已结构化通道：前端拆列后按原有 9 列契约提交。
@@ -64,14 +65,16 @@ WB.stages.intake = (function () {
         row.appearance_result = parts[8];
         inspections.push(row);
       });
+      // 校验失败必须 return false：onOk 返回 undefined 会被 ui.js 当作放行而关窗，
+      // 用户粘的数据全部丢失（「填了 10 行、少 1 列、整窗消失」）
       if (err) { WB.toast(err); return false; }
       if (!inspections.length) { WB.toast('没有可解析的检测数据行'); return false; }
-      return _intakeSubmit({
+      return _sendIntake(batch, {
         batch_id: batch.batch_id,
         source_type: source_type,
         inspections: inspections,
         fields: fieldsOverride || null,
-      }, batch);
+      });
     }, { submitLabel: '提交送检' });
   }
 
@@ -105,12 +108,12 @@ WB.stages.intake = (function () {
       const now = new Date().toISOString();
       const inspections = state.parsed.rows.map((r) => Object.assign(
         { source_type: IMPORT_SOURCE_TYPE, captured_at: now }, r));
-      return _intakeSubmit({
+      return _sendIntake(batch, {
         batch_id: batch.batch_id,
         source_type: IMPORT_SOURCE_TYPE,
         inspections: inspections,
         fields: null,
-      }, batch);
+      });
     }, { submitLabel: '确认导入', inline: inline });
     const input = WB._modal.inputs[0];
     if (input && input.addEventListener) {
@@ -179,18 +182,28 @@ WB.stages.intake = (function () {
     if (WB._modal && WB._modal.submitBtn) WB._modal.submitBtn.disabled = !on;
   }
 
-  /* ---- 提交（带等待动画 + 后台轮询）----
-     POST /api/intake 在一个请求里同步跑完整条主链：原始单据解析 + 逐组件
-     抽取都要现场调真模型，实测单次 40~90s 且逐组件累加；浏览器 fetch 没有无限等待，
-     长时间无反馈就是「点了没反应」。策略：
-     ① 提交后立即关表单、开「处理中」等待窗（转圈动画 + 阶段文案，提交中不可再点）；
-     ② 等待窗独立计时，提交请求超时**不**视为失败——后端不随浏览器中断而停，
-        跑完照常落库，此时改为轮询批次状态直到离开 pending_intake；
-     ③ 提交成功或轮询追上结果，都关等待窗并输出入场结果（置信度/抽取值）。 */
-  function _intakeSubmit(body, batch) {
+  /* ---- 统一送检出口：面板级「提交中」+ 等待窗 + 超时改轮询（两层反馈合并）----
+     真模型下 POST /api/intake 同步跑完整条主链：原始单据解析 + 逐组件抽取，
+     实测 14 行 162 秒（≈11.6 秒/行）。两层反馈各管一段：
+     ① 面板级（_sendIntake，2026-10-15 cd3fac2）：置 intakeSubmitting 状态 →
+        面板按钮置灰 + 「提交中」提示 + 防重复提交；api.js 已把该请求超时放到 600s。
+     ② 等待窗（HEAD 2026-10-15）：关表单开「处理中」窗（转圈 + 计时）；请求若仍
+        超时/断网（600s 也可能到），超时**不**视为失败——后端不随浏览器中断而停，
+        跑完照常落库，改轮询批次状态直到离开 pending_intake 后合成结果输出。
+     校验失败由调用方 return false 保留输入；这里只管「已决定要发」的请求。 */
+  function _sendIntake(batch, payload) {
+    WB.state.intakeSubmitting = batch.batch_id;
+    // 记录通道：raw = AI 逐行抽取（慢），structured = 前端拆列直提（秒级），
+    // 提示文案据此区分，避免结构化提交也显示「约 10 秒/行」误导用户
+    WB.state.intakeSubmittingMode = payload.raw_source != null ? 'raw' : 'structured';
     WB.closeModal();                       // 表单数据已进请求体，先关掉防重复编辑
-    _openWaitModal(batch);
-    return WB.api.submitIntake(body).then(function (res) {
+    // 先渲染面板级「提交中」（按钮置灰 + 提示行，防重复提交），再挂等待窗：
+    // 等待窗是模态的，面板若不在此刻重渲，提交期间底下看不到任何进度
+    WB._renderCenterAndRight();
+    _openWaitModal(batch, WB.state.intakeSubmittingMode);
+    return WB.api.submitIntake(payload).then(function (res) {
+      WB.state.intakeSubmitting = null;
+      WB.state.intakeSubmittingMode = null;
       if (res.ok) { _finishWait(batch, res.data); return; }
       const e = res.error || {};
       // 超时 ≠ 失败：后端仍在跑，切轮询模式继续等（等待窗文案随阶段变化）
@@ -208,9 +221,12 @@ WB.stages.intake = (function () {
     });
   }
 
-  /* ---- 等待窗：转圈动画 + 阶段文案 + 计时 ---- */
-  function _openWaitModal(batch) {
-    const tip = WB.h('div', { class: 'hint-line', text: '正在提交送检数据…' });
+  /* ---- 等待窗：转圈动画 + 阶段文案 + 计时 ----
+     mode 透传自 _sendIntake：raw（AI 逐行抽取，慢）与 structured（秒级）文案不同。 */
+  function _openWaitModal(batch, mode) {
+    const tip = WB.h('div', { class: 'hint-line', text: mode === 'structured'
+      ? '正在提交结构化数据，通常几秒内完成…'
+      : '正在提交送检数据（AI 逐行抽取，真模型约 10 秒/行）…' });
     const elapsed = WB.h('div', { class: 'hint-line muted', text: '' });
     // 复用 .modal 的居中/置顶样式（box 需 z-index 高过 mask，否则被遮罩盖住）
     const box = WB.h('div', { class: 'modal on' },
@@ -370,13 +386,13 @@ WB.stages.intake = (function () {
     WB._renderCenterAndRight();
   }
   /* 供 renderCenter 调用：把「入场结果」卡片 append 到已画好的主区末尾。 */
-  function appendResultCard(mainPane, data) {
+  function appendResultCard(mainPane, data, detail) {
     const card = WB.h('div', { class: 'card stage-panel' });
     card.append(WB.h('h3', { text: '入场结果' }));
     const body = WB.h('div', {});
     card.append(body);
     mainPane.append(card);
-    _renderIntakeBody(body, { batch_id: WB.state.batchId }, data);
+    _renderIntakeBody(body, { batch_id: WB.state.batchId, status: detail && detail.status }, data);
   }
   function _renderIntakeBody(body, batch, data) {
     body.replaceChildren();
@@ -424,11 +440,17 @@ WB.stages.intake = (function () {
         });
       });
     }
-    // 操作按钮
-    const actions = WB.h('div', { class: 'actions' },
-      WB.h('button', { class: 'primary', onclick: () => _intakeAct(batch, 'confirm'), text: '确认入场' }),
-      WB.h('button', { class: 'danger', onclick: () => _intakeAct(batch, 'reject'), text: '拒绝入场' }),
-      WB.h('button', { onclick: () => WB._loadDetail(batch.batch_id), text: '重新提交' }));
+    // 操作按钮：只在批次**仍停在入场阶段**时给。批次已推进（自动确认→判定→
+    // 隔离→复检→放行→归档）后，结果卡片保留供回看，但这三个按钮点下去必然
+    // 409「状态冲突」（2026-10-15 反馈：流程都走完了，底部还挂着它们）。
+    // 状态未知（旧调用）时保持原样，不误删。
+    const canAct = !batch.status || batch.status === 'pending_intake';
+    const actions = canAct
+      ? WB.h('div', { class: 'actions' },
+        WB.h('button', { class: 'primary', onclick: () => _intakeAct(batch, 'confirm'), text: '确认入场' }),
+        WB.h('button', { class: 'danger', onclick: () => _intakeAct(batch, 'reject'), text: '拒绝入场' }),
+        WB.h('button', { onclick: () => WB._loadDetail(batch.batch_id), text: '重新提交' }))
+      : WB.h('div', { class: 'hint-line muted', text: '批次已推进到后续节点，此处仅供回看' });
     body.append(actions);
   }
 
@@ -460,10 +482,19 @@ WB.stages.intake = (function () {
     card.append(body);
     if (batch.status === 'pending_intake') {
       // 两条入口共用同一次提交：手工粘贴（原样）与文件导入（仪器导出的 CSV）
+      // 提交期间置灰并显示进度：真模型逐行抽取实测 ≈11.6 秒/行，弹窗在 onOk
+      // 返回后就关了，反馈必须落在面板上，否则用户看到的就是「点了没反应」。
+      const submitting = WB.state.intakeSubmitting === batch.batch_id;
       body.append(WB.h('div', { class: 'actions' },
-        WB.h('button', { class: 'primary', onclick: () => submitForm(batch), text: '提交送检数据' }),
-        WB.h('button', { onclick: () => importForm(batch), text: '从 CSV 导入' })));
-      body.append(WB.h('div', { class: 'hint-line', text: '提交后展示置信度与低置信清单；确认/拒绝入口随之出现' }));
+        WB.h('button', { class: 'primary', onclick: () => submitForm(batch), text: '提交送检数据',
+          ...(submitting ? { disabled: true } : {}) }),
+        WB.h('button', { onclick: () => importForm(batch), text: '从 CSV 导入',
+          ...(submitting ? { disabled: true } : {}) })));
+      body.append(WB.h('div', { class: 'hint-line', text: submitting
+        ? (WB.state.intakeSubmittingMode === 'structured'
+          ? '提交中：结构化数据入库，通常几秒内完成，请勿关闭页面'
+          : '提交中：AI 逐行抽取（真模型约 10 秒/行），请勿关闭页面')
+        : '提交后展示置信度与低置信清单；确认/拒绝入口随之出现' }));
     } else {
       // 降级：组件条码 + 入场状态（§1.3 边界；置信度不重建）
       const inspections = batch.inspections || [];
@@ -526,14 +557,14 @@ WB.stages.intake = (function () {
 
   // parseInspectionCsv / decodeCsvBytes 导出以便单测（纯函数，不碰 DOM）；
   // appendResultCard 供 renderCenter 统一绘制「入场结果」卡片（异步重渲染
-  // 不会再把它抹掉）；_intakeSubmit 供导入/粘贴两条通道共用。
+  // 不会再把它抹掉）；_sendIntake 供三条提交通道（粘贴/CSV/原始单据）共用。
   return {
     stageIndex: stageIndex,
     render: render,
     parseInspectionCsv: parseInspectionCsv,
     decodeCsvBytes: decodeCsvBytes,
     appendResultCard: appendResultCard,
-    _intakeSubmit: _intakeSubmit,
+    _sendIntake: _sendIntake,
   };
 })();
 

@@ -18,6 +18,9 @@ WB.state = {
   // 必须进状态：旧实现把卡片直接 append 到 mainPane，_loadDetail 的异步回调
   // 随后 replaceChildren 整个抹掉 —— 用户看到的就是「提交后无反馈」。
   intakeResult: null,
+  // 送检提交进行中的批次 id：真模型逐行抽取实测 ≈11.6 秒/行，弹窗一关就没反馈，
+  // 所以"提交中"必须是面板级状态（见 intake.js 的 _sendIntake）。
+  intakeSubmitting: null,
 };
 
 /* ---- URL 参数读写（?batch=<id>，刷新恢复选中批次）---- */
@@ -123,14 +126,14 @@ WB.renderCenter = function (detail, listitem, panelDom) {
   // 而走查文档 C1 第 3 步要看的正是这张卡）。清除发生在三处：换批次
   // （selectBatch）、回总览（goHome）、确认/拒绝入场（intake.js 的 _intakeAct）。
   if (WB.state.intakeResult && WB.state.intakeResult.batch_id === detail.batch_id) {
-    WB.stages.intake.appendResultCard(main, WB.state.intakeResult.data);
+    WB.stages.intake.appendResultCard(main, WB.state.intakeResult.data, detail);
   }
 };
 
 /* ---- 报告页（工作台主区）：仅展示当前批次拥有的报告 + 生成入口 + 查看正文 ----
    全部报告列表放在左侧侧栏导航（跨批次），主区保持聚焦当前批次。
    主区数据从全局 WB.state.reports 按 batch_id 过滤，避免双张请求。 */
-WB._reportPage = function (detail) {
+WB._reportPage = function (detail, opts) {
   const card = WB.h('div', { class: 'card stage-panel report-view-page' });
   card.append(WB.h('h3', { text: '批次报告 · ' + detail.batch_no }));
   card.append(WB.h('div', { class: 'desc', text: '本批次已生成的报告；点击「查看正文」在工作台展开对应报告内容' }));
@@ -159,6 +162,14 @@ WB._reportPage = function (detail) {
           WB.h('button', { class: 'newbtn', style: 'font-size:12px;padding:1px 8px;margin-left:8px',
             onclick: function () { WB._expandReportInMain(r, detail); }, text: '查看正文' })));
       });
+      // 报告节点（autoExpand）：直接展开最新一版正文——"报告节点就该看到报告内容"，
+      // 不该还要再点一次。多版本时以版本号最大者为准；左侧报告 tab 不传该选项。
+      if (opts && opts.autoExpand) {
+        const latest = list.slice().sort(function (a, b) {
+          return (b.version || 1) - (a.version || 1);
+        })[0];
+        WB._expandReportInMain(latest, detail);
+      }
     }
   });
   // 生成入口：基于当前批次
