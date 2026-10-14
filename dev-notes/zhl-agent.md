@@ -639,3 +639,9 @@
 
 ### 翻车与返工
 - PowerShell 5.1 下 uv run python -c 多行 CJK 字符串反复解析报错 → 改临时 _tmp_*.py 脚本文件替换后删（dev-notes 既有做法）。
+## 2026-10-14 · P0 缺口修复收口（闭环流转 + 异常自动创建，计划 2026-10-14-p0-closure-fixes）
+
+1. **功能演示命令**：`.venv\Scripts\python.exe -m pytest tests -q`（267 passed，含新增 tests/e2e/test_closure.py 2 例 + tests/workflow/test_auto_incident.py 4 例）；工作台走通 隔离→整改→复检→补勾验证→关闭→放行→报告→归档。
+2. **测试结果**：全量 267 passed / 0 failed；样例三 e2e 改走 close API（移除直接写库绕过）。
+3. **dev-notes 路径**：本文件（本节）+ .superpowers/sdd/2026-10-14-p0-closure-fixes/progress.md 执行账本。
+4. **实现说明**：close 端点（五条件 + 批次联动，人工签署）；capa 待复检态补勾扩展；ensure_incident 幂等自动创建（rule_fail/sample_fail/rule_missing/data_consistency 四触发，优先级与孤儿防护见模块 docstring）；工作台待复检卡片新增补勾与关闭操作（缺失条件逐条中文展示）。设计文档 §9.8 已收口（第 3 项 SN 组件级隔离待修复）。
