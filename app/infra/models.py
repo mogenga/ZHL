@@ -67,6 +67,7 @@ def _ts(col_default_server=True) -> Mapped[datetime | None]:
 # ---------------------------------------------------------------------------
 
 RULE_STATUS = ("draft", "published", "disabled")
+RULE_VERSION_ACTION = ("created", "published", "disabled")
 BATCH_STATUS = (
     "draft",
     "pending_intake",
@@ -513,6 +514,24 @@ class Report(Base):
     )
 
 
+# ---------------------------------------------------------------------------
+# 5.1.13 rule_version_events（规则版本管理审计）
+# ---------------------------------------------------------------------------
+
+
+class RuleVersionEvent(Base):
+    __tablename__ = "rule_version_events"
+
+    event_id: Mapped[uuid.UUID] = _uuid_pk()
+    rule_version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("quality_rule_versions.rule_version_id"), nullable=False
+    )
+    action: Mapped[str] = _enum(RULE_VERSION_ACTION)
+    operator: Mapped[str] = mapped_column(String, nullable=False)
+    detail: Mapped[dict] = mapped_column(JSONB_T, nullable=False, default=dict)
+    created_at: Mapped[datetime] = _ts()
+
+
 __all__ = [
     "Base",
     "QualityRuleVersion",
@@ -527,4 +546,6 @@ __all__ = [
     "IsoSamplingRow",
     "AgentTaskTrace",
     "Report",
+    "RuleVersionEvent",
+    "RULE_VERSION_ACTION",
 ]

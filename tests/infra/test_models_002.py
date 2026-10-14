@@ -92,8 +92,8 @@ def test_create_all_includes_new_columns() -> None:
 
 
 def test_models_are_distinct_and_complete() -> None:
-    """The 12 models still registered; new columns do not break the count."""
-    expected_12 = {
+    """The 13 models still registered; new columns do not break the count."""
+    expected_13 = {
         "quality_rule_versions",
         "evidence",
         "delivery_batches",
@@ -106,5 +106,6 @@ def test_models_are_distinct_and_complete() -> None:
         "iso_sampling_table",
         "agent_task_traces",
         "reports",
+        "rule_version_events",
     }
-    assert expected_12 == set(Base.metadata.tables.keys())
+    assert expected_13 == set(Base.metadata.tables.keys())

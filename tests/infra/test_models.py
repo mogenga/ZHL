@@ -26,12 +26,13 @@ from app.infra.models import (
     QualityRuleVersion,
     Reinspection,
     Report,
+    RuleVersionEvent,
     Sample,
     SampleConclusion,
 )
 
 
-def test_all_12_tables_registered() -> None:
+def test_all_13_tables_registered() -> None:
     expected = {
         "quality_rule_versions",
         "evidence",
@@ -45,6 +46,7 @@ def test_all_12_tables_registered() -> None:
         "iso_sampling_table",
         "agent_task_traces",
         "reports",
+        "rule_version_events",
     }
     assert expected == set(Base.metadata.tables.keys()), sorted(Base.metadata.tables.keys())
 
@@ -73,6 +75,7 @@ def test_create_all_on_sqlite() -> None:
         "iso_sampling_table",
         "agent_task_traces",
         "reports",
+        "rule_version_events",
     }
     assert expected.issubset(names), expected - names
     del sqlite3
@@ -94,7 +97,8 @@ def test_models_are_distinct_orm_classes() -> None:
         IsoSamplingRow,
         AgentTaskTrace,
         Report,
+        RuleVersionEvent,
     ]
     table_names = [m.__tablename__ for m in models]
-    assert len(table_names) == 12
-    assert len(set(table_names)) == 12
+    assert len(table_names) == 13
+    assert len(set(table_names)) == 13
