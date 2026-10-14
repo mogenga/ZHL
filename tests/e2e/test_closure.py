@@ -321,6 +321,37 @@ def test_capa_blocked_after_batch_archived() -> None:
         engine.dispose()
 
 
+def test_close_names_all_missing_conditions_at_once() -> None:
+    """M-5：多缺失组合一次指名（owner/capa_fields/复检/验证/临时措施）。"""
+    sample = load_acceptance("incident")
+    client, session, engine = _client()
+    try:
+        _seed_batch(session, sample, batch_no=sample["batch"]["batch_id"])
+        inc_id = _create_incident(client, sample["incidents"][0]["affected_sns"][0])
+        _isolate(client, inc_id)
+        # 脚手架：跳过 assign/capa，直接落到 pending_recheck（无责任人、
+        # 无 CAPA 字段、无复检、未验证、无临时措施）
+        row = session.get(QualityIncident, inc_id)
+        row.status = "pending_recheck"
+        session.commit()
+
+        r = _close(client, inc_id)
+        assert r.status_code == 409, r.text
+        missing = set(r.json()["detail"]["missing"])
+        assert {
+            "owner",
+            "capa_fields",
+            "reinspection_record",
+            "capa_verified",
+            "containment_action",
+        } <= missing
+        # 脚手架跳过了 assign/capa，批次从未离开隔离态——close 不改批次状态
+        assert session.get(DeliveryBatch, B1).status == "isolated"
+    finally:
+        session.close()
+        engine.dispose()
+
+
 def test_close_gates_on_all_incidents_terminal() -> None:
     """批次存在第二只未关闭异常时，close 单只不推进批次（Review Focus #2）。"""
     sample = load_acceptance("incident")

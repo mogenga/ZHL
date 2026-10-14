@@ -659,3 +659,10 @@
 2. **测试结果**：全量 271 passed；test_reinspection_fail_then_close_is_rejected 顺序钉住 M-7 语义，test_capa_blocked_after_batch_archived RED→GREEN。
 3. **dev-notes 路径**：本文件（本节）。
 4. **实现说明**：close 与 reinspections fail 两处 incident 读取加 with_for_update（行锁互斥）；capa 待复检分支挂归档守卫。并发场景为推演（sqlite 单连接不可并发复现），PG 下由行锁保证。
+
+## 2026-10-14 · 遗留事项修复 T3（M-5 补盲 + §9.8 收口）
+
+1. **功能演示命令**：`D:\jsai\ZHL\.venv\Scripts\python.exe -m pytest tests`（272 passed）。
+2. **测试结果**：全量 272 passed；test_close_names_all_missing_conditions_at_once 一次指名 5 项缺失。
+3. **dev-notes 路径**：本文件（本节）。
+4. **实现说明**：§9.8 第 3 项收口；Ruling——scaffold 用例跳过 assign/capa 时批次停留在 isolated（close 不改批次状态），测试按此断言。
